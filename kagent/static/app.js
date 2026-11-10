@@ -47,8 +47,8 @@ const guard = (fn) => async (ev) => {
 };
 
 const fmtTime = (s) => (s ? new Date(s).toLocaleString("vi-VN") : "—");
-const CLASS = { success: "ok", ok: "ok", active: "ok", auto: "ok", approved: "ok", published: "ok", failure: "bad", error: "bad", blocked: "bad", denied: "bad", rejected: "bad", deprecated: "bad", invalid: "bad", pending: "warn", candidate: "warn", pending_review: "warn", partial: "warn", expired: "warn" };
-const LABEL = { success: "thành công", failure: "thất bại", partial: "một phần", unknown: "chưa rõ", ok: "ok", error: "lỗi", blocked: "bị chặn", pending: "chờ duyệt", auto: "tự chạy", approved: "đã duyệt", denied: "từ chối", expired: "hết hạn", invalid: "sai tham số", candidate: "ứng viên", active: "hiệu lực", deprecated: "hết hiệu lực", rejected: "bị loại", pending_review: "chờ duyệt", published: "đã publish", noop: "không đổi", stale: "đã cũ", reverted: "đã hoàn tác" };
+const CLASS = { proposed: "warn", disabled: "bad", success: "ok", ok: "ok", active: "ok", auto: "ok", approved: "ok", published: "ok", failure: "bad", error: "bad", blocked: "bad", denied: "bad", rejected: "bad", deprecated: "bad", invalid: "bad", pending: "warn", candidate: "warn", pending_review: "warn", partial: "warn", expired: "warn" };
+const LABEL = { success: "thành công", failure: "thất bại", partial: "một phần", unknown: "chưa rõ", ok: "ok", error: "lỗi", blocked: "bị chặn", pending: "chờ duyệt", auto: "tự chạy", approved: "đã duyệt", denied: "từ chối", expired: "hết hạn", invalid: "sai tham số", candidate: "ứng viên", active: "hiệu lực", deprecated: "hết hiệu lực", rejected: "bị loại", pending_review: "chờ duyệt", proposed: "đề xuất", disabled: "đã tắt", published: "đã publish", noop: "không đổi", stale: "đã cũ", reverted: "đã hoàn tác" };
 const badge = (v) => h("span", { class: "badge " + (CLASS[v] || "") }, LABEL[v] || v);
 const isAdmin = () => state.me.is_org_admin || state.tenant.roles.includes("tenant_admin");
 
@@ -293,6 +293,65 @@ function toolCatalogSection() {
     h("div", { class: "row" }, search, filter), box);
 }
 
+function learnedToolsSection(personalOnly) {
+  const box = h("div", {}, h("div", { class: "card muted" }, "Đang tải…"));
+  const tierClass = (r) => ({ R3: "warn", R4: "bad" }[r] || "");
+  const load = async () => {
+    const list = (await api("GET", "/api/learned-tools")).filter((t) => (personalOnly ? t.personal : !t.personal));
+    box.replaceChildren(...(list.length ? list.map(item) : [h("div", { class: "card muted" }, personalOnly
+      ? "Bạn chưa có công cụ riêng. Trong chat, bấm biểu tượng lưu dưới một câu trả lời có chạy công cụ để tạo."
+      : "Chưa có công cụ học được. Hệ thống tự đề xuất khi một chuỗi thao tác giống nhau thành công từ 3 lần.")]));
+  };
+  const set = (t, status) => guard(async () => { await api("PATCH", `/api/learned-tools/${t.id}`, { status }); toast("Đã cập nhật"); await load(); });
+  function item(t) {
+    const canEdit = t.personal || isAdmin();
+    const actions = !canEdit ? [] : t.status === "proposed" ? [h("button", { type: "button", class: "small-btn", onclick: set(t, "active") }, "Duyệt"), h("button", { type: "button", class: "danger small-btn", onclick: set(t, "rejected") }, "Từ chối")]
+      : t.status === "active" ? [h("button", { type: "button", class: "ghost small-btn", onclick: set(t, "disabled") }, "Tắt")]
+      : t.status === "disabled" ? [h("button", { type: "button", class: "small-btn", onclick: set(t, "active") }, "Bật")] : [];
+    const params = Object.entries(t.params);
+    return h("div", { class: "card" },
+      h("div", { class: "tool-head" }, h("code", {}, t.name), badge(t.status), h("span", { class: "badge " + tierClass(t.risk_tier) }, t.risk_tier),
+        h("span", { class: "badge" }, t.origin === "auto" ? "tự đề xuất" : "lưu từ chat"),
+        t.success_rate !== null && h("span", { class: "small" }, `thành công ${Math.round(t.success_rate * 100)}% trên ${t.uses} lần`), h("span", { class: "spacer" }), actions),
+      h("div", { class: "small" }, t.description), h("div", { class: "small" }, "Các bước: ", t.flow),
+      params.length > 0 && h("div", { class: "small" }, "Tham số: " + params.map(([k, v]) => `${k} (${v.type}${v.description ? `, ${v.description}` : ""})`).join("; ")),
+      t.note && h("div", { class: "small warn-text" }, t.note),
+      h("details", {}, h("summary", { class: "small" }, "Chi tiết các bước"), h("pre", {}, JSON.stringify(t.steps, null, 1))));
+  }
+  load().catch((e) => toast(e.message, true));
+  return h("div", {}, h("p", { class: "small" }, "Mỗi bước của công cụ học được vẫn đi qua gateway với quyền của người gọi, nên không tạo thêm quyền. Tỷ lệ thành công tụt dưới 50% thì công cụ tự tắt."), box);
+}
+
+function personalSection() {
+  const wrap = h("div");
+  (async () => {
+    const [p, memories] = await Promise.all([api("GET", "/api/me/profile"), api("GET", "/api/me/memories")]);
+    const instructions = h("textarea", { "aria-label": "Chỉ dẫn cá nhân", maxlength: 2000, value: p.instructions, placeholder: "Ví dụ: tôi là kỹ sư SRE, ưu tiên lệnh kubectl, luôn nêu rủi ro trước khi đề xuất thay đổi" });
+    const style = h("select", { "aria-label": "Phong cách trả lời" }, [["default", "Mặc định"], ["concise", "Ngắn gọn"], ["detailed", "Chi tiết"]].map(([v, l]) => h("option", { value: v, selected: v === p.style }, l)));
+    const env = h("select", { "aria-label": "Môi trường mặc định" }, ["dev", "staging", "prod"].map((e) => h("option", { selected: e === p.default_env }, e)));
+    const save = guard(async (ev) => {
+      ev.preventDefault();
+      const r = await api("PUT", "/api/me/profile", { instructions: instructions.value, style: style.value, default_env: env.value });
+      state.me.profile = r;
+      state.env = r.default_env;
+      toast("Đã lưu cá nhân hóa");
+    });
+    const forget = (m) => guard(async () => { await api("DELETE", `/api/me/memories/${m.id}`); toast("Agent đã quên ký ức này"); wrap.replaceWith(personalSection()); });
+    wrap.append(h("h2", {}, "Cá nhân hóa"),
+      h("form", { class: "card", onsubmit: save }, h("label", { class: "field" }, "Chỉ dẫn cho agent (chỉ áp dụng khi bạn chat)", instructions),
+        h("div", { class: "row" }, h("label", { class: "field" }, "Phong cách trả lời", style), h("label", { class: "field" }, "Môi trường mặc định", env)),
+        h("div", { class: "row" }, h("button", { type: "submit" }, "Lưu"))),
+      h("h2", {}, `Ký ức của bạn (${memories.length})`),
+      h("div", { class: "card" }, memories.length ? memories.map((m) => h("div", { class: "tool-item" },
+        h("div", { class: "tool-head" }, h("span", { class: "badge info" }, m.kind), badge(m.status), h("span", { class: "small" }, fmtTime(m.recorded_at)), h("span", { class: "spacer" }),
+          h("button", { type: "button", class: "ghost small-btn", onclick: forget(m) }, "Quên")), h("div", {}, m.content)))
+        : h("div", { class: "muted" }, "Agent chưa ghi nhớ gì riêng về bạn. Nói với agent kiểu “tôi thích…”, “tôi muốn…” để nó ghi nhớ."),
+        h("p", { class: "small" }, "Ký ức cá nhân chỉ bạn thấy, chỉ áp dụng khi bạn chat và được học ở lần chạy học nền tiếp theo.")),
+      h("h2", {}, "Công cụ của bạn"), learnedToolsSection(true));
+  })().catch((e) => toast(e.message, true));
+  return wrap;
+}
+
 VIEWS.policy = async (main) => {
   const [tools, p] = await Promise.all([api("GET", "/api/tools"), api("GET", "/api/policy")]);
   const cellText = (c) => (typeof c === "string" ? ({ auto: "tự động", ask: "luôn hỏi", block: "chặn" }[c]) : c.ask_below !== undefined ? `hỏi nếu < ${c.ask_below}` : `hỏi, ${c.ask} người`);
@@ -311,6 +370,7 @@ VIEWS.policy = async (main) => {
     isAdmin() && h("div", { class: "row" }, h("button", { class: "ghost", onclick: setFlag("change_freeze", !p.change_freeze) }, p.change_freeze ? "Tắt change freeze" : "Bật change freeze"), h("button", { class: "ghost", onclick: setFlag("auto_promote", !p.auto_promote) }, p.auto_promote ? "Tắt tự động thăng hạng" : "Bật tự động thăng hạng"))),
     h("h2", {}, "Thử quyết định"), h("div", { class: "card" }, h("div", { class: "row" }, simTool, simEnv, simConf, h("button", { class: "ghost", onclick: sim }, "Thử")), simOut),
     isAdmin() && h("h2", {}, "Overlay của tenant (chỉ được siết)"), isAdmin() && h("div", { class: "card" }, editor, h("div", { class: "row" }, h("button", { onclick: save }, "Lưu"))),
+    h("h2", {}, "Công cụ học được"), learnedToolsSection(false),
     h("h2", {}, "Danh mục công cụ"), toolCatalogSection());
 };
 
@@ -383,7 +443,7 @@ VIEWS.account = async (main) => {
     toast("Đã đổi mật khẩu, các phiên khác đã bị đăng xuất");
   });
   const field = (label, input) => h("label", { class: "field" }, label, input);
-  main.append(h("h2", {}, "Đổi mật khẩu"), h("form", { class: "card", onsubmit: submit },
+  main.append(personalSection(), h("h2", {}, "Đổi mật khẩu"), h("form", { class: "card", onsubmit: submit },
     h("div", { class: "row" }, field("Mật khẩu hiện tại", current), field("Mật khẩu mới (ít nhất 12 ký tự)", next), field("Nhập lại mật khẩu mới", again)),
     h("div", { class: "row" }, h("button", { type: "submit" }, "Đổi mật khẩu"))));
 };
@@ -392,6 +452,7 @@ async function boot() {
   try { state.me = await api("GET", "/api/me"); } catch { return renderLogin(); }
   if (!state.me.tenants.length) { root.replaceChildren(h("div", { class: "card login" }, "Tài khoản chưa thuộc tenant nào.")); return; }
   state.tenant = state.tenant || state.me.tenants[0];
+  state.env = (state.me.profile && state.me.profile.default_env) || "dev";
   renderShell();
 }
 boot();

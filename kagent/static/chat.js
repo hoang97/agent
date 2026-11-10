@@ -15,6 +15,7 @@ const ICONS = {
   trash: "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13",
   chevron: "M9 6l6 6-6 6",
   down_arrow: "M12 5v14M5 12l7 7 7-7",
+  save: "M6 4h12v16l-6-4-6 4z",
 };
 
 function icon(name) {
@@ -116,11 +117,17 @@ function renderMarkdown(text) {
 }
 
 function activityView(steps, running) {
-  if (!steps.length && !running) return null;
-  const summary = running ? `Đang chạy ${running}…` : `Đã dùng ${steps.length} công cụ`;
+  running = running || [];
+  if (!steps.length && !running.length) return null;
+  const parallel = steps.filter((s) => s.parallel).length;
+  const summary = running.length ? `Đang chạy ${running.join(", ")}…`
+    : `Đã dùng ${steps.length} công cụ` + (parallel ? ` · ${parallel} chạy song song` : "");
   const rows = steps.map((s) => h("div", { class: "tool-row" },
-    h("div", { class: "tool-title" }, h("code", {}, s.tool), s.risk_tier && h("span", { class: "badge" }, s.risk_tier), badge(s.status), s.untrusted && h("span", { class: "badge warn" }, "nội dung ngoài")),
+    h("div", { class: "tool-title" }, h("code", {}, s.tool), s.risk_tier && h("span", { class: "badge" }, s.risk_tier), badge(s.status),
+      s.parallel && h("span", { class: "badge info" }, "song song"), s.learned && h("span", { class: "badge info" }, "công cụ học được"),
+      s.untrusted && h("span", { class: "badge warn" }, "nội dung ngoài")),
     s.reasons && s.reasons.length > 0 && h("div", { class: "small" }, s.reasons.join("; ")),
+    s.steps && h("div", { class: "sub-steps" }, s.steps.map((sub) => h("div", { class: "small" }, "↳ ", h("code", {}, sub.tool), " ", badge(sub.status)))),
     h("pre", {}, JSON.stringify(s.result || s.args, null, 1))));
   return h("details", { class: "activity" + (running ? " running" : "") }, h("summary", {}, icon("chevron"), summary), rows);
 }
@@ -195,7 +202,25 @@ function chatView(main) {
       row.after(box);
       area.focus();
     });
+    const savable = m.steps.some((s) => s.status === "ok" && !s.learned);
+    const saveTool = savable && iconButton("save", "Lưu thành công cụ", () => {
+      if (row.nextElementSibling && row.nextElementSibling.classList.contains("save-box")) return;
+      const name = h("input", { placeholder: "Tên công cụ, ví dụ: kiem tra don loi", "aria-label": "Tên công cụ", class: "wide" });
+      const scope = h("select", { "aria-label": "Phạm vi" }, h("option", { value: "user" }, "Chỉ mình tôi"), h("option", { value: "tenant" }, "Cả nhóm (cần admin duyệt)"));
+      const box = h("div", { class: "edit-box save-box" },
+        h("div", { class: "small" }, "Lưu các bước công cụ đã chạy thành công ở lượt này thành một công cụ dùng lại được. Giá trị bạn đã gõ trong yêu cầu sẽ thành tham số."),
+        h("div", { class: "row" }, name, scope,
+          h("button", { type: "button", class: "ghost", onclick: () => box.remove() }, "Hủy"),
+          h("button", { type: "button", onclick: guard(async () => {
+            const tool = await api("POST", "/api/learned-tools/from-episode", { episode_id: m.id, name: name.value || null, scope: scope.value });
+            box.remove();
+            toast(tool.status === "active" ? `Đã tạo ${tool.name}. Nhắc tên này trong chat để agent dùng.` : `Đã gửi ${tool.name} cho admin duyệt.`);
+          }) }, "Lưu")));
+      row.after(box);
+      name.focus();
+    });
     row.append(copyBtn, up, down, edit);
+    if (saveTool) row.append(saveTool);
     if (m.task === lastTask) row.append(iconButton("retry", "Gửi lại", () => send(m.task)));
     row.append(h("span", { class: "meta" }, `${m.env} · ${m.ku_used} KU${m.tokens ? ` · ${m.tokens} token` : ""}`));
     return row;
@@ -254,7 +279,7 @@ function chatView(main) {
     lastTask = text;
     thread.append(userBubble(text));
     const typing = h("div", { class: "typing", "aria-label": "Agent đang trả lời" }, h("i"), h("i"), h("i"));
-    const live = { text: "", steps: [], running: null };
+    const live = { text: "", steps: [], running: [] };
     const activitySlot = h("div");
     const approvalsSlot = h("div");
     const body = h("div", { class: "prose" }, typing);
@@ -288,8 +313,13 @@ function chatView(main) {
         state.conversationId = ev.conversation_id;
         if (isNew) refreshConversations();
       } else if (ev.type === "delta") { live.text += ev.text; queuePaint(); }
-      else if (ev.type === "tool_start") { live.running = ev.tool; paintActivity(); }
-      else if (ev.type === "tool_end") { live.running = null; live.steps.push(ev.step); paintActivity(); }
+      else if (ev.type === "tool_start") { live.running.push(ev.tool); paintActivity(); }
+      else if (ev.type === "tool_end") {
+        const i = live.running.indexOf(ev.step.tool);
+        if (i !== -1) live.running.splice(i, 1);
+        live.steps.push(ev.step);
+        paintActivity();
+      }
       else if (ev.type === "done") {
         if (frame) cancelAnimationFrame(frame);
         blocks.set(ev.message.id, liveEl);

@@ -170,6 +170,9 @@ input.wide { flex: 1; min-width: 220px; }
 .tool-perms select { padding: 1px 6px; font-size: 12px; }
 .sep { margin-left: 10px; }
 .warn-text { color: var(--warn); }
+.card > .tool-item:first-child, .card > h3 + .tool-item { border-top: 0; padding-top: 0; }
+.sub-steps { margin: 2px 0 0 4px; }
+.card > details { margin-top: 6px; }
 
 @media (max-width: 760px) {
   .sidebar { position: fixed; inset: 0 auto 0 0; transform: translateX(-100%); transition: transform .18s; width: min(290px, 86vw); }
