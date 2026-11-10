@@ -1,6 +1,6 @@
 "use strict";
 // Giao diện một trang. Mọi nội dung động đi qua textContent để tránh XSS.
-const state = { me: null, tenant: null, tab: "agent" };
+const state = { me: null, tenant: null, tab: "chat", conversationId: null, env: "dev" };
 const root = document.getElementById("app");
 
 function h(tag, attrs, ...kids) {
@@ -65,19 +65,68 @@ function renderLogin() {
   user.focus();
 }
 
-const TABS = [["agent", "Agent"], ["episodes", "Nhật ký"], ["knowledge", "Tri thức"], ["approvals", "Duyệt lệnh"], ["compile", "Biên dịch L2"], ["policy", "Công cụ & Chính sách"], ["metrics", "Đo lường"], ["audit", "Audit"], ["settings", "Cài đặt"], ["account", "Tài khoản"]];
+const TABS = [["episodes", "Nhật ký"], ["knowledge", "Tri thức"], ["approvals", "Duyệt lệnh"], ["compile", "Biên dịch L2"], ["policy", "Công cụ & Chính sách"], ["metrics", "Đo lường"], ["audit", "Audit"], ["settings", "Cài đặt"], ["account", "Tài khoản"]];
 const VIEWS = {};
+let conversationList = null;
+
+function closeSidebar() { document.querySelector(".sidebar")?.classList.remove("open"); document.querySelector(".scrim")?.classList.remove("open"); }
+function go(tab, conversationId) { state.tab = tab; if (conversationId !== undefined) state.conversationId = conversationId; renderShell(); }
+
+function dateGroup(iso) {
+  const days = (Date.now() - new Date(iso).getTime()) / 86400000;
+  if (new Date(iso).toDateString() === new Date().toDateString()) return "Hôm nay";
+  return days < 7 ? "7 ngày qua" : days < 30 ? "30 ngày qua" : "Cũ hơn";
+}
+
+function conversationItem(c) {
+  const rename = guard(async () => {
+    const input = h("input", { class: "rename", value: c.title, "aria-label": "Tên hội thoại" });
+    const save = async () => { const title = input.value.trim(); if (title && title !== c.title) await api("PATCH", `/api/conversations/${c.id}`, { title }); refreshConversations(); };
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") input.blur(); if (e.key === "Escape") { input.value = c.title; input.blur(); } });
+    input.addEventListener("blur", () => save().catch((e) => toast(e.message, true)));
+    item.replaceChildren(input);
+    input.select();
+  });
+  const remove = guard(async () => {
+    await api("DELETE", `/api/conversations/${c.id}`);
+    toast("Đã xóa hội thoại khỏi danh sách");
+    if (state.conversationId === c.id) go("chat", null); else refreshConversations();
+  });
+  const item = h("div", { class: "conv" + (state.tab === "chat" && state.conversationId === c.id ? " active" : "") },
+    h("button", { type: "button", class: "conv-open", title: c.title, onclick: () => { closeSidebar(); go("chat", c.id); } }, c.title),
+    iconButton("edit", "Đổi tên", rename), iconButton("trash", "Xóa", remove));
+  return item;
+}
+
+async function refreshConversations() {
+  if (!conversationList) return;
+  const list = await api("GET", "/api/conversations");
+  const groups = new Map();
+  for (const c of list) { const g = dateGroup(c.updated_at); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(c); }
+  conversationList.replaceChildren(...(list.length ? [...groups].flatMap(([g, items]) => [h("div", { class: "group" }, g), ...items.map(conversationItem)]) : [h("div", { class: "small pad" }, "Chưa có hội thoại nào.")]));
+}
 
 function renderShell() {
-  const select = h("select", { "aria-label": "Tenant", onchange: (e) => { state.tenant = state.me.tenants.find((t) => t.id === e.target.value); renderShell(); } },
+  const tenants = h("select", { "aria-label": "Tenant", onchange: (e) => { state.tenant = state.me.tenants.find((t) => t.id === e.target.value); go("chat", null); } },
     state.me.tenants.map((t) => h("option", { value: t.id, selected: t.id === state.tenant.id }, t.name)));
-  const logout = guard(async () => { await api("POST", "/api/auth/logout"); state.me = null; renderLogin(); });
-  const header = h("header", { class: "top" }, h("h1", {}, "Knowledge Agent"), select,
-    h("span", { class: "badge info" }, "Model: " + ({ anthropic: "Claude", openai: "OpenAI" }[state.me.llm_provider] || "heuristic (không dùng LLM)")),
-    h("span", { class: "spacer" }), h("span", { class: "small" }, state.me.username), h("button", { class: "ghost", onclick: logout }, "Đăng xuất"));
-  const nav = h("nav", { class: "tabs" }, TABS.filter(([id]) => id !== "settings" || state.me.is_org_admin).map(([id, label]) => h("button", { class: state.tab === id ? "active" : "", onclick: () => { state.tab = id; renderShell(); } }, label)));
-  const main = h("main");
-  root.replaceChildren(header, nav, main);
+  const logout = guard(async () => { await api("POST", "/api/auth/logout"); state.me = null; state.conversationId = null; state.tab = "chat"; renderLogin(); });
+  conversationList = h("div", { class: "conv-list" });
+  const pages = TABS.filter(([id]) => id !== "settings" || state.me.is_org_admin);
+  const adminOpen = pages.some(([id]) => id === state.tab);
+  const sidebar = h("aside", { class: "sidebar" },
+    h("div", { class: "brand" }, h("strong", {}, "Knowledge Agent"), tenants),
+    h("button", { type: "button", class: "new-chat", onclick: () => { closeSidebar(); go("chat", null); } }, icon("plus"), "Hội thoại mới"),
+    conversationList,
+    h("details", { class: "admin", open: adminOpen ? "" : null }, h("summary", {}, icon("chevron"), "Quản trị"),
+      pages.map(([id, label]) => h("button", { type: "button", class: "nav-item" + (state.tab === id ? " active" : ""), onclick: () => { closeSidebar(); go(id); } }, label))),
+    h("div", { class: "user" }, h("span", {}, state.me.username), h("button", { type: "button", class: "ghost small-btn", onclick: logout }, "Đăng xuất")));
+  const scrim = h("div", { class: "scrim", onclick: closeSidebar });
+  const model = { anthropic: "Claude", openai: "OpenAI" }[state.me.llm_provider] || "Heuristic";
+  const title = state.tab === "chat" ? "" : (TABS.find(([id]) => id === state.tab) || [])[1];
+  const top = h("header", { class: "top" }, iconButton("menu", "Mở danh sách", () => { sidebar.classList.add("open"); scrim.classList.add("open"); }, "menu-btn"), h("span", { class: "top-title" }, title), h("span", { class: "spacer" }), h("span", { class: "badge info" }, "Model: " + model));
+  const main = h("main", { class: state.tab === "chat" ? "chat" : "page" });
+  root.replaceChildren(h("div", { class: "layout" }, scrim, sidebar, h("div", { class: "content" }, top, main)));
+  refreshConversations().catch((e) => toast(e.message, true));
   VIEWS[state.tab](main).catch((e) => toast(e.message, true));
 }
 
@@ -109,20 +158,7 @@ function episodeCard(ep, onDone) {
     h("div", { class: "small" }, `KU đã nạp: ${ep.ku_used.length} · Token: ${ep.tokens}`), feedbackBox(ep, onDone));
 }
 
-VIEWS.agent = async (main) => {
-  const task = h("textarea", { placeholder: "Ví dụ: xem pod trong namespace default; scale deployment web lên 5 replica; hoặc: luôn thông báo trước khi restart", "aria-label": "Nhiệm vụ" });
-  const env = h("select", { "aria-label": "Môi trường" }, ["dev", "staging", "prod"].map((e) => h("option", {}, e)));
-  const project = h("input", { placeholder: "Dự án (tuỳ chọn)", "aria-label": "Dự án" });
-  const out = h("div");
-  const run = guard(async () => {
-    if (!task.value.trim()) throw new Error("Hãy nhập nhiệm vụ");
-    const ep = await api("POST", "/api/runs", { task: task.value, env: env.value, project: project.value || null });
-    out.replaceChildren(episodeCard(ep));
-  });
-  const notice = state.me.llm_provider === "heuristic" && h("div", { class: "notice" }, "Chưa có LLM key nên agent chạy chế độ heuristic: lập kế hoạch theo từ khóa, không gọi LLM." + (state.me.is_org_admin ? " Nhập key ở tab Cài đặt." : ""));
-  main.append(h("h2", {}, "Giao nhiệm vụ cho agent"), notice || "", h("div", { class: "notice" }, "Công cụ là bản mô phỏng: không lệnh nào chạm hạ tầng thật."),
-    h("div", { class: "card" }, task, h("div", { class: "row" }, env, project, h("button", { onclick: run }, "Chạy"))), out);
-};
+VIEWS.chat = chatView;
 
 VIEWS.episodes = async (main) => {
   const list = await api("GET", "/api/episodes");
