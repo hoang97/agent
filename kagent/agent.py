@@ -9,7 +9,7 @@ from dataclasses import replace
 from . import compiler, db, gateway, learned, llm
 from .config import settings
 from .retrieval import retrieve
-from .tools import TOOLS, callable_by
+from .tools import callable_by
 
 
 class QuotaExceeded(Exception):
@@ -129,6 +129,11 @@ def tokens_today(conn, tenant_id: str) -> int:
     return conn.execute("SELECT coalesce(sum(tokens),0) t FROM episode WHERE tenant_id=? AND started_at>=?", (tenant_id, start)).fetchone()["t"]
 
 
+def _untrusted_tool(conn, tenant_id: str, tool: str) -> bool:
+    r = conn.execute("SELECT untrusted_output FROM tool_registry WHERE tenant_id=? AND tool=?", (tenant_id, tool)).fetchone()
+    return bool(r and r["untrusted_output"])
+
+
 def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
     """Các lượt gần nhất trong ngân sách cố định, gồm kết quả các lệnh đã được duyệt sau đó."""
     empty = {"messages": [], "tainted": False, "last_task": ""}
@@ -154,7 +159,7 @@ def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
         turns.insert(0, (ep["input"]["task"], answer))
         # Nội dung untrusted nằm trong lịch sử vẫn có thể lái kế hoạch của lượt sau.
         tainted = tainted or any(s.get("untrusted") for s in ep["trace"]) or any(
-            a["status"] == "approved" and a["tool"] in TOOLS and TOOLS[a["tool"]].untrusted_output for a in approvals)
+            a["status"] == "approved" and _untrusted_tool(conn, tenant_id, a["tool"]) for a in approvals)
     messages = [m for task, answer in turns for m in ({"role": "user", "content": task}, {"role": "assistant", "content": answer})]
     return {"messages": messages, "tainted": tainted, "last_task": turns[-1][0] if turns else ""}
 
@@ -234,8 +239,9 @@ def run_task(conn, tenant_id: str, user_id: str, task: str, env: str = "dev", pr
         task_type, entities = route["task_type"], route["entities"]
         trace.append({"type": "route", "task_type": task_type, "entities": entities, "provider": provider.name})
         visible = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND enabled=1 AND status='active' ORDER BY tool", (tenant_id,)).fetchall()
-        tool_list = [{"tool": r["tool"], "description": r["description"], "input_schema": json.loads(r["input_schema"])}
-                     for r in visible if callable_by(r, env, roles)[0]]
+        tool_list = [{"tool": r["tool"], "description": r["description"], "input_schema": json.loads(r["input_schema"]),
+                      "canonical": r["canonical"], "action_class": r["action_class"]}
+                     for r in visible if callable_by(r, env, roles, user_id)[0]]
         tool_list += learned.for_agent(conn, tenant_id, user_id, env, roles)
         query = f"{history['last_task']} {task}".strip()
         assembled = assemble_context(conn, tenant_id, query, task_type, project=project, user_id=user_id, entities=entities,

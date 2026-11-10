@@ -143,66 +143,81 @@ class HeuristicProvider:
         return {"task_type": "general", "entities": extract_entities(task), "tokens": 0}
 
     @staticmethod
-    def plan(task: str) -> list[tuple[str, dict]]:
-        t = task.lower()
+    def plan(task: str, tools: list[dict] | None = None) -> list[tuple[str, dict]]:
+        """Lập kế hoạch theo từ khóa trên các công cụ agent được thấy; chọn công cụ theo tên template.công_cụ."""
+        by_canonical: dict[str, str] = {}
+        for tool in tools or []:
+            by_canonical.setdefault(tool.get("canonical") or tool["tool"], tool["tool"])
+        calls: list[tuple[str, dict]] = []
+
+        def add(canonicals, args):
+            for canonical in canonicals if isinstance(canonicals, tuple) else (canonicals,):
+                if canonical in by_canonical:
+                    calls.append((by_canonical[canonical], args))
+                    return
+
+        learned_names = re.findall(r"learned\.[a-z0-9_]+", task.lower())
+        # Tên công cụ học được (vd learned.list_pods_prometheus_query) không được kích hoạt từ khóa của công cụ khác.
+        t = re.sub(r"learned\.[a-z0-9_]+", " ", task.lower())
         ns_m = re.search(r"(?:namespace|ns)\s+([\w-]+)", t)
         ns = ns_m.group(1) if ns_m else "default"
         dep_m = re.search(r"(?:deployment|deploy|service|app)\s+([\w-]+)", t)
         dep = dep_m.group(1) if dep_m else "web"
-        calls: list[tuple[str, dict]] = []
-        if re.search(r"\bpods?\b|kubectl get|liệt kê|xem deployment", t) and not re.search(r"\bexec\b", t):
-            calls.append(("k8s.get", {"namespace": ns}))
+        pod_m = re.search(r"pod\s+([\w.-]+)", t)
+        ticks = re.findall(r"`([^`]+)`", task)
+        shell = [q for q in ticks if re.match(r"\s*(psql|mysql|sh|bash|ls|cat|env|ps|df)\b", q)]
+        sql = [q for q in ticks if q not in shell and re.match(r"\s*(select|with|insert|update|delete)\b", q, re.I)]
+        promql = [q for q in ticks if q not in shell and q not in sql]
+        exec_wanted = re.search(r"\bexec\b", t)
+        if re.search(r"\blogs? (?:của |of )?pod\b", t) and pod_m:
+            add("k8s.pod_logs", {"namespace": ns, "pod": pod_m.group(1)})
+        elif re.search(r"\bpods?\b|kubectl get|liệt kê pod", t) and not exec_wanted and not re.search(r"xóa pod|delete pod", t):
+            add("k8s.list_pods", {"namespace": ns})
+        if re.search(r"(xem|liệt kê|list) deployment", t):
+            add("k8s.list_deployments", {"namespace": ns})
         if re.search(r"\bscale\b|mở rộng|tăng replica", t):
             m = re.search(r"(?:lên|to|=)\s*(\d+)|(\d+)\s*(?:replica|bản)", t)
-            calls.append(("k8s.scale", {"namespace": ns, "deployment": dep, "replicas": int(next(g for g in m.groups() if g)) if m else 3}))
+            add("k8s.scale", {"namespace": ns, "deployment": dep, "replicas": int(next(g for g in m.groups() if g)) if m else 3})
         if re.search(r"restart|khởi động lại", t):
-            calls.append(("k8s.rollout_restart", {"namespace": ns, "deployment": dep}))
-        if re.search(r"xóa namespace|delete namespace", t):
-            calls.append(("k8s.delete_namespace", {"namespace": ns}))
-        elif re.search(r"\bxóa\b|\bdelete\b", t) and re.search(r"deployment|deploy|service|app", t):
-            calls.append(("k8s.delete", {"namespace": ns, "deployment": dep}))
-        ticks = re.findall(r"`([^`]+)`", task)
-        shell = [q for q in ticks if re.match(r"\s*(psql|mysql|sh|bash|ls|cat|env)\b", q)]
-        if re.search(r"\bexec\b", t):
-            pod_m = re.search(r"pod\s+([\w-]+)", t)
+            add("k8s.rollout_restart", {"namespace": ns, "deployment": dep})
+        if re.search(r"xóa pod|delete pod", t) and pod_m:
+            add("k8s.delete_pod", {"namespace": ns, "pod": pod_m.group(1)})
+        if exec_wanted:
             for command in shell or ["ls"]:
-                calls.append(("k8s.exec", {"namespace": ns, "pod": pod_m.group(1) if pod_m else dep, "command": command}))
-        for q in ticks:
-            if q in shell:
-                continue
-            if re.match(r"\s*(select|with)\b", q, re.I):
-                calls.append(("sql.query", {"sql": q}))
-            elif re.match(r"\s*(insert|update|delete)\b", q, re.I):
-                calls.append(("sql.execute", {"sql": q}))
-        for name in re.findall(r"learned\.[a-z0-9_]+", t):
+                add("k8s.exec", {"namespace": ns, "pod": pod_m.group(1) if pod_m else dep, "command": command})
+        for q in sql:
+            write = re.match(r"\s*(insert|update|delete)\b", q, re.I)
+            add(("postgres.execute", "mysql.execute") if write else ("postgres.query", "mysql.query"), {"sql": q})
+        for name in learned_names:
             args = {k: int(v) if v.isdigit() else v for k, v in re.findall(r"(\w+)=([\w./:-]+)", task)}
             calls.append((name, args))
-        if re.search(r"\bsecret\b", t):
-            calls.append(("k8s.get_secret_value", {"namespace": ns, "name": dep}))
-        if re.search(r"metric|grafana", t) and not re.search(r"tạo dashboard|create dashboard|silence", t):
-            calls.append(("grafana.query", {"query": task[:120]}))
-        if re.search(r"tạo dashboard|create dashboard", t):
-            calls.append(("grafana.create_dashboard", {"title": task[:60]}))
+        if re.search(r"metric|prometheus|promql", t):
+            add("grafana.prometheus_query", {"expr": promql[0] if promql else "up"})
+        if re.search(r"dashboard", t):
+            add("grafana.search_dashboards", {"query": ""})
         if re.search(r"silence|tắt cảnh báo", t):
-            calls.append(("grafana.silence_alert", {"alert": task[:60]}))
-        if re.search(r"\blogs?\b|kibana", t):
-            calls.append(("kibana.search", {"query": task[:120]}))
-        m = re.search(r"https?://\S+", task)
+            alert = re.search(r"(?:alert|cảnh báo)\s+([\w-]+)", t)
+            add("grafana.create_silence", {"matchers": f"alertname={alert.group(1) if alert else 'unknown'}", "duration_minutes": 60})
+        elif re.search(r"\balerts?\b|cảnh báo", t):
+            add("grafana.list_alerts", {})
+        if re.search(r"\blogs?\b|kibana|elasticsearch", t) and not re.search(r"\blogs? (?:của |of )?pod\b", t):
+            add("elasticsearch.search_logs", {"query": "error" if re.search(r"lỗi|error", t) else "*", "minutes": 60})
+        if re.search(r"(xem|liệt kê|list) index", t):
+            add("elasticsearch.list_indices", {})
+        m = re.search(r"https?://[^\s`]+", task)
         if m:
-            calls.append(("browser.read", {"url": m.group(0)}))
-        if re.search(r"đọc runbook|read runbook", t):
-            calls.append(("docs.read", {"name": "runbook-deploy"}))
-        if re.search(r"tạo tài liệu|create doc", t):
-            calls.append(("docs.create", {"name": "nhap", "content": task}))
-        return calls
+            add("web.fetch_page", {"url": m.group(0)})
+        # Đọc trước, ghi sau: thấy trạng thái hiện tại rồi mới thay đổi.
+        classes = {t["tool"]: t.get("action_class") for t in tools or []}
+        return [c for c in calls if classes.get(c[0]) == "read"] + [c for c in calls if classes.get(c[0]) != "read"]
 
     def run_agent(self, task: str, context: str, tools: list[dict], call_tool: CallTool, history=None, on_text=None, cancelled=None) -> dict:
-        from .tools import TOOLS
+        classes = {t["tool"]: t.get("action_class") for t in tools or []}
         lines, statuses = [], []
         # Lệnh đọc liền nhau chạy song song; lệnh ghi chạy riêng để thấy được kết quả của các bước trước.
         groups: list[tuple[bool, list]] = []
-        for name, args in self.plan(task):
-            read = name in TOOLS and TOOLS[name].action_class == "read"
+        for name, args in self.plan(task, tools):
+            read = classes.get(name) == "read"
             if read and groups and groups[-1][0]:
                 groups[-1][1].append((name, args))
             else:
@@ -213,9 +228,9 @@ class HeuristicProvider:
                 statuses.append(step["status"])
                 lines.append(f"- {name}: {step['status']}" + (f" — {'; '.join(step.get('reasons') or [])}" if step.get("reasons") else ""))
         if not lines:
-            answer = "Không có công cụ nào phù hợp; ghi nhận yêu cầu làm dữ liệu cho luồng học."
+            answer = "Không có công cụ phù hợp trong các kết nối bạn được dùng; ghi nhận yêu cầu làm dữ liệu cho luồng học."
         else:
-            answer = "Kết quả thực thi (chế độ heuristic, backend mô phỏng):\n" + "\n".join(lines)
+            answer = "Kết quả thực thi (chế độ heuristic, không dùng LLM):\n" + "\n".join(lines)
         if on_text:
             for chunk in re.findall(r"\S+\s*", answer):
                 check_cancelled(cancelled)

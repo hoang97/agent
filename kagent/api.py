@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import agent as agent_mod
-from . import compiler, db, gateway, knowledge, learned, learning, llm, tools, vault
+from . import compiler, connections, db, gateway, knowledge, learned, learning, llm, tools, vault
 from .config import settings
 from .scheduler import Scheduler
 
@@ -54,7 +54,7 @@ def seed() -> None:
     with db.session() as conn:
         db.init_schema(conn)
         if conn.execute("SELECT 1 FROM org").fetchone():
-            tools.sync_registry(conn)
+            connections.sync_all(conn)
             return
         creds: dict[str, str] = {}
 
@@ -76,7 +76,6 @@ def seed() -> None:
             tid = db.new_id()
             tenants[name] = tid
             conn.execute("INSERT INTO tenant(id,org_id,name,policy) VALUES (?,?,?,?)", (tid, org, name, json.dumps(policy)))
-            tools.sync_registry(conn, tid, enable_new=True)
         users = {"admin": (settings.admin_password, 1), "alice": (settings.demo_password, 0), "bob": (settings.demo_password, 0), "carol": (settings.demo_password, 0)}
         ids = {}
         for name, (configured, is_admin) in users.items():
@@ -754,23 +753,33 @@ def approval_decide(approval_id: str, body: ApprovalDecision, t: Tenant = Depend
         raise HTTPException(exc.status, str(exc)) from exc
 
 
-def _tool_view(row) -> dict:
+def _tool_view(conn, row) -> dict:
     d = db.row(row, "input_schema", "envs", "roles")
-    spec = tools.TOOLS.get(d["tool"])
+    spec = tools.spec_of(row)
+    c = connections.get(conn, row["tenant_id"], row["connection_id"]) if row["connection_id"] else None
     eff = tools.effective(row)
-    d.update(effective_envs=eff["envs"], effective_roles=eff["roles"],
-             catalog_envs=list(spec.envs) if spec else [], catalog_roles=list(spec.roles) if spec else [],
-             role_choices=tools.role_choices(spec),
+    d.update(effective_envs=eff["envs"], effective_roles=eff["roles"], catalog_envs=c["envs"] if c else [],
+             role_choices=list(tools.ROLE_CHOICES), personal=bool(row["owner_user"]),
              tier_choices=list(tools.TIERS[tools.TIERS.index(d["catalog_tier"]):]) if d["catalog_tier"] in tools.TIERS else [],
-             classified=spec.classified if spec else False, warnings=spec.warnings if spec else [],
-             server_description=tools.SERVERS.get(d["server"], ""), is_new=d["approved_by"] is None)
+             classified=spec.classified if spec else False, warnings=spec.warnings if spec else [], rollback_hint=spec.rollback_hint if spec else "",
+             server_description=f"{c['title']} · {tools.TEMPLATES[c['template']].title if c['template'] in tools.TEMPLATES else c['template']}" if c else "",
+             is_new=d["approved_by"] is None)
     return d
+
+
+def _tool_row(conn, t: Tenant, tool: str):
+    row = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (t.tenant_id, tool)).fetchone()
+    if row is None or (row["owner_user"] and row["owner_user"] != t.user_id):
+        raise HTTPException(404, "không tìm thấy công cụ")
+    return row
 
 
 @app.get("/api/tools")
 def tool_list(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
-    rows = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? ORDER BY status, server, tool", (t.tenant_id,)).fetchall()
-    return [_tool_view(r) for r in rows]
+    """Công cụ của tenant và công cụ cá nhân của chính mình; công cụ đã gỡ không hiện."""
+    rows = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND status='active' AND (owner_user IS NULL OR owner_user=?) ORDER BY server, tool",
+                        (t.tenant_id, t.user_id)).fetchall()
+    return [_tool_view(conn, r) for r in rows]
 
 
 class ToolPatch(BaseModel):
@@ -782,29 +791,28 @@ class ToolPatch(BaseModel):
 
 @app.patch("/api/tools/{tool}")
 def tool_patch(tool: str, body: ToolPatch, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
-    """Tenant chỉ được siết so với danh mục: nâng mức rủi ro, thu hẹp môi trường và vai trò."""
-    t.require_admin()
-    row = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (t.tenant_id, tool)).fetchone()
-    if row is None:
-        raise HTTPException(404, "không tìm thấy công cụ")
-    spec = tools.TOOLS.get(tool)
-    if spec is None or row["status"] != "active":
-        raise HTTPException(409, "công cụ đã bị gỡ khỏi danh mục")
+    """Công cụ dùng chung: chỉ tenant_admin. Công cụ cá nhân: chính chủ. Chỉ được siết so với template và kết nối."""
+    row = _tool_row(conn, t, tool)
+    if not row["owner_user"]:
+        t.require_admin()
+    spec = tools.spec_of(row)
+    c = connections.get(conn, t.tenant_id, row["connection_id"]) if row["connection_id"] else None
+    if spec is None or c is None or row["status"] != "active":
+        raise HTTPException(409, "công cụ đã bị gỡ hoặc kết nối không còn hoạt động")
     changes: dict = {}
     if body.risk_tier is not None:
         if body.risk_tier not in tools.TIERS:
             raise HTTPException(400, "mức rủi ro không hợp lệ")
         if tools.TIERS.index(body.risk_tier) < tools.TIERS.index(spec.risk_tier):
-            raise HTTPException(403, f"không được thấp hơn mức {spec.risk_tier} của danh mục")
+            raise HTTPException(403, f"không được thấp hơn mức {spec.risk_tier} của template")
         changes.update(risk_tier=body.risk_tier, risk_floor=None if body.risk_tier == spec.risk_tier else body.risk_tier)
     if body.envs is not None:
-        if not body.envs or set(body.envs) - set(spec.envs):
-            raise HTTPException(400, f"môi trường phải là tập con không rỗng của {list(spec.envs)}")
+        if not body.envs or set(body.envs) - set(c["envs"]):
+            raise HTTPException(400, f"môi trường phải là tập con không rỗng của môi trường của kết nối {c['envs']}")
         changes["envs"] = json.dumps([e for e in tools.ENVS if e in body.envs])
     if body.roles is not None:
-        allowed = set(tools.role_choices(spec))
-        if not body.roles or set(body.roles) - allowed:
-            raise HTTPException(400, f"vai trò phải là tập con không rỗng của {sorted(allowed)}")
+        if not body.roles or set(body.roles) - set(tools.ROLE_CHOICES):
+            raise HTTPException(400, f"vai trò phải là tập con không rỗng của {list(tools.ROLE_CHOICES)}")
         changes["roles"] = json.dumps([r for r in tools.ROLE_CHOICES if r in body.roles])
     if body.enabled is not None:
         changes["enabled"] = int(body.enabled)
@@ -813,7 +821,96 @@ def tool_patch(tool: str, body: ToolPatch, t: Tenant = Depends(current_tenant), 
         cols = ", ".join(f"{k}=?" for k in changes)
         conn.execute(f"UPDATE tool_registry SET {cols} WHERE tenant_id=? AND tool=?", (*changes.values(), t.tenant_id, tool))
         log.info("tenant %s: %s đổi cấu hình công cụ %s: %s", t.tenant_id, t.principal.username, tool, sorted(changes))
-    return _tool_view(conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (t.tenant_id, tool)).fetchone())
+    return _tool_view(conn, conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (t.tenant_id, tool)).fetchone())
+
+
+@app.get("/api/templates")
+def template_list(_: Principal = Depends(current_user)):
+    return [{"name": tpl.name, "title": tpl.title, "description": tpl.description,
+             "fields": [{"name": f.name, "type": f.type, "required": f.required, "default": f.default, "description": f.description} for f in tpl.fields],
+             "tools": [{"name": s.name, "description": s.description, "action_class": s.action_class, "risk_tier": s.risk_tier,
+                        "untrusted_output": s.untrusted_output} for s in tpl.tools.values()]} for tpl in tools.TEMPLATES.values()]
+
+
+def _connection_error(exc: "connections.ConnectionError_") -> HTTPException:
+    return HTTPException(exc.status, str(exc))
+
+
+def _connection_view(conn, t: Tenant, row: dict) -> dict:
+    tool_rows = conn.execute("SELECT tool, enabled, action_class, risk_tier FROM tool_registry WHERE tenant_id=? AND connection_id=? AND status='active' ORDER BY tool",
+                             (t.tenant_id, row["id"])).fetchall()
+    return {**connections.view(row), "can_manage": connections.can_manage(row, t.user_id, t.is_admin), "tools": db.rows(tool_rows)}
+
+
+class ConnectionBody(BaseModel):
+    template: str
+    name: str = Field(max_length=40)
+    title: str = Field(default="", max_length=120)
+    scope: str = "user"
+    envs: list[str] = ["dev"]
+    roles: list[str] = ["member"]
+    params: dict = {}
+    secrets: dict = {}
+    allow_private: bool = False
+
+
+@app.get("/api/connections")
+def connection_list(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    return [_connection_view(conn, t, r) for r in connections.visible(conn, t.tenant_id, t.user_id)]
+
+
+@app.post("/api/connections")
+def connection_create(body: ConnectionBody, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_writer()
+    try:
+        with db.tx(conn):
+            row = connections.create(conn, t.tenant_id, t.user_id, is_admin=t.is_admin, is_org_admin=t.principal.is_org_admin, template=body.template,
+                                     name=body.name, title=body.title, scope=body.scope, envs=body.envs, roles=body.roles, params=body.params,
+                                     secrets=body.secrets, allow_private=body.allow_private)
+    except connections.ConnectionError_ as exc:
+        raise _connection_error(exc) from exc
+    return _connection_view(conn, t, row)
+
+
+class ConnectionPatch(BaseModel):
+    title: str | None = Field(default=None, max_length=120)
+    envs: list[str] | None = None
+    roles: list[str] | None = None
+    params: dict | None = None
+    secrets: dict | None = None
+    allow_private: bool | None = None
+    status: str | None = None
+
+
+@app.patch("/api/connections/{connection_id}")
+def connection_patch(connection_id: str, body: ConnectionPatch, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    changes = {k: v for k, v in body.model_dump().items() if v is not None}
+    try:
+        with db.tx(conn):
+            row = connections.update(conn, t.tenant_id, connection_id, t.user_id, is_admin=t.is_admin, is_org_admin=t.principal.is_org_admin, changes=changes)
+    except connections.ConnectionError_ as exc:
+        raise _connection_error(exc) from exc
+    return _connection_view(conn, t, row)
+
+
+@app.delete("/api/connections/{connection_id}")
+def connection_delete(connection_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    """Gỡ kết nối: công cụ của nó bị chặn ngay; audit và lịch sử được giữ."""
+    try:
+        with db.tx(conn):
+            connections.update(conn, t.tenant_id, connection_id, t.user_id, is_admin=t.is_admin, is_org_admin=t.principal.is_org_admin,
+                               changes={"status": "removed"})
+    except connections.ConnectionError_ as exc:
+        raise _connection_error(exc) from exc
+    return {"ok": True}
+
+
+@app.post("/api/connections/{connection_id}/test")
+def connection_test(connection_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    try:
+        return connections.test(conn, t.tenant_id, connection_id, t.user_id)
+    except connections.ConnectionError_ as exc:
+        raise _connection_error(exc) from exc
 
 
 def _learned_view(conn, t: Tenant, row: dict) -> dict:
@@ -919,10 +1016,10 @@ class Simulate(BaseModel):
 
 @app.post("/api/policy/simulate")
 def policy_simulate(body: Simulate, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
-    meta = conn.execute("SELECT risk_tier FROM tool_registry WHERE tenant_id=? AND tool=?", (t.tenant_id, body.tool)).fetchone()
+    meta = conn.execute("SELECT risk_tier, canonical FROM tool_registry WHERE tenant_id=? AND tool=?", (t.tenant_id, body.tool)).fetchone()
     if meta is None or body.env not in gateway.ENVS:
         raise HTTPException(400, "công cụ hoặc môi trường không hợp lệ")
-    decision = gateway.evaluate(gateway.get_policy(conn, t.tenant_id), meta["risk_tier"], body.tool, body.env, body.confidence, [])
+    decision = gateway.evaluate(gateway.get_policy(conn, t.tenant_id), meta["risk_tier"], body.tool, body.env, body.confidence, [], meta["canonical"])
     return {"risk_tier": meta["risk_tier"], "outcome": decision.outcome, "required": decision.required, "reasons": decision.reasons}
 
 

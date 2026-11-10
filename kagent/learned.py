@@ -14,7 +14,7 @@ from collections import defaultdict
 
 from . import db, gateway
 from .retrieval import tokenize
-from .tools import TOOLS, callable_by, max_tier
+from .tools import callable_by, max_tier
 
 PREFIX = "learned."
 PLACEHOLDER = re.compile(r"^\{\{([a-z_][a-z0-9_]{0,30})\}\}$")
@@ -43,7 +43,11 @@ def _placeholder(value) -> str | None:
     return m.group(1) if m else None
 
 
-def validate(steps, params) -> None:
+def _registry(conn, tenant_id: str, tool: str):
+    return conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=? AND status='active'", (tenant_id, tool)).fetchone()
+
+
+def validate(conn, tenant_id: str, steps, params) -> None:
     if not isinstance(steps, list) or not 1 <= len(steps) <= MAX_STEPS:
         raise LearnedError(f"cần từ 1 đến {MAX_STEPS} bước")
     if not isinstance(params, dict):
@@ -53,7 +57,8 @@ def validate(steps, params) -> None:
             raise LearnedError(f"tham số {name!r} không hợp lệ")
     used = set()
     for i, step in enumerate(steps, 1):
-        if not isinstance(step, dict) or set(step) - {"tool", "args"} or step.get("tool") not in TOOLS:
+        meta = _registry(conn, tenant_id, step.get("tool")) if isinstance(step, dict) and isinstance(step.get("tool"), str) else None
+        if not isinstance(step, dict) or set(step) - {"tool", "args"} or meta is None or step["tool"].startswith(PREFIX):
             raise LearnedError(f"bước {i}: công cụ không có trong danh mục")
         args = step.get("args", {})
         if not isinstance(args, dict):
@@ -64,7 +69,7 @@ def validate(steps, params) -> None:
                 if name not in params:
                     raise LearnedError(f"bước {i}: tham số {name} chưa được khai báo")
                 used.add(name)
-        missing = set(TOOLS[step["tool"]].required) - set(args)
+        missing = set(json.loads(meta["input_schema"]).get("required", [])) - set(args)
         if missing:
             raise LearnedError(f"bước {i}: thiếu tham số bắt buộc {sorted(missing)}")
     if set(params) - used:
@@ -87,14 +92,14 @@ def risk(conn, tenant_id: str, steps: list[dict]) -> str:
     return max_tier(*tiers)
 
 
-def usable(conn, tenant_id: str, row: dict, env: str, roles: set[str]) -> tuple[bool, str | None]:
+def usable(conn, tenant_id: str, row: dict, env: str, roles: set[str], user_id: str | None = None) -> tuple[bool, str | None]:
     if row["status"] != "active":
         return False, "công cụ học được chưa bật"
     for step in row["steps"]:
         meta = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (tenant_id, step["tool"])).fetchone()
         if meta is None:
             return False, f"{step['tool']}: chưa đăng ký"
-        ok, why = callable_by(meta, env, roles)
+        ok, why = callable_by(meta, env, roles, row["scope"][5:] if row["scope"].startswith("user:") else user_id)
         if not ok:
             return False, f"{step['tool']}: {why}"
     return True, None
@@ -116,7 +121,7 @@ def visible_rows(conn, tenant_id: str, user_id: str) -> list[dict]:
 
 
 def for_agent(conn, tenant_id: str, user_id: str, env: str, roles: set[str]) -> list[dict]:
-    return [spec(r) for r in visible_rows(conn, tenant_id, user_id) if usable(conn, tenant_id, r, env, roles)[0]]
+    return [spec(r) for r in visible_rows(conn, tenant_id, user_id) if usable(conn, tenant_id, r, env, roles, user_id)[0]]
 
 
 def find(conn, tenant_id: str, user_id: str, name: str) -> dict | None:
@@ -137,7 +142,7 @@ def _unique_name(conn, tenant_id: str, scope: str, base: str) -> str:
 
 def create(conn, tenant_id: str, *, name: str, description: str, steps: list, params: dict, scope: str, status: str,
            origin: str, source_eps: list[str], created_by: str) -> dict:
-    validate(steps, params)
+    validate(conn, tenant_id, steps, params)
     if conn.execute("SELECT 1 FROM learned_tool WHERE tenant_id=? AND scope=? AND name=?", (tenant_id, scope, name)).fetchone():
         raise LearnedError(f"đã có công cụ tên {name}", 409)
     tool_id, now = db.new_id(), db.iso()
@@ -270,7 +275,7 @@ def invoke_by_name(conn, ctx, name: str, args: dict) -> dict:
     if ctx.roles is None:
         ctx.roles = gateway.user_roles(conn, ctx.tenant_id, ctx.user_id)
     tier = risk(conn, ctx.tenant_id, row["steps"])
-    ok, why = usable(conn, ctx.tenant_id, row, ctx.env, ctx.roles)
+    ok, why = usable(conn, ctx.tenant_id, row, ctx.env, ctx.roles, ctx.user_id)
     if not ok:
         return {**base, "risk_tier": tier, "decision": "blocked", "status": "blocked", "reasons": [why]}
     values = {}
@@ -316,7 +321,7 @@ def update(conn, tenant_id: str, tool_id: str, user_id: str, is_admin: bool, cha
         raise LearnedError("cần quyền tenant_admin", 403)
     steps, params = changes.get("steps", row["steps"]), changes.get("params", row["params"])
     if "steps" in changes or "params" in changes:
-        validate(steps, params)
+        validate(conn, tenant_id, steps, params)
     status = changes.get("status", row["status"])
     if status not in STATUSES:
         raise LearnedError("trạng thái không hợp lệ")

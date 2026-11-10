@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 from . import db
 from .config import settings
 from .retrieval import tokenize
-from .tools import TOOLS, ToolError, callable_by, load_state, save_state
+from . import net
+from .connectors.base import ConnectorError
+from .tools import callable_by
 
 ENVS = ("dev", "staging", "prod")
 TIERS = ("R0", "R1", "R2", "R3", "R4")
@@ -111,9 +113,11 @@ class Decision:
     door: str = ""
 
 
-def evaluate(policy: dict, tier: str, tool: str, env: str, confidence: float, forced: list[str]) -> Decision:
+def evaluate(policy: dict, tier: str, tool: str, env: str, confidence: float, forced: list[str], canonical: str | None = None) -> Decision:
+    """canonical là "<template>.<công_cụ>" để luật chặn như "k8s.exec" áp cho mọi kết nối Kubernetes."""
     for rule in policy["deny"]:
-        if fnmatch.fnmatchcase(tool, rule["tool"]) and fnmatch.fnmatchcase(env, rule["env"]):
+        names = [tool] + ([canonical] if canonical else [])
+        if any(fnmatch.fnmatchcase(n, rule["tool"]) for n in names) and fnmatch.fnmatchcase(env, rule["env"]):
             return Decision("block", reasons=[f"luật chặn: {rule['tool']} @ {rule['env']}"], door="deny")
     cell = policy["matrix"][tier][env]
     if cell == "block":
@@ -235,16 +239,27 @@ def audit(conn, ctx: CallContext, tool, args, tier, conf, decision, reasons, sta
          tier, conf, decision, json.dumps(reasons, ensure_ascii=False), status, db.iso()))
 
 
+def _run(conn, tenant_id: str, tool_name: str, args: dict, check: bool = False) -> dict:
+    """Gọi connector thật của công cụ (hoặc hàm chạy thử). Không giữ giao dịch DB trong lúc gọi mạng."""
+    from . import connections
+    _, _, spec, params = connections.resolve(conn, tenant_id, tool_name)
+    fn = spec.check if check else spec.run
+    if fn is None:
+        return None
+    return fn(params, args)
+
+
 def _execute(conn, tenant_id: str, env: str, tool_name: str, args: dict) -> tuple[str, dict]:
-    tool = TOOLS[tool_name]
-    with db.tx(conn):
-        state = load_state(conn, tenant_id, env)
-        try:
-            result = tool.run(state, args)
-        except (ToolError, ValueError, TypeError) as exc:
-            return "error", {"error": str(exc)}
-        save_state(conn, tenant_id, env, state)
-    return "ok", result
+    try:
+        return "ok", _run(conn, tenant_id, tool_name, args)
+    except net.NetError as exc:
+        return "error", {"error": f"kết nối bị chặn: {exc}"}
+    except (ConnectorError, ValueError, TypeError) as exc:
+        return "error", {"error": str(exc)}
+    except Exception as exc:  # lỗi bất ngờ của driver: không lộ chi tiết nội bộ
+        import logging
+        logging.getLogger("kagent.gateway").exception("lỗi khi chạy %s", tool_name)
+        return "error", {"error": f"lỗi không xác định khi gọi công cụ ({exc.__class__.__name__})"}
 
 
 def _has_grant(conn, ctx: CallContext, tool: str, args: dict) -> bool:
@@ -260,7 +275,6 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
         return learned.invoke_by_name(conn, ctx, tool_name, args)
     step: dict = {"type": "tool_call", "tool": tool_name, "args": args, "env": ctx.env}
     meta = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (ctx.tenant_id, tool_name)).fetchone()
-    tool = TOOLS.get(tool_name)
     if meta is None:
         # Công cụ chưa phân loại mặc định bị coi là destructive: không chạy.
         audit(conn, ctx, tool_name, args, "R3", 0.0, "blocked", ["công cụ chưa được đăng ký"], "blocked")
@@ -269,10 +283,12 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
     tier = meta["risk_tier"]
     if ctx.roles is None:
         ctx.roles = user_roles(conn, ctx.tenant_id, ctx.user_id)
-    allowed, why = callable_by(meta, ctx.env, ctx.roles)
+    allowed, why = callable_by(meta, ctx.env, ctx.roles, ctx.user_id)
     if not allowed:
         audit(conn, ctx, tool_name, args, tier, 0.0, "blocked", [why], "blocked")
         return {**step, "decision": "blocked", "status": "blocked", "risk_tier": tier, "reasons": [why]}
+    from .tools import spec_of
+    tool = spec_of(meta)
     missing = [f for f in tool.required if f not in args]
     if missing or not isinstance(args, dict):
         audit(conn, ctx, tool_name, args, tier, 0.0, "blocked", [f"thiếu tham số: {missing}"], "invalid")
@@ -282,10 +298,14 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
     dry_ok = 0.0
     if tool.check:
         try:
-            dry_result = tool.check(load_state(conn, ctx.tenant_id, ctx.env), args)
+            dry_result = _run(conn, ctx.tenant_id, tool_name, args, check=True)
             dry_ok = 1.0
-        except (ToolError, ValueError, TypeError) as exc:
+        except net.NetError as exc:
+            dry_result = {"error": f"kết nối bị chặn: {exc}"}
+        except (ConnectorError, ValueError, TypeError) as exc:
             dry_result = {"error": str(exc)}
+        except Exception as exc:
+            dry_result = {"error": f"chạy thử lỗi ({exc.__class__.__name__})"}
 
     tenant = conn.execute("SELECT change_freeze, write_quota_daily, self_approve FROM tenant WHERE id=?", (ctx.tenant_id,)).fetchone()
     forced: list[str] = []
@@ -302,7 +322,7 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
 
     policy = get_policy(conn, ctx.tenant_id)
     conf, parts = confidence(conn, ctx, meta, args, dry_ok)
-    decision = evaluate(policy, tier, tool_name, ctx.env, conf, forced)
+    decision = evaluate(policy, tier, tool_name, ctx.env, conf, forced, meta.get("canonical"))
     step.update(risk_tier=tier, confidence=conf, confidence_parts=parts, reasons=decision.reasons, dry_run=dry_result)
 
     if decision.outcome == "block":
@@ -389,7 +409,7 @@ def decide(conn, tenant_id: str, approval_id: str, user_id: str, roles: set[str]
             raise ApprovalError(f"không có quyền duyệt ở {req['env']}", 403)
         ctx = CallContext(tenant_id, req["requester_id"], req["env"], req["original_request"], req["episode_id"])
         meta = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (tenant_id, req["tool"])).fetchone()
-        if action != "deny" and (meta is None or not callable_by(meta, req["env"], user_roles(conn, tenant_id, req["requester_id"]))[0]):
+        if action != "deny" and (meta is None or not callable_by(meta, req["env"], user_roles(conn, tenant_id, req["requester_id"]), req["requester_id"])[0]):
             raise ApprovalError("công cụ đã bị tắt, gỡ hoặc thu hẹp quyền sau khi yêu cầu được tạo; không thể thực thi", 409)
 
         if action == "deny":

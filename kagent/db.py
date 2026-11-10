@@ -154,6 +154,15 @@ CREATE TABLE IF NOT EXISTS user_profile (
   style TEXT NOT NULL DEFAULT 'default', default_env TEXT NOT NULL DEFAULT 'dev', updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS connection (
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenant(id), name TEXT NOT NULL, template TEXT NOT NULL, title TEXT NOT NULL,
+  scope TEXT NOT NULL CHECK (scope IN ('tenant','user')), owner_user TEXT, envs TEXT NOT NULL, roles TEXT NOT NULL,
+  params TEXT NOT NULL, secrets TEXT NOT NULL, allow_private INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled','removed')),
+  created_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_connection_tenant ON connection(tenant_id, status);
+
 CREATE TABLE IF NOT EXISTS app_secret (
   name TEXT PRIMARY KEY, ciphertext TEXT NOT NULL, last4 TEXT NOT NULL,
   updated_at TEXT NOT NULL, updated_by TEXT NOT NULL
@@ -229,7 +238,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tenant ADD COLUMN self_approve INTEGER NOT NULL DEFAULT 1")
     registry = {r["name"] for r in conn.execute("PRAGMA table_info(tool_registry)")}
     for column, ddl in (("catalog_tier", "TEXT"), ("risk_floor", "TEXT"), ("roles", "TEXT NOT NULL DEFAULT '[\"member\"]'"),
-                        ("status", "TEXT NOT NULL DEFAULT 'active'"), ("synced_at", "TEXT")):
+                        ("status", "TEXT NOT NULL DEFAULT 'active'"), ("synced_at", "TEXT"), ("connection_id", "TEXT"),
+                        ("template", "TEXT"), ("owner_user", "TEXT"), ("canonical", "TEXT")):
         if column not in registry:
             conn.execute(f"ALTER TABLE tool_registry ADD COLUMN {column} {ddl}")
 
