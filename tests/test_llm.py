@@ -66,22 +66,22 @@ def test_curator_ignores_target_outside_candidates():
 
 
 def test_agent_loop_routes_tools_through_gateway_and_marks_untrusted():
-    p, fake = provider([msg([use("kibana__search", {"query": "x"})], stop="tool_use"), msg([text("xong")])])
+    p, fake = provider([msg([use("logs__search_logs", {"query": "x"})], stop="tool_use"), msg([text("xong")])])
     seen = []
 
     def call_tool(name, args):
         seen.append((name, args))
         return {"status": "ok", "decision": "auto", "result": {"hits": []}, "untrusted": True}
 
-    out = p.run_agent("tìm log", "ctx", [{"tool": "kibana.search", "description": "d", "input_schema": {"type": "object", "properties": {}}}], call_tool)
-    assert seen == [("kibana.search", {"query": "x"})]
+    out = p.run_agent("tìm log", "ctx", [{"tool": "logs.search_logs", "description": "d", "input_schema": {"type": "object", "properties": {}}}], call_tool)
+    assert seen == [("logs.search_logs", {"query": "x"})]
     assert out["answer"] == "xong" and out["tokens"] == 30
     result = fake.calls[1]["messages"][2]["content"][0]
     assert result["content"].startswith("<untrusted>") and result["is_error"] is False
 
 
 def test_agent_step_limit():
-    replies = [msg([use("k8s__get", {})], stop="tool_use") for _ in range(10)]
+    replies = [msg([use("k8s__list_pods", {})], stop="tool_use") for _ in range(10)]
     p, _ = provider(replies)
     with pytest.raises(llm.LLMError):
         p.run_agent("x", "c", [], lambda n, a: {"status": "ok"})

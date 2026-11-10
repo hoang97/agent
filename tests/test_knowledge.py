@@ -58,7 +58,7 @@ def test_procedure_needs_two_independent_episodes(users):
 def test_tool_error_becomes_lesson(users):
     alice, admin = users["alice"], users["admin"]
     alice.run("xem pod trong namespace default")
-    ep = alice.run("scale deployment web lên 50 replica")
+    ep = alice.run("scale deployment web lên 99 replica")
     assert ep["outcome"] == "failure"
     admin.post("/api/learning/run")
     lessons = alice.get("/api/ku?kind=lesson").json()

@@ -107,7 +107,8 @@ def test_requester_self_approves_by_default(users):
 
 
 def test_self_approval_still_respects_hard_blocks(users):
-    step = tool_steps(users["alice"].run("đọc secret của app web"))[0]
+    # Luật chặn của tenant: k8s.exec ở prod (khớp theo tên template, cho mọi kết nối Kubernetes)
+    step = tool_steps(users["alice"].run("exec vào pod web-0 chạy `ls`", env="prod"))[0]
     assert step["decision"] == "blocked" and "approval_id" not in step
 
 
@@ -200,16 +201,17 @@ def test_expired_approval_cannot_be_used(users, client):
     assert r.status_code == 409
 
 
-def test_secret_read_blocked_by_tenant_deny(users):
-    step = tool_steps(users["alice"].run("đọc secret của app web"))[0]
-    assert step["decision"] == "blocked" and step["tool"] == "k8s.get_secret_value"
+def test_prod_delete_blocked_by_tenant_deny(users):
+    step = tool_steps(users["alice"].run("xóa pod web-0", env="prod"))[0]
+    assert step["decision"] == "blocked" and step["tool"] == "k8s.delete_pod" and "*.delete*" in step["reasons"][0]
 
 
 def test_untrusted_output_taints_following_commands(users):
     alice = users["alice"]
-    ep = alice.run("tìm log lỗi rồi tạo tài liệu tổng hợp")
+    alice.run("xem pod trong namespace default")
+    ep = alice.run("tìm log lỗi rồi restart deployment web")
     steps = tool_steps(ep)
-    assert [s["tool"] for s in steps] == ["kibana.search", "docs.create"]
+    assert [s["tool"] for s in steps] == ["logs.search_logs", "k8s.rollout_restart"]
     assert steps[0]["status"] == "ok" and steps[0]["untrusted"] is True
     assert steps[1]["status"] == "pending"
     assert any("untrusted" in r for r in steps[1]["reasons"])
@@ -218,13 +220,20 @@ def test_untrusted_output_taints_following_commands(users):
 def test_change_freeze_forces_ask(users):
     admin, alice = users["admin"], users["alice"]
     admin.patch("/api/tenant", json={"change_freeze": True})
-    step = tool_steps(alice.run("tạo tài liệu nháp"))[0]
+    alice.run("xem pod trong namespace default")
+    step = tool_steps(alice.run("scale deployment web lên 4 replica"))[0]
     assert step["status"] == "pending" and any("freeze" in r for r in step["reasons"])
 
 
-def test_disabled_tool_is_blocked(users):
-    users["admin"].patch("/api/tools/k8s.get", json={"enabled": False})
-    assert tool_steps(users["alice"].run("xem pod"))[0]["decision"] == "blocked"
+def test_disabled_tool_is_hidden_from_agent_and_blocked_by_gateway(users):
+    from kagent import db
+    alice = users["alice"]
+    users["admin"].patch("/api/tools/k8s.list_pods", json={"enabled": False})
+    assert tool_steps(alice.run("xem pod")) == []
+    with db.session() as conn:
+        uid = conn.execute("SELECT id FROM app_user WHERE username='alice'").fetchone()["id"]
+        step = gateway.invoke(conn, gateway.CallContext(alice.tenant, uid, "dev", "xem pod"), "k8s.list_pods", {})
+    assert step["decision"] == "blocked" and "chưa bật" in step["reasons"][0]
 
 
 def test_tenant_admin_cannot_lower_risk_but_can_raise(users):
@@ -233,11 +242,11 @@ def test_tenant_admin_cannot_lower_risk_but_can_raise(users):
     with db.session() as conn:
         uid = conn.execute("SELECT id FROM app_user WHERE username='alice'").fetchone()["id"]
         conn.execute("INSERT INTO membership(tenant_id,user_id,role) VALUES (?,?,'tenant_admin')", (alice.tenant, uid))
-    assert alice.patch("/api/tools/k8s.get", json={"risk_tier": "R2"}).status_code == 200
+    assert alice.patch("/api/tools/k8s.list_pods", json={"risk_tier": "R2"}).status_code == 200
     assert alice.patch("/api/tools/k8s.scale", json={"risk_tier": "R0"}).status_code == 403
 
 
 def test_audit_records_each_call(users):
     users["alice"].run("xem pod")
     audit = users["alice"].get("/api/audit").json()
-    assert audit[0]["tool"] == "k8s.get" and audit[0]["decision"] == "auto" and audit[0]["user"] == "alice"
+    assert audit[0]["tool"] == "k8s.list_pods" and audit[0]["decision"] == "auto" and audit[0]["user"] == "alice"

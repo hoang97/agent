@@ -22,8 +22,8 @@ def test_repeated_success_proposes_personal_tool_with_params(users):
     assert admin.post("/api/learning/run").json()["learned_tools_proposed"] == 1
     tool = alice.get("/api/learned-tools").json()[0]
     assert tool["status"] == "proposed" and tool["personal"] and tool["origin"] == "auto"
-    assert tool["flow"] == "k8s.get → grafana.query"
-    assert set(tool["params"]) == {"namespace", "query"} and tool["risk_tier"] == "R0"
+    assert tool["flow"] == "k8s.list_pods → grafana.prometheus_query"
+    assert set(tool["params"]) == {"namespace"} and tool["risk_tier"] == "R0"  # expr giống nhau ở cả 3 lần nên là hằng số
     # Không đề xuất lại cùng chuỗi
     run_three(alice, TASKS)
     assert admin.post("/api/learning/run").json()["learned_tools_proposed"] == 0
@@ -49,10 +49,10 @@ def test_learned_tool_runs_each_step_through_gateway(users):
     alice.patch(f"/api/learned-tools/{tool['id']}", json={"status": "active"})
     ep = alice.run(f"dùng {tool['name']} namespace=payments query=cpu")
     step = tool_steps(ep)[0]
-    assert step["status"] == "ok" and step["learned"] and [s["tool"] for s in step["steps"]] == ["k8s.get", "grafana.query"]
+    assert step["status"] == "ok" and step["learned"] and [s["tool"] for s in step["steps"]] == ["k8s.list_pods", "grafana.prometheus_query"]
     assert step["steps"][0]["result"]["namespace"] == "payments"
     audit_tools = [a["tool"] for a in alice.get("/api/audit").json()[:2]]
-    assert set(audit_tools) == {"k8s.get", "grafana.query"}
+    assert set(audit_tools) == {"k8s.list_pods", "grafana.prometheus_query"}
 
 
 def test_learned_tool_cannot_bypass_permissions(users):
@@ -61,9 +61,9 @@ def test_learned_tool_cannot_bypass_permissions(users):
     admin.post("/api/learning/run")
     tool = alice.get("/api/learned-tools").json()[0]
     alice.patch(f"/api/learned-tools/{tool['id']}", json={"status": "active"})
-    admin.patch("/api/tools/grafana.query", json={"roles": ["tenant_admin"]})
+    admin.patch("/api/tools/grafana.prometheus_query", json={"roles": ["tenant_admin"]})
     step = tool_steps(alice.run(f"dùng {tool['name']} namespace=default query=cpu"))[0]
-    assert step["status"] == "blocked" and "grafana.query" in step["reasons"][0]
+    assert step["status"] == "blocked" and "grafana.prometheus_query" in step["reasons"][0]
 
 
 def test_learned_tool_param_validation(users):
@@ -72,8 +72,8 @@ def test_learned_tool_param_validation(users):
     users["admin"].post("/api/learning/run")
     tool = alice.get("/api/learned-tools").json()[0]
     alice.patch(f"/api/learned-tools/{tool['id']}", json={"status": "active"})
-    step = tool_steps(alice.run(f"dùng {tool['name']} namespace=default"))[0]
-    assert step["status"] == "invalid" and "query" in step["reasons"][0]
+    step = tool_steps(alice.run(f"dùng {tool['name']}"))[0]
+    assert step["status"] == "invalid" and "namespace" in step["reasons"][0]
 
 
 def test_learned_tool_visible_to_agent_only_when_usable(users):
@@ -100,7 +100,7 @@ def test_learned_tool_visible_to_agent_only_when_usable(users):
 def test_tainted_sequences_are_not_learned(users):
     alice, admin = users["alice"], users["admin"]
     for _ in range(3):
-        alice.run("tìm log lỗi rồi xem pod rồi tạo tài liệu tổng hợp")
+        alice.run("tìm log lỗi rồi xem pod rồi restart deployment web")
     admin.post("/api/learning/run")
     assert alice.get("/api/learned-tools").json() == []
 
@@ -131,7 +131,7 @@ def test_save_episode_as_tenant_tool_needs_admin(users):
 def test_save_refused_for_tainted_episode(users):
     alice = users["alice"]
     alice.run("xem pod trong namespace default")
-    ep = alice.run("tìm log lỗi rồi xem pod rồi tạo tài liệu tổng hợp")
+    ep = alice.run("tìm log lỗi rồi xem pod rồi restart deployment web")
     r = alice.post("/api/learned-tools/from-episode", json={"episode_id": ep["id"]})
     assert r.status_code == 400 and "chưa tin cậy" in r.text
 
@@ -141,7 +141,7 @@ def test_parallel_untrusted_reads_can_be_saved(users):
     ep = alice.run("chạy `SELECT count(*) FROM orders` và `SELECT count(*) FROM customers`")
     assert all(s["untrusted"] for s in tool_steps(ep))
     tool = alice.post("/api/learned-tools/from-episode", json={"episode_id": ep["id"], "name": "dem"}).json()
-    assert tool["flow"] == "sql.query → sql.query"
+    assert tool["flow"] == "db.query → db.query"
     step = tool_steps(alice.run("dùng learned.dem"))[0]
     assert step["status"] == "ok" and [s["result"]["rows"] for s in step["steps"]] == [[[6]], [[4]]]
 
@@ -169,7 +169,7 @@ def test_low_success_rate_auto_disables(users):
                              steps=[{"tool": "k8s.scale", "args": {"namespace": "default", "deployment": "web", "replicas": "{{replicas}}"}}])
     alice.run("xem pod trong namespace default")
     for _ in range(4):
-        step = tool_steps(alice.run("dùng learned.scale_x replicas=50"))[0]  # replicas > 20 lỗi
+        step = tool_steps(alice.run("dùng learned.scale_x replicas=99"))[0]  # vượt max_replicas nên lỗi
         assert step["status"] in ("error", "blocked")
     view = alice.get("/api/learned-tools").json()[0]
     assert view["status"] == "disabled" and "tự tắt" in view["note"]
@@ -181,13 +181,13 @@ def test_low_success_rate_auto_disables(users):
     ([], {}, "1 đến"),
     ([{"tool": "khong.co", "args": {}}], {}, "danh mục"),
     ([{"tool": "k8s.scale", "args": {"deployment": "web"}}], {}, "thiếu tham số bắt buộc"),
-    ([{"tool": "k8s.get", "args": {"namespace": "{{ns}}"}}], {}, "chưa được khai báo"),
-    ([{"tool": "k8s.get", "args": {}}], {"ns": {"type": "string"}}, "không được dùng"),
-    ([{"tool": "k8s.get", "args": {"namespace": "{{ns}}"}}], {"ns": {"type": "float"}}, "không hợp lệ"),
+    ([{"tool": "k8s.list_pods", "args": {"namespace": "{{ns}}"}}], {}, "chưa được khai báo"),
+    ([{"tool": "k8s.list_pods", "args": {}}], {"ns": {"type": "string"}}, "không được dùng"),
+    ([{"tool": "k8s.list_pods", "args": {"namespace": "{{ns}}"}}], {"ns": {"type": "float"}}, "không hợp lệ"),
 ])
-def test_learned_validation(steps, params, message):
-    with pytest.raises(learned.LearnedError, match=message):
-        learned.validate(steps, params)
+def test_learned_validation(users, steps, params, message):
+    with db.session() as conn, pytest.raises(learned.LearnedError, match=message):
+        learned.validate(conn, users["alice"].tenant, steps, params)
 
 
 def test_personal_tool_private_to_owner(users):
@@ -277,12 +277,12 @@ def test_personal_curation_does_not_touch_other_users(users):
 def test_tool_notes_learned_from_errors_are_loaded(users):
     alice, admin = users["alice"], users["admin"]
     alice.run("xem pod trong namespace default")
-    alice.run("scale deployment web lên 50 replica")  # lỗi: replicas > 20
+    alice.run("scale deployment web lên 99 replica")  # lỗi: vượt max_replicas
     admin.post("/api/learning/run")
     lesson = next(k for k in alice.get("/api/ku?kind=lesson").json() if "tool:k8s.scale" in k["entities"])
     admin.post(f"/api/ku/{lesson['id']}/review", json={"approve": True})
     with db.session() as conn:
-        ctx = agent.assemble_context(conn, alice.tenant, "tạo dashboard", "observability", tool_names=["k8s.scale", "k8s.get"])
+        ctx = agent.assemble_context(conn, alice.tenant, "tạo dashboard", "observability", tool_names=["k8s.scale", "k8s.list_pods"])
     assert '<knowledge section="tools">' in ctx["text"] and "k8s.scale" in ctx["text"] and lesson["id"] in ctx["ku_used"]
 
 

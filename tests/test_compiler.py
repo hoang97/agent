@@ -66,7 +66,7 @@ def test_skill_requires_three_procedures_and_review(users):
         alice.run("xem pod trong namespace default")
     with db.session() as conn:
         for i in range(3):
-            active(conn, a.tenant, kind="procedure", title=f"P{i}", content=f"Bước số {i}", domain="k8s_ops", entities=["tool:k8s.get"])
+            active(conn, a.tenant, kind="procedure", title=f"P{i}", content=f"Bước số {i}", domain="k8s_ops", entities=["tool:k8s.list_pods"])
     run = a.post("/api/compile").json()
     assert run["needs_review"] == 1 and "skills/k8s_ops-workflow/SKILL.md" in run["changed"]
     a.post(f"/api/compile/{run['id']}/decide", json={"approve": True})
@@ -74,7 +74,7 @@ def test_skill_requires_three_procedures_and_review(users):
     assert "success_rate_30d: 1.0" in skill and "source_kus:" in skill
     with db.session() as conn:
         row = conn.execute("SELECT * FROM skill WHERE tenant_id=?", (a.tenant,)).fetchone()
-        assert json.loads(row["tools"]) == ["k8s.get"]
+        assert json.loads(row["tools"]) == ["k8s.list_pods"]
     step = next(s for s in alice.run("xem pod trong namespace default")["trace"] if s["type"] == "tool_call")
     assert step["confidence_parts"]["skill"] == 1.0
 

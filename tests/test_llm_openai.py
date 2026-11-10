@@ -56,31 +56,31 @@ def test_falls_back_when_json_schema_unsupported():
 
 
 def test_agent_loop_runs_tools_through_callback_and_marks_untrusted():
-    p, seen = provider(completion(tool_calls=[tool_call("kibana__search", '{"query": "x"}')], finish="tool_calls"), completion("xong"))
+    p, seen = provider(completion(tool_calls=[tool_call("logs__search_logs", '{"query": "x"}')], finish="tool_calls"), completion("xong"))
     calls = []
 
     def call_tool(name, args):
         calls.append((name, args))
         return {"status": "ok", "decision": "auto", "result": {"hits": []}, "untrusted": True}
 
-    tools = [{"tool": "kibana.search", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
+    tools = [{"tool": "logs.search_logs", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
     out = p.run_agent("tìm log", "ctx", tools, call_tool)
-    assert calls == [("kibana.search", {"query": "x"})] and out == {"answer": "xong", "tokens": 10}
-    assert seen[0]["body"]["tools"][0]["function"]["name"] == "kibana__search"
+    assert calls == [("logs.search_logs", {"query": "x"})] and out == {"answer": "xong", "tokens": 10}
+    assert seen[0]["body"]["tools"][0]["function"]["name"] == "logs__search_logs"
     assistant, result = seen[1]["body"]["messages"][2:4]
     assert assistant["tool_calls"][0]["id"] == "call_1"
     assert result["role"] == "tool" and result["tool_call_id"] == "call_1" and result["content"].startswith("<untrusted>")
 
 
 def test_agent_invalid_tool_arguments_not_executed():
-    p, seen = provider(completion(tool_calls=[tool_call("k8s__get", "{khong-json")], finish="tool_calls"), completion("thôi"))
+    p, seen = provider(completion(tool_calls=[tool_call("k8s__list_pods", "{khong-json")], finish="tool_calls"), completion("thôi"))
     calls = []
     p.run_agent("x", "c", [], lambda n, a: calls.append(n))
     assert calls == [] and "invalid" in seen[1]["body"]["messages"][-1]["content"]
 
 
 def test_agent_step_limit():
-    replies = [completion(tool_calls=[tool_call("k8s__get", "{}")], finish="tool_calls") for _ in range(settings.max_agent_steps)]
+    replies = [completion(tool_calls=[tool_call("k8s__list_pods", "{}")], finish="tool_calls") for _ in range(settings.max_agent_steps)]
     p, _ = provider(*replies)
     with pytest.raises(llm.LLMError, match="số bước"):
         p.run_agent("x", "c", [], lambda n, a: {"status": "ok"})
