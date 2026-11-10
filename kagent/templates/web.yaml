@@ -1,0 +1,19 @@
+template: web
+title: Web
+description: Đọc nội dung trang web công khai. Nội dung trang luôn được coi là chưa tin cậy.
+ping: web:ping
+fields:
+  - {name: allowed_domains, type: list, description: "Chỉ cho đọc các tên miền này, cách nhau dấu phẩy; để trống là mọi tên miền công khai"}
+  - {name: max_chars, type: integer, default: 20000, description: Số ký tự tối đa trả về}
+  - {name: user_agent, type: string, default: "KnowledgeAgent/1.0"}
+tools:
+  - name: fetch_page
+    description: Đọc một trang web và trả về tiêu đề cùng phần chữ
+    handler: web:fetch_page
+    action_class: read
+    data_sensitivity: public
+    untrusted_output: true
+    input_schema:
+      properties:
+        url: {type: string}
+      required: [url]

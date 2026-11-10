@@ -1,0 +1,38 @@
+template: mysql
+title: MySQL / MariaDB
+description: Truy vấn MySQL. Truy vấn đọc chạy trong phiên chỉ đọc, giới hạn 15 giây và 200 dòng.
+ping: sql:my_ping
+fields:
+  - {name: host, type: string, required: true, description: Tên máy hoặc IP}
+  - {name: port, type: integer, default: 3306}
+  - {name: database, type: string, required: true}
+  - {name: user, type: string, required: true, description: Nên dùng tài khoản chỉ có quyền cần thiết}
+  - {name: password, type: secret}
+  - {name: require_tls, type: boolean, default: false}
+tools:
+  - name: query
+    description: Chạy một câu SELECT chỉ đọc
+    handler: sql:my_query
+    action_class: read
+    blast_radius: namespace
+    data_sensitivity: personal
+    untrusted_output: true
+    input_schema:
+      properties:
+        sql: {type: string}
+      required: [sql]
+
+  - name: execute
+    description: Chạy một câu INSERT, UPDATE hoặc DELETE
+    handler: sql:my_execute
+    check: sql:my_execute_check
+    action_class: write
+    reversible: partial
+    blast_radius: namespace
+    data_sensitivity: personal
+    dry_run: server
+    rollback_hint: Khôi phục từ bản sao lưu hoặc chạy câu lệnh ngược lại
+    input_schema:
+      properties:
+        sql: {type: string}
+      required: [sql]

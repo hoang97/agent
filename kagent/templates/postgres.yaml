@@ -1,0 +1,38 @@
+template: postgres
+title: PostgreSQL
+description: Truy vấn PostgreSQL. Truy vấn đọc chạy trong giao dịch chỉ đọc, giới hạn 15 giây và 200 dòng.
+ping: sql:pg_ping
+fields:
+  - {name: host, type: string, required: true, description: Tên máy hoặc IP}
+  - {name: port, type: integer, default: 5432}
+  - {name: database, type: string, required: true}
+  - {name: user, type: string, required: true, description: Nên dùng tài khoản chỉ có quyền cần thiết}
+  - {name: password, type: secret}
+  - {name: sslmode, type: string, default: prefer, description: "disable | prefer | require | verify-full"}
+tools:
+  - name: query
+    description: Chạy một câu SELECT chỉ đọc
+    handler: sql:pg_query
+    action_class: read
+    blast_radius: namespace
+    data_sensitivity: personal
+    untrusted_output: true
+    input_schema:
+      properties:
+        sql: {type: string}
+      required: [sql]
+
+  - name: execute
+    description: Chạy một câu INSERT, UPDATE hoặc DELETE
+    handler: sql:pg_execute
+    check: sql:pg_execute_check
+    action_class: write
+    reversible: partial
+    blast_radius: namespace
+    data_sensitivity: personal
+    dry_run: server
+    rollback_hint: Khôi phục từ bản sao lưu hoặc chạy câu lệnh ngược lại
+    input_schema:
+      properties:
+        sql: {type: string}
+      required: [sql]

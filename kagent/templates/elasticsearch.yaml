@@ -1,0 +1,49 @@
+template: elasticsearch
+title: Elasticsearch / Kibana
+description: Tìm log trong Elasticsearch (nơi Kibana đọc dữ liệu), xác thực bằng API key hoặc tài khoản.
+ping: elasticsearch:ping
+fields:
+  - {name: url, type: url, required: true, description: "Địa chỉ Elasticsearch, ví dụ https://es.example.com:9200"}
+  - {name: api_key, type: secret, description: API key dạng base64 (ưu tiên dùng thay tài khoản)}
+  - {name: username, type: string, description: Tên tài khoản nếu không dùng API key}
+  - {name: password, type: secret, description: Mật khẩu của tài khoản}
+  - {name: index_pattern, type: string, default: "logs-*", description: Mẫu index mặc định khi tìm log}
+  - {name: verify_tls, type: boolean, default: true}
+  - {name: ca_cert, type: text, description: Chứng chỉ CA dạng PEM nếu dùng CA riêng}
+tools:
+  - name: search_logs
+    description: Tìm log bằng cú pháp query string trong N phút gần nhất
+    handler: elasticsearch:search_logs
+    action_class: read
+    blast_radius: namespace
+    data_sensitivity: personal
+    untrusted_output: true
+    input_schema:
+      properties:
+        query: {type: string}
+        index: {type: string}
+        minutes: {type: integer}
+        size: {type: integer}
+
+  - name: list_indices
+    description: Liệt kê index, số tài liệu và dung lượng
+    handler: elasticsearch:list_indices
+    action_class: read
+    data_sensitivity: internal
+    input_schema:
+      properties: {}
+
+  - name: delete_index
+    description: Xóa một index (không nhận ký tự đại diện)
+    handler: elasticsearch:delete_index
+    check: elasticsearch:delete_index_check
+    action_class: destructive
+    reversible: "no"
+    blast_radius: object
+    data_sensitivity: internal
+    dry_run: server
+    rollback_hint: Khôi phục từ snapshot
+    input_schema:
+      properties:
+        index: {type: string}
+      required: [index]

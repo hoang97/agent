@@ -1,0 +1,113 @@
+template: k8s
+title: Kubernetes
+description: API server Kubernetes, xác thực bằng token ServiceAccount. Nên cấp RBAC tối thiểu cho ServiceAccount.
+ping: k8s:ping
+fields:
+  - {name: api_url, type: url, required: true, description: "Địa chỉ API server, ví dụ https://k8s.example.com:6443"}
+  - {name: token, type: secret, required: true, description: Token của ServiceAccount}
+  - {name: ca_cert, type: text, description: Chứng chỉ CA dạng PEM nếu cụm dùng CA riêng}
+  - {name: verify_tls, type: boolean, default: true, description: Kiểm tra chứng chỉ TLS}
+  - {name: namespace, type: string, default: default, description: Namespace mặc định}
+  - {name: allowed_namespaces, type: list, description: "Chỉ cho phép các namespace này, cách nhau dấu phẩy; để trống là không giới hạn"}
+  - {name: max_replicas, type: integer, default: 50, description: Số replica tối đa khi scale}
+tools:
+  - name: list_pods
+    description: Liệt kê pod trong một namespace kèm trạng thái và số lần restart
+    handler: k8s:list_pods
+    action_class: read
+    blast_radius: namespace
+    data_sensitivity: internal
+    input_schema:
+      properties:
+        namespace: {type: string}
+
+  - name: list_deployments
+    description: Liệt kê deployment trong một namespace kèm số replica và image
+    handler: k8s:list_deployments
+    action_class: read
+    blast_radius: namespace
+    data_sensitivity: internal
+    input_schema:
+      properties:
+        namespace: {type: string}
+
+  - name: pod_logs
+    description: Đọc các dòng log cuối của một pod
+    handler: k8s:pod_logs
+    action_class: read
+    blast_radius: object
+    data_sensitivity: personal
+    untrusted_output: true
+    input_schema:
+      properties:
+        namespace: {type: string}
+        pod: {type: string}
+        container: {type: string}
+        tail_lines: {type: integer}
+      required: [pod]
+
+  - name: scale
+    description: Đổi số replica của một deployment
+    handler: k8s:scale
+    check: k8s:scale_check
+    action_class: write
+    reversible: "yes"
+    blast_radius: workload
+    data_sensitivity: internal
+    dry_run: server
+    rollback_hint: Scale lại về số replica cũ
+    input_schema:
+      properties:
+        namespace: {type: string}
+        deployment: {type: string}
+        replicas: {type: integer}
+      required: [deployment, replicas]
+
+  - name: rollout_restart
+    description: Khởi động lại các pod của deployment theo kiểu rollout
+    handler: k8s:rollout_restart
+    check: k8s:restart_check
+    action_class: write
+    reversible: partial
+    blast_radius: workload
+    data_sensitivity: internal
+    dry_run: server
+    rollback_hint: kubectl rollout undo về revision trước
+    input_schema:
+      properties:
+        namespace: {type: string}
+        deployment: {type: string}
+      required: [deployment]
+
+  - name: delete_pod
+    description: Xóa một pod (controller sẽ tạo lại pod mới)
+    handler: k8s:delete_pod
+    check: k8s:delete_pod_check
+    action_class: destructive
+    reversible: partial
+    blast_radius: object
+    data_sensitivity: internal
+    dry_run: server
+    rollback_hint: Controller tự tạo lại pod; pod không có controller thì mất hẳn
+    input_schema:
+      properties:
+        namespace: {type: string}
+        pod: {type: string}
+      required: [pod]
+
+  - name: exec
+    description: Chạy một lệnh trong container của pod (ví dụ psql -c "SELECT 1")
+    handler: k8s:exec_command
+    action_class: exec
+    reversible: "no"
+    blast_radius: workload
+    data_sensitivity: internal
+    untrusted_output: true
+    input_schema:
+      properties:
+        namespace: {type: string}
+        pod: {type: string}
+        container: {type: string}
+        command: {type: string, description: Lệnh và tham số, tách theo quy tắc shell}
+        timeout_seconds: {type: integer}
+      required: [pod, command]

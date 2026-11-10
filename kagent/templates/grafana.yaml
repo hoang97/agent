@@ -1,0 +1,65 @@
+template: grafana
+title: Grafana
+description: Grafana HTTP API, xác thực bằng token của service account. Truy vấn metric qua datasource Prometheus.
+ping: grafana:ping
+fields:
+  - {name: url, type: url, required: true, description: "Địa chỉ Grafana, ví dụ https://grafana.example.com"}
+  - {name: token, type: secret, required: true, description: Token của service account}
+  - {name: org_id, type: integer, description: ID tổ chức Grafana nếu không dùng mặc định}
+  - {name: default_datasource_uid, type: string, description: UID datasource Prometheus mặc định}
+  - {name: verify_tls, type: boolean, default: true}
+  - {name: ca_cert, type: text, description: Chứng chỉ CA dạng PEM nếu dùng CA riêng}
+tools:
+  - name: search_dashboards
+    description: Tìm dashboard theo tên
+    handler: grafana:search_dashboards
+    action_class: read
+    data_sensitivity: internal
+    input_schema:
+      properties:
+        query: {type: string}
+
+  - name: list_datasources
+    description: Liệt kê datasource và UID của chúng
+    handler: grafana:list_datasources
+    action_class: read
+    data_sensitivity: internal
+    input_schema:
+      properties: {}
+
+  - name: prometheus_query
+    description: Chạy truy vấn PromQL; range_minutes lớn hơn 0 để lấy chuỗi theo thời gian
+    handler: grafana:prometheus_query
+    action_class: read
+    data_sensitivity: internal
+    input_schema:
+      properties:
+        expr: {type: string, description: Biểu thức PromQL}
+        datasource_uid: {type: string}
+        range_minutes: {type: integer}
+      required: [expr]
+
+  - name: list_alerts
+    description: Liệt kê cảnh báo đang kích hoạt
+    handler: grafana:list_alerts
+    action_class: read
+    data_sensitivity: internal
+    input_schema:
+      properties: {}
+
+  - name: create_silence
+    description: Tắt cảnh báo khớp nhãn trong một khoảng thời gian
+    handler: grafana:create_silence
+    check: grafana:create_silence_check
+    action_class: write
+    reversible: "yes"
+    blast_radius: namespace
+    data_sensitivity: internal
+    dry_run: server
+    rollback_hint: Hết hạn silence hoặc xóa silence trong Grafana
+    input_schema:
+      properties:
+        matchers: {type: string, description: "Dạng nhan=gia_tri, cách nhau dấu phẩy, ví dụ alertname=HighCPU"}
+        duration_minutes: {type: integer}
+        comment: {type: string}
+      required: [matchers]

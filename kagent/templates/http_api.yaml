@@ -1,0 +1,37 @@
+template: http_api
+title: HTTP API
+description: Gọi một REST API bất kỳ với header xác thực riêng. Có thể giới hạn tiền tố đường dẫn được gọi.
+ping: web:api_ping
+fields:
+  - {name: base_url, type: url, required: true, description: "Địa chỉ gốc, ví dụ https://api.example.com"}
+  - {name: auth_header, type: string, default: Authorization, description: Tên header xác thực}
+  - {name: auth_value, type: secret, description: "Giá trị header, ví dụ Bearer abc..."}
+  - {name: allowed_paths, type: list, description: "Chỉ cho gọi các đường dẫn bắt đầu bằng các tiền tố này, ví dụ /v1/status"}
+  - {name: verify_tls, type: boolean, default: true}
+  - {name: ca_cert, type: text, description: Chứng chỉ CA dạng PEM nếu dùng CA riêng}
+tools:
+  - name: get
+    description: Gửi GET tới một đường dẫn của API
+    handler: web:api_get
+    action_class: read
+    data_sensitivity: confidential
+    untrusted_output: true
+    input_schema:
+      properties:
+        path: {type: string}
+        query: {type: object}
+      required: [path]
+
+  - name: post
+    description: Gửi POST với thân JSON tới một đường dẫn của API
+    handler: web:api_post
+    action_class: write
+    reversible: "no"
+    blast_radius: workload
+    data_sensitivity: confidential
+    untrusted_output: true
+    input_schema:
+      properties:
+        path: {type: string}
+        body: {type: object}
+      required: [path]
