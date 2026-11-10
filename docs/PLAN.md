@@ -33,7 +33,7 @@ mọi lệnh gọi công cụ đi qua gateway có phân mức rủi ro, multi-te
 | Tách `tenant_id` ở tầng truy vấn thay RLS | SQLite không có RLS; có test cô lập tenant | Bật RLS khi chuyển PostgreSQL |
 | Công cụ MCP là bản mô phỏng | Chưa có cụm k8s/Grafana thật; không để agent công khai chạm hạ tầng thật | Thay hàm `run` trong `tools.py` bằng client MCP |
 | Hai LLM provider: Claude và heuristic | Chạy được khi chưa có API key; provider heuristic cho kết quả xác định để kiểm thử | Đặt `ANTHROPIC_API_KEY` |
-| Sau khi duyệt lệnh, chỉ thực thi lệnh đó | Giữ MVP đơn giản, không tiếp tục vòng lặp LLM | Thêm resume theo `approval_request` |
+| Sau khi duyệt lệnh, chỉ thực thi lệnh đó; kết quả vào lịch sử của lượt chat sau | Giữ MVP đơn giản, không tiếp tục vòng lặp LLM | Thêm resume theo `approval_request` |
 | FastAPI + JS thuần, không bước build | Triển khai đơn giản | — |
 
 ## Giai đoạn và commit
