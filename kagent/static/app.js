@@ -246,11 +246,13 @@ async function refreshMe() {
 VIEWS.settings = async (main) => {
   const s = await api("GET", "/api/settings/llm-key");
   const describe = { ui: "Đang dùng key nhập trên giao diện", env: "Đang dùng key từ biến môi trường của máy chủ", none: "Chưa có key: agent chạy chế độ heuristic" }[s.source];
-  const key = h("input", { type: "password", autocomplete: "off", placeholder: "sk-ant-...", "aria-label": "Anthropic API key", class: "wide" });
+  const key = h("input", { type: "password", autocomplete: "off", placeholder: "Key hoặc token", "aria-label": "Key hoặc token", class: "wide" });
+  const baseUrl = h("input", { type: "url", placeholder: "https://... (để trống nếu gọi thẳng Anthropic)", "aria-label": "Base URL", class: "wide", value: s.base_url || "" });
+  const authType = h("select", { "aria-label": "Loại xác thực" }, h("option", { value: "api_key", selected: s.auth_type !== "token" }, "API key (ANTHROPIC_API_KEY)"), h("option", { value: "token", selected: s.auth_type === "token" }, "Auth token (ANTHROPIC_AUTH_TOKEN)"));
   const save = guard(async (ev) => {
     ev.preventDefault();
     if (!key.value.trim()) throw new Error("Hãy nhập key");
-    await api("POST", "/api/settings/llm-key", { key: key.value });
+    await api("POST", "/api/settings/llm-key", { key: key.value, base_url: baseUrl.value || null, auth_type: authType.value });
     key.value = "";
     toast("Đã kiểm tra và lưu key");
     await refreshMe();
@@ -258,9 +260,10 @@ VIEWS.settings = async (main) => {
   const remove = guard(async () => { await api("DELETE", "/api/settings/llm-key"); toast("Đã xóa key"); await refreshMe(); });
   main.append(h("h2", {}, "Khóa LLM"),
     h("div", { class: "card" }, h("div", {}, describe, s.last4 && ` (kết thúc bằng ${s.last4})`),
+      s.base_url && h("div", { class: "small" }, "Endpoint: " + s.base_url),
       s.updated_at && h("div", { class: "small" }, `Cập nhật ${fmtTime(s.updated_at)} bởi ${s.updated_by}`),
-      h("form", { class: "row", onsubmit: save }, key, h("button", { type: "submit" }, "Kiểm tra và lưu"), s.source === "ui" && h("button", { type: "button", class: "danger", onclick: remove }, "Xóa key")),
-      h("p", { class: "small" }, "Key dùng chung cho cả tổ chức, được kiểm tra với Anthropic trước khi lưu, mã hóa khi lưu và không hiển thị lại. Key nhập ở đây được ưu tiên hơn biến môi trường.")));
+      h("form", { onsubmit: save }, h("div", { class: "row" }, authType, baseUrl), h("div", { class: "row" }, key, h("button", { type: "submit" }, "Kiểm tra và lưu"), s.source === "ui" && h("button", { type: "button", class: "danger", onclick: remove }, "Xóa key"))),
+      h("p", { class: "small" }, "Key dùng chung cho cả tổ chức, được kiểm tra trước khi lưu, mã hóa khi lưu và không hiển thị lại. Với relay, nội dung nhiệm vụ đi qua máy chủ của relay và bước kiểm tra gửi một tin nhắn rất ngắn. Giá trị nhập ở đây được ưu tiên hơn biến môi trường.")));
 };
 
 VIEWS.account = async (main) => {
