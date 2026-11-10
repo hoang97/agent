@@ -1,0 +1,35 @@
+server: mcp-sql
+description: CSDL SQL (backend mô phỏng, dữ liệu mẫu customers và orders)
+defaults:
+  envs: [dev, staging, prod]
+  roles: [member]
+tools:
+  - name: sql.query
+    description: Chạy một câu SELECT chỉ đọc; trả tối đa 200 dòng
+    handler: sql:query
+    action_class: read
+    reversible: n/a
+    blast_radius: namespace
+    data_sensitivity: personal
+    # Dữ liệu trong bảng do người ngoài nhập (tên, ghi chú) nên coi là nội dung chưa tin cậy.
+    untrusted_output: true
+    annotations: {readOnlyHint: true}
+    input_schema:
+      properties:
+        sql: {type: string, description: Một câu SELECT}
+      required: [sql]
+
+  - name: sql.execute
+    description: Chạy một câu INSERT, UPDATE hoặc DELETE
+    handler: sql:execute
+    check: sql:execute_check
+    action_class: write
+    reversible: partial
+    blast_radius: namespace
+    data_sensitivity: personal
+    dry_run: server
+    rollback_hint: Khôi phục từ bản sao lưu gần nhất
+    input_schema:
+      properties:
+        sql: {type: string, description: Một câu INSERT, UPDATE hoặc DELETE}
+      required: [sql]

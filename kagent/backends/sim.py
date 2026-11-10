@@ -5,6 +5,7 @@ Handler nhận (state, args) và trả về dict; lỗi nghiệp vụ báo bằn
 from __future__ import annotations
 
 import json
+import re
 
 
 class ToolError(Exception):
@@ -94,8 +95,19 @@ def k8s_delete_check(state, args):
     return {"would_delete": f"{ns}/{dep}", "pods": replicas, "objects": 1}
 
 
+_DB_CLIENT = re.compile(r"""^(?:psql|mysql)\b.*?\s(?:-c|-e)\s+(['"])(.+)\1\s*$""", re.S)
+
+
 def k8s_exec(state, args):
-    return {"stdout": "(mô phỏng) lệnh đã chạy trong pod", "command": args.get("command", "")}
+    command = str(args.get("command", "")).strip()
+    m = _DB_CLIENT.match(command)
+    if m:
+        from . import sql
+        statement = m.group(2)
+        reading = re.match(r"\s*(select|with)\b", statement, re.I)
+        output = sql.query(state, {"sql": statement}) if reading else sql.execute(state, {"sql": statement})
+        return {"pod": args.get("pod", ""), "command": command, "stdout": output}
+    return {"pod": args.get("pod", ""), "command": command, "stdout": "(mô phỏng) lệnh đã chạy trong pod"}
 
 
 def k8s_secret(state, args):
