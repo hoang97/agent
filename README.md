@@ -20,7 +20,8 @@ sinh mật khẩu ngẫu nhiên vào `data/initial-credentials.txt`. API docs �
 
 ## Bật Claude
 
-Đặt `ANTHROPIC_API_KEY`. Thiếu khóa, agent chạy chế độ heuristic: lập kế hoạch theo từ khóa, không gọi LLM.
+Org admin nhập key ở tab **Cài đặt** (được mã hóa khi lưu, ưu tiên hơn biến môi trường), hoặc đặt `ANTHROPIC_API_KEY`.
+Thiếu khóa, agent chạy chế độ heuristic: lập kế hoạch theo từ khóa, không gọi LLM.
 Model mặc định: `claude-opus-5-5` cho agent, Reflector, Curator; `claude-haiku-5-5` cho router và kiểm tra độc lập
 (đổi bằng `KAGENT_MODEL_STRONG`, `KAGENT_MODEL_FAST`). Yêu cầu tới Opus bật server-side fallback khi model từ chối.
 

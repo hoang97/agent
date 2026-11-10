@@ -29,3 +29,9 @@ Dựng MVP theo `docs/PLAN.md`.
 ## Đợt 4 — 2026-11-11: đổi mật khẩu
 
 - Mật khẩu ban đầu cần xoay vòng được sau khi bàn giao. Thêm `POST /api/auth/password` và tab Tài khoản: bắt buộc mật khẩu hiện tại, tối thiểu 12 ký tự, giới hạn số lần nhập sai, đăng xuất các phiên khác.
+
+## Đợt 5 — 2026-11-11: nhập LLM key trên giao diện
+
+- Tab Cài đặt cho org admin: key được kiểm tra bằng Models API trước khi lưu, mã hóa Fernet trong bảng `app_secret`, API chỉ trả 4 ký tự cuối.
+- Khóa chủ `KAGENT_SECRET_KEY` nằm trong `/etc/kagent/kagent.env`, ngoài thư mục dữ liệu, để bản sao DB không kèm khóa giải mã.
+- Thứ tự dùng key: giao diện → biến môi trường → chế độ heuristic.

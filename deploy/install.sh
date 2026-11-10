@@ -43,6 +43,11 @@ EOF
   chmod 640 "$ENV_FILE"
 fi
 
+# Khóa chủ mã hóa LLM key: nằm ngoài thư mục dữ liệu để bản sao DB không kèm khóa giải mã.
+if ! grep -q '^KAGENT_SECRET_KEY=' "$ENV_FILE"; then
+  echo "KAGENT_SECRET_KEY=$(openssl rand -base64 32 | tr '+/' '-_')" >> "$ENV_FILE"
+fi
+
 install -m 644 "$REPO_DIR/deploy/kagent.service" /etc/systemd/system/kagent.service
 sed "s/__DOMAIN__/$DOMAIN/g" "$REPO_DIR/deploy/Caddyfile" > /etc/caddy/Caddyfile
 
