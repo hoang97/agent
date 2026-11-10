@@ -1,5 +1,11 @@
 __DOMAIN__ {
 	encode gzip
+	# Chỉ cổng 443 mở từ ngoài nên lấy chứng chỉ bằng TLS-ALPN, không dùng thử thách HTTP.
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
 	reverse_proxy 127.0.0.1:8000
 	header Strict-Transport-Security "max-age=31536000"
 }
