@@ -104,7 +104,7 @@ def test_malformed_model_output_is_filtered():
     good = {"kind": "lesson", "title": "t", "content": "c", "applies_when": "a", "entities": [], "evidence": "e", "source": "tool", "blame_ku": None}
     items = [good, {**good, "kind": "khac"}, {"kind": "lesson"}, "sai"]
     p, _ = provider(completion(json.dumps({"items": items})), completion(json.dumps({"task_type": "khac"})), completion(json.dumps({"score": "abc"})), completion("không phải json"))
-    assert p.reflect({"input": {}}) == [good]
+    assert p.reflect({"input": {}}) == [{**good, "scope": "tenant"}]
     assert p.route("x")["task_type"] == "general"
     assert p.check_plan("t", "k", {}) == 0.0
     with pytest.raises(llm.LLMError):

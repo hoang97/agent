@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import agent as agent_mod
-from . import compiler, db, gateway, knowledge, learning, llm, tools, vault
+from . import compiler, db, gateway, knowledge, learned, learning, llm, tools, vault
 from .config import settings
 from .scheduler import Scheduler
 
@@ -314,7 +314,37 @@ def me(principal: Principal = Depends(current_user), conn=Depends(get_conn)):
     for r in rs:
         roles = [m["role"] for m in conn.execute("SELECT role FROM membership WHERE tenant_id=? AND user_id=?", (r["id"], principal.user_id)).fetchall()]
         tenants.append({"id": r["id"], "name": r["name"], "roles": roles})
-    return {"username": principal.username, "is_org_admin": principal.is_org_admin, "tenants": tenants, "llm_provider": llm.get_provider().name}
+    return {"username": principal.username, "is_org_admin": principal.is_org_admin, "tenants": tenants, "llm_provider": llm.get_provider().name,
+            "profile": _profile(conn, principal.user_id)}
+
+
+STYLES = ("default", "concise", "detailed")
+
+
+def _profile(conn, user_id: str) -> dict:
+    r = conn.execute("SELECT instructions, style, default_env FROM user_profile WHERE user_id=?", (user_id,)).fetchone()
+    return dict(r) if r else {"instructions": "", "style": "default", "default_env": "dev"}
+
+
+class ProfileBody(BaseModel):
+    instructions: str = Field(default="", max_length=2000)
+    style: str = "default"
+    default_env: str = "dev"
+
+
+@app.get("/api/me/profile")
+def profile_get(principal: Principal = Depends(current_user), conn=Depends(get_conn)):
+    return _profile(conn, principal.user_id)
+
+
+@app.put("/api/me/profile")
+def profile_put(body: ProfileBody, principal: Principal = Depends(current_user), conn=Depends(get_conn)):
+    if body.style not in STYLES or body.default_env not in gateway.ENVS:
+        raise HTTPException(400, "phong cách hoặc môi trường không hợp lệ")
+    conn.execute("INSERT INTO user_profile(user_id,instructions,style,default_env,updated_at) VALUES (?,?,?,?,?) "
+                 "ON CONFLICT(user_id) DO UPDATE SET instructions=excluded.instructions, style=excluded.style, default_env=excluded.default_env, updated_at=excluded.updated_at",
+                 (principal.user_id, knowledge.scrub(body.instructions.strip()), body.style, body.default_env, db.iso()))
+    return _profile(conn, principal.user_id)
 
 
 class RunBody(BaseModel):
@@ -511,8 +541,8 @@ def feedback(episode_id: str, body: Feedback, t: Tenant = Depends(current_tenant
 @app.get("/api/ku")
 def ku_list(status: str | None = None, kind: str | None = None, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     sql = ("SELECT id,kind,scope,domain,title,content,applies_when,entities,confidence,helpful_cnt,harmful_cnt,status,valid_to,recorded_at,source_eps,source_trust,version "
-           "FROM knowledge_unit WHERE tenant_id=?")
-    args: list = [t.tenant_id]
+           "FROM knowledge_unit WHERE tenant_id=? AND (scope NOT LIKE 'user:%' OR scope=?)")
+    args: list = [t.tenant_id, f"user:{t.user_id}"]
     if status:
         sql += " AND status=?"
         args.append(status)
@@ -522,11 +552,33 @@ def ku_list(status: str | None = None, kind: str | None = None, t: Tenant = Depe
     return db.rows(conn.execute(sql + " ORDER BY recorded_at DESC, id LIMIT 500", args).fetchall(), "entities", "source_eps")
 
 
+def _visible_ku(conn, t, ku_id: str) -> dict:
+    """Ký ức cá nhân chỉ chủ sở hữu thấy, kể cả với admin."""
+    ku = knowledge.get(conn, t.tenant_id, ku_id)
+    if ku is None or (ku["scope"].startswith("user:") and ku["scope"] != f"user:{t.user_id}"):
+        raise HTTPException(404, "không tìm thấy KU")
+    return ku
+
+
+@app.get("/api/me/memories")
+def memories(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    rs = conn.execute("SELECT id, kind, title, content, status, recorded_at, source_eps FROM knowledge_unit WHERE tenant_id=? AND scope=? "
+                      "AND status IN ('candidate','active') ORDER BY recorded_at DESC", (t.tenant_id, f"user:{t.user_id}")).fetchall()
+    return db.rows(rs, "source_eps")
+
+
+@app.delete("/api/me/memories/{ku_id}")
+def memory_delete(ku_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    ku = knowledge.get(conn, t.tenant_id, ku_id)
+    if ku is None or ku["scope"] != f"user:{t.user_id}":
+        raise HTTPException(404, "không tìm thấy ký ức")
+    knowledge.update(conn, t.tenant_id, ku_id, {"status": "rejected", "valid_to": db.iso()}, "DEPRECATE", t.principal.username, "người dùng xóa ký ức của mình")
+    return {"ok": True}
+
+
 @app.get("/api/ku/{ku_id}")
 def ku_detail(ku_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
-    ku = knowledge.get(conn, t.tenant_id, ku_id)
-    if ku is None:
-        raise HTTPException(404, "không tìm thấy KU")
+    ku = _visible_ku(conn, t, ku_id)
     ku.pop("embedding", None)
     ku["events"] = db.rows(conn.execute("SELECT id, op, actor, reason, at FROM ku_event WHERE ku_id=? AND tenant_id=? ORDER BY id DESC", (ku_id, t.tenant_id)).fetchall())
     ku["edges"] = db.rows(conn.execute("SELECT src, dst, rel FROM ku_edge WHERE tenant_id=? AND (src=? OR dst=?)", (t.tenant_id, ku_id, ku_id)).fetchall())
@@ -534,6 +586,7 @@ def ku_detail(ku_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_
 
 
 class NewKU(BaseModel):
+    scope: str = "tenant"
     kind: str
     title: str = Field(min_length=1, max_length=200)
     content: str = Field(min_length=1, max_length=2000)
@@ -547,8 +600,12 @@ def ku_add(body: NewKU, t: Tenant = Depends(current_tenant), conn=Depends(get_co
     t.require_writer()
     if body.kind not in ("rule", "fact", "procedure", "lesson", "insight"):
         raise HTTPException(400, "loại KU không hợp lệ")
+    if body.scope not in ("tenant", "user"):
+        raise HTTPException(400, "phạm vi không hợp lệ")
+    personal = body.scope == "user"
     return _public(knowledge.add(conn, t.tenant_id, kind=body.kind, title=body.title, content=body.content, applies_when=body.applies_when, entities=body.entities,
-                                 domain=body.domain, source_eps=[], source_trust="user", actor=t.principal.username, reason="thêm thủ công"))
+                                 domain=body.domain, source_eps=[], source_trust="user", actor=t.principal.username, reason="thêm thủ công",
+                                 scope=f"user:{t.user_id}" if personal else "tenant", status="active" if personal else "candidate"))
 
 
 def _public(ku: dict) -> dict:
@@ -563,9 +620,7 @@ class Review(BaseModel):
 @app.post("/api/ku/{ku_id}/review")
 def ku_review(ku_id: str, body: Review, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     t.require_admin()
-    ku = knowledge.get(conn, t.tenant_id, ku_id)
-    if ku is None:
-        raise HTTPException(404, "không tìm thấy KU")
+    ku = _visible_ku(conn, t, ku_id)
     if ku["status"] != "candidate":
         raise HTTPException(409, f"KU đang ở trạng thái {ku['status']}")
     if body.approve:
@@ -576,6 +631,9 @@ def ku_review(ku_id: str, body: Review, t: Tenant = Depends(current_tenant), con
 @app.post("/api/ku/events/{event_id}/rollback")
 def ku_rollback(event_id: int, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     t.require_admin()
+    ev = conn.execute("SELECT ku_id FROM ku_event WHERE id=? AND tenant_id=?", (event_id, t.tenant_id)).fetchone()
+    if ev is not None:
+        _visible_ku(conn, t, ev["ku_id"])
     try:
         return _public(knowledge.rollback(conn, t.tenant_id, event_id, t.principal.username))
     except KeyError as exc:
@@ -745,6 +803,59 @@ def tool_patch(tool: str, body: ToolPatch, t: Tenant = Depends(current_tenant), 
         conn.execute(f"UPDATE tool_registry SET {cols} WHERE tenant_id=? AND tool=?", (*changes.values(), t.tenant_id, tool))
         log.info("tenant %s: %s đổi cấu hình công cụ %s: %s", t.tenant_id, t.principal.username, tool, sorted(changes))
     return _tool_view(conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (t.tenant_id, tool)).fetchone())
+
+
+def _learned_view(conn, t: Tenant, row: dict) -> dict:
+    return {**row, "risk_tier": learned.risk(conn, t.tenant_id, row["steps"]), "flow": learned.flow(row), "personal": row["scope"].startswith("user:"),
+            "success_rate": round(row["successes"] / row["uses"], 2) if row["uses"] else None}
+
+
+@app.get("/api/learned-tools")
+def learned_list(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    """Công cụ tenant (admin thấy cả đề xuất) và công cụ cá nhân của chính mình."""
+    out = []
+    for row in learned.visible_rows(conn, t.tenant_id, t.user_id):
+        if row["scope"] == "tenant" and not t.is_admin and row["status"] not in ("active", "disabled"):
+            continue
+        out.append(_learned_view(conn, t, row))
+    return out
+
+
+class FromEpisode(BaseModel):
+    episode_id: str
+    name: str | None = Field(default=None, max_length=60)
+    description: str | None = Field(default=None, max_length=300)
+    scope: str = "user"
+
+
+@app.post("/api/learned-tools/from-episode")
+def learned_from_episode(body: FromEpisode, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_writer()
+    if body.scope not in ("user", "tenant"):
+        raise HTTPException(400, "phạm vi không hợp lệ")
+    try:
+        row = learned.from_episode(conn, t.tenant_id, t.user_id, body.episode_id, body.name, body.description, body.scope)
+    except learned.LearnedError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    return _learned_view(conn, t, row)
+
+
+class LearnedPatch(BaseModel):
+    status: str | None = None
+    description: str | None = Field(default=None, max_length=300)
+    steps: list | None = None
+    params: dict | None = None
+
+
+@app.patch("/api/learned-tools/{tool_id}")
+def learned_patch(tool_id: str, body: LearnedPatch, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    changes = {k: v for k, v in body.model_dump().items() if v is not None}
+    try:
+        row = learned.update(conn, t.tenant_id, tool_id, t.user_id, t.is_admin, changes)
+    except learned.LearnedError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    log.info("tenant %s: %s cập nhật công cụ học được %s: %s", t.tenant_id, t.principal.username, row["name"], sorted(changes))
+    return _learned_view(conn, t, row)
 
 
 @app.get("/api/policy")

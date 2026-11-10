@@ -28,7 +28,7 @@ tools:
 
 def test_shipped_catalog_is_valid_and_consistent():
     loaded, servers = load_catalog()
-    assert len(loaded) == 17 and len(servers) == 5
+    assert len(loaded) == 19 and len(servers) == 6
     for t in loaded.values():
         assert tools.TIERS.index(t.risk_tier) >= tools.TIERS.index(minimum_tier(t.action_class, t.reversible, t.blast_radius, t.data_sensitivity))
         assert set(t.required) <= set(t.properties)

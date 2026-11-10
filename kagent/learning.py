@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import threading
 
-from . import db, knowledge, llm
+from . import db, knowledge, learned, llm
 from .config import settings
 from .knowledge import scrub
 from .retrieval import near, tokenize
@@ -56,12 +56,12 @@ def _update_counters(conn, tenant_id: str, episode: dict, blamed: set[str]) -> N
 
 
 def curate_item(conn, tenant_id: str, provider, item: dict, episode: dict, trust: str) -> str:
-    candidates = near(conn, tenant_id, f"{item['title']} {item['content']}", item["kind"], settings.near_threshold)
+    scope = f"user:{episode['user_id']}" if item.get("scope") == "user" else episode["scope"]
+    candidates = near(conn, tenant_id, f"{item['title']} {item['content']}", item["kind"], settings.near_threshold, scope=scope)
     decision = provider.curate(item, candidates)
     op, target = decision["op"], decision.get("target")
     target_ku = knowledge.get(conn, tenant_id, target) if target else None
     domain = episode.get("task_type") or "general"
-    scope = episode["scope"]
     common = dict(kind=item["kind"], title=item["title"], content=item["content"], applies_when=item["applies_when"],
                   entities=item["entities"], source_eps=[episode["id"]], source_trust=trust, scope=scope, domain=domain)
 
@@ -99,7 +99,10 @@ def gate(conn, tenant_id: str) -> dict:
             "SELECT 1 FROM ku_edge e JOIN knowledge_unit k ON k.id=e.dst WHERE e.src=? AND e.rel='contradicts' AND k.status='active'",
             (ku["id"],)).fetchone()
         reason = None
-        if tenant["auto_promote"] and ku["kind"] != "rule" and ku["source_trust"] != "external_untrusted":
+        if ku["scope"].startswith("user:") and ku["source_trust"] == "user":
+            # Ký ức cá nhân do chính người dùng nói chỉ ảnh hưởng tới họ nên không cần người duyệt.
+            reason = "sở thích cá nhân do người dùng nói thẳng"
+        elif tenant["auto_promote"] and ku["kind"] != "rule" and ku["source_trust"] != "external_untrusted":
             if ku["source_trust"] == "user":
                 reason = "nguồn là người dùng nói thẳng"
             elif len(set(ku["source_eps"])) >= 2 and not contradiction:
@@ -161,4 +164,5 @@ def run_learning(conn, tenant_id: str, limit: int = 50) -> dict:
                 errors.append({"episode": episode["id"], "error": str(exc)})
         denials = learn_from_denials(conn, tenant_id)
         gated = gate(conn, tenant_id)
-    return {"processed": len(processed), "details": processed, "errors": errors, "denials": denials, **gated}
+        proposed = learned.propose(conn, tenant_id)
+    return {"processed": len(processed), "details": processed, "errors": errors, "denials": denials, "learned_tools_proposed": proposed, **gated}

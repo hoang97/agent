@@ -122,10 +122,13 @@ def retrieve(conn: sqlite3.Connection, tenant_id: str, query: str, *, project: s
     return out
 
 
-def near(conn, tenant_id: str, text: str, kind: str | None = None, threshold: float = 0.55, limit: int = 5) -> list[dict]:
-    """KU gần nghĩa cho Curator, gồm cả candidate."""
+def near(conn, tenant_id: str, text: str, kind: str | None = None, threshold: float = 0.55, limit: int = 5, scope: str | None = None) -> list[dict]:
+    """KU gần nghĩa cho Curator, gồm cả candidate. Chỉ so trong cùng phạm vi để không sửa nhầm ký ức của người khác."""
     sql = "SELECT * FROM knowledge_unit WHERE tenant_id=? AND status IN ('candidate','active')"
     args: list = [tenant_id]
+    if scope:
+        sql += " AND scope=?"
+        args.append(scope)
     if kind:
         sql += " AND kind=?"
         args.append(kind)

@@ -82,7 +82,9 @@ def _rank(ku: dict) -> tuple:
 
 
 def _active(conn, tenant_id: str) -> list[dict]:
-    rs = conn.execute("SELECT * FROM knowledge_unit WHERE tenant_id=? AND status='active' AND (valid_to IS NULL OR valid_to>?)", (tenant_id, db.iso())).fetchall()
+    # Ký ức cá nhân và tri thức riêng của dự án không được biên dịch vào playbook chung của tenant.
+    rs = conn.execute("SELECT * FROM knowledge_unit WHERE tenant_id=? AND status='active' AND scope IN ('tenant','org') AND (valid_to IS NULL OR valid_to>?)",
+                      (tenant_id, db.iso())).fetchall()
     return sorted(db.rows(rs, "entities", "source_eps"), key=_rank)
 
 
