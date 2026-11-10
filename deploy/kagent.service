@@ -1,0 +1,21 @@
+[Unit]
+Description=Knowledge Agent
+After=network.target
+
+[Service]
+User=kagent
+Group=kagent
+WorkingDirectory=/opt/kagent
+EnvironmentFile=/etc/kagent/kagent.env
+# Một worker: lịch nền và khóa Compiler nằm trong tiến trình.
+ExecStart=/opt/kagent/.venv/bin/uvicorn kagent.api:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/kagent/data
+
+[Install]
+WantedBy=multi-user.target
