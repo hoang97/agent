@@ -159,6 +159,17 @@ pre { background: var(--code); padding: 10px; border-radius: 8px; overflow-x: au
 .hidden { display: none !important; }
 .notice { background: var(--info-bg); border-radius: 8px; padding: 8px 12px; font-size: 13px; margin-bottom: 12px; }
 input.wide { flex: 1; min-width: 220px; }
+.chip { background: transparent; color: var(--muted); border: 1px solid var(--line); border-radius: 14px; padding: 1px 10px; font-size: 12px; }
+.chip.on { background: var(--info-bg); color: var(--accent); border-color: var(--accent); }
+.chip:disabled { cursor: default; }
+.tool-item { border-top: 1px solid var(--line); padding: 10px 0; }
+.card h3 + .tool-item { border-top: 0; }
+.tool-item.off > .tool-head code { color: var(--muted); }
+.tool-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tool-perms { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.tool-perms select { padding: 1px 6px; font-size: 12px; }
+.sep { margin-left: 10px; }
+.warn-text { color: var(--warn); }
 
 @media (max-width: 760px) {
   .sidebar { position: fixed; inset: 0 auto 0 0; transform: translateX(-100%); transition: transform .18s; width: min(290px, 86vw); }
