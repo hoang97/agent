@@ -132,7 +132,7 @@ function activityView(steps, running) {
   return h("details", { class: "activity" + (running ? " running" : "") }, h("summary", {}, icon("chevron"), summary), rows);
 }
 
-function approvalCard(a) {
+function approvalCard(a, onDecide) {
   const done = a.status !== "pending";
   const result = a.result && a.result.result;
   const failed = a.result && a.result.status === "error";
@@ -141,9 +141,23 @@ function approvalCard(a) {
     h("div", { class: "approval-head" }, h("strong", {}, heading), badge(failed ? "error" : a.status)),
     h("div", {}, h("code", {}, a.tool), ` ở ${a.env} · ${a.risk_tier} · tin cậy ${a.confidence}`),
     a.reasons.length > 0 && h("div", { class: "small" }, a.reasons.join("; ")),
-    a.status === "pending" && h("div", { class: "small" }, `Đã có ${a.decided_by.length}/${a.required_approvals} người duyệt. Bạn không thể tự duyệt lệnh của mình; người có quyền duyệt tại trang Duyệt lệnh.`),
+    a.status === "pending" && a.dry_run && h("div", { class: "small" + (a.dry_run.error ? " warn-text" : "") }, (a.dry_run.error ? "Chạy thử báo lỗi, lệnh nhiều khả năng sẽ thất bại: " : "Chạy thử: ") + (a.dry_run.error || JSON.stringify(a.dry_run))),
+    a.status === "pending" && a.rollback_hint && h("div", { class: "small" }, "Cách hoàn tác: " + a.rollback_hint),
+    a.status === "pending" && (a.can_decide && onDecide ? approvalActions(a, onDecide)
+      : h("div", { class: "small" }, `Đã có ${a.decided_by.length}/${a.required_approvals} người duyệt. Đang chờ người có quyền duyệt tại trang Duyệt lệnh.`)),
     a.deny_reason && h("div", { class: "small" }, "Lý do từ chối: " + a.deny_reason),
     result && h("pre", {}, JSON.stringify(result, null, 1)));
+}
+
+function approvalActions(a, onDecide) {
+  const reason = h("input", { placeholder: "Lý do (khi từ chối)", "aria-label": "Lý do từ chối", class: "wide" });
+  const act = (action) => guard(async () => {
+    if (action === "deny" && !reason.value.trim()) throw new Error("Hãy nêu lý do từ chối để agent học");
+    await onDecide(a, action, reason.value.trim() || null);
+  });
+  return h("div", { class: "row" }, h("button", { type: "button", onclick: act("approve_once") }, "Chạy lệnh"),
+    h("button", { type: "button", class: "ghost", onclick: act("approve_session"), title: "Cùng công cụ và namespace, trong 1 giờ" }, "Cho phép trong 1 giờ"),
+    reason, h("button", { type: "button", class: "danger", onclick: act("deny") }, "Từ chối"));
 }
 
 function chatView(main) {
@@ -230,9 +244,17 @@ function chatView(main) {
     const body = h("div", { class: "prose" });
     if (m.error) body.append(h("div", { class: "msg-error" }, m.output));
     else body.append(renderMarkdown(m.output || ""));
-    const el = h("div", { class: "msg assistant", "data-ep": m.id }, activityView(m.steps, null), m.approvals.map(approvalCard), body,
+    const el = h("div", { class: "msg assistant", "data-ep": m.id }, activityView(m.steps, null), m.approvals.map((a) => approvalCard(a, decide)), body,
       m.cancelled && h("div", { class: "small" }, "Đã dừng"), actionsRow(m));
     return el;
+  }
+
+  async function decide(a, action, reason) {
+    const r = await api("POST", `/api/approvals/${a.id}/decide`, { action, reason });
+    const failed = r.result && r.result.status === "error";
+    toast(r.status === "pending" ? "Đã ghi nhận, cần thêm người duyệt" : r.status === "denied" ? "Đã từ chối lệnh" : failed ? "Lệnh đã chạy nhưng báo lỗi" : "Đã chạy lệnh", failed);
+    const data = await api("GET", `/api/conversations/${state.conversationId}`);
+    for (const m of data.messages) if (blocks.has(m.id) && m.approvals.some((x) => x.id === a.id)) replaceBlock(m);
   }
 
   function replaceBlock(m) {
