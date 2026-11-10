@@ -72,3 +72,15 @@ Dựng MVP theo `docs/PLAN.md`.
 - **Cá nhân hóa:** chỉ dẫn riêng, phong cách trả lời, môi trường mặc định. Ký ức cá nhân học từ câu kiểu "tôi thích…", tự kích hoạt, chỉ chủ sở hữu thấy và xóa được.
 - **Sửa lỗi rò tri thức:** ký ức cá nhân và tri thức riêng của dự án không còn bị biên dịch vào playbook chung. Curator chỉ so KU trong cùng phạm vi.
 - **Lỗi phát hiện khi thử giao diện:** truy vấn chạy song song bị coi như chạy nối tiếp khi kiểm tra nội dung ngoài; bước con của công cụ học được bị ép hỏi sai; tên công cụ tiếng Việt bị mất ký tự.
+
+## Đợt 11 — 2026-11-11: tự duyệt lệnh
+
+- **Theo yêu cầu của chủ dự án:** người dùng tự duyệt lệnh công cụ của mình ngay trên thẻ trong chat hoặc ở trang Duyệt lệnh, một xác nhận là đủ. Đây là điểm khác tài liệu kiến trúc.
+- **Giữ nguyên:**
+  - luật chặn cứng và ô chặn của ma trận;
+  - bắt buộc nêu lý do khi từ chối (lý do thành bài học);
+  - kiểm tra lại quyền công cụ lúc duyệt;
+  - audit ghi đúng người duyệt.
+- **Thay đổi công cụ dùng chung vẫn cần admin:** cấu hình danh mục và công cụ học được của tenant.
+- **Công tắc `self_approve` theo tenant:** mặc định bật; tắt thì quay về luật cũ.
+- **Lỗi thấy khi thử giao diện:** lệnh duyệt xong nhưng chạy lỗi vẫn báo "Đã chạy lệnh". Giờ thông báo báo lỗi, và thẻ duyệt làm nổi bật khi lần chạy thử đã thất bại.

@@ -21,7 +21,7 @@ mọi lệnh gọi công cụ đi qua gateway có phân mức rủi ro, multi-te
 | Đo lường | Golden task, chỉ số tuần | Golden task chặn publish, trang Đo lường | `kagent/compiler.py`, `kagent/api.py` |
 | MCP Gateway | Danh mục, kiểm quyền, audit | Manifest YAML trong git, đồng bộ theo tenant, quyền theo môi trường và vai trò, 3 cửa quyết định, audit; **backend công cụ là mô phỏng** | `kagent/catalog/`, `kagent/tools.py`, `kagent/gateway.py`, `docs/TOOLS.md` |
 | Phân cấp quyền | R0–R4 × môi trường × tin cậy | Ma trận, `auto_execute`, điểm tin cậy 4 thành phần, ép hỏi | `kagent/gateway.py` |
-| Phê duyệt | Card, 3 lựa chọn, 30 phút, không tự duyệt | Như thiết kế; R3 prod cần 2 người | `kagent/gateway.py` |
+| Phê duyệt | Card, 3 lựa chọn, 30 phút, không tự duyệt | **Khác thiết kế theo quyết định của chủ dự án (2026-11-11):** người yêu cầu tự duyệt lệnh của mình ngay trong chat, một xác nhận là đủ. Admin có thể tắt theo tenant để quay về luật cũ (không tự duyệt, R3 prod cần 2 người). Thay đổi công cụ dùng chung vẫn cần admin | `kagent/gateway.py` |
 | Skill / thủ tục chín | Biên dịch procedure thành Skill | Thêm công cụ học được: chuỗi bước tự đề xuất hoặc lưu từ chat, chạy qua gateway | `kagent/learned.py` |
 | Phạm vi `user:<id>` | Tri thức theo người dùng | Hồ sơ cá nhân, ký ức cá nhân riêng tư, không vào L2 chung | `kagent/agent.py`, `kagent/learning.py` |
 | Multi-tenant | RLS PostgreSQL, overlay chỉ siết | Lọc `tenant_id` ở tầng truy vấn, overlay chỉ siết | `kagent/gateway.py`, `kagent/api.py` |

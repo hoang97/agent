@@ -53,9 +53,9 @@ check("đọc R0 tự chạy", steps(ep) and steps(ep)[0]["status"] == "ok", ep[
 ep = alice.run("scale deployment api lên 3 replica trong namespace payments")
 s = steps(ep)[0]
 check("lệnh ghi ở namespace mới phải chờ duyệt", s["status"] == "pending", s)
-r = alice.c.post(f"/api/approvals/{s['approval_id']}/decide", json={"action": "approve_once"})
-check("không được tự duyệt", r.status_code == 403, r.text)
-r = bob.c.post(f"/api/approvals/{s['approval_id']}/decide", json={"action": "deny", "reason": f"lý do {marker}"})
+pending = next(a for a in alice.c.get("/api/approvals?status=pending").json() if a["id"] == s["approval_id"])
+check("người yêu cầu được tự quyết định lệnh của mình", pending["can_decide"] and pending["mine"], pending)
+r = alice.c.post(f"/api/approvals/{s['approval_id']}/decide", json={"action": "deny", "reason": f"lý do {marker}"})
 check("từ chối kèm lý do", r.json().get("status") == "denied", r.text)
 
 ep = alice.run("đọc secret của app web")

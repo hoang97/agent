@@ -74,6 +74,14 @@ Một lệnh chỉ chạy khi qua đủ các điều kiện:
 3. Người yêu cầu có vai trò được phép (`tenant_admin` và `org_admin` luôn được).
 4. Lệnh qua ba cửa của gateway: luật chặn, ma trận mức rủi ro × môi trường, điểm tin cậy.
 
+Khi ma trận yêu cầu duyệt, mặc định chính người yêu cầu xác nhận lệnh ngay trên thẻ trong chat ("Chạy lệnh", "Cho phép trong 1 giờ" hoặc "Từ chối" kèm lý do). Một xác nhận là đủ. Luật chặn cứng và ô "chặn" của ma trận vẫn giữ nguyên. Admin có thể tắt tự duyệt cho một tenant ở trang **Công cụ & Chính sách**; khi đó lệnh phải do người có vai trò duyệt khác xác nhận, và R3 ở prod cần 2 người.
+
+Thay đổi công cụ dùng chung luôn cần admin:
+- bật/tắt, đổi mức rủi ro, môi trường hoặc vai trò của công cụ trong danh mục;
+- duyệt, sửa, tắt hoặc từ chối công cụ học được của tenant.
+
+Công cụ học được cá nhân do chính chủ quản lý.
+
 Agent chỉ được thấy những công cụ mà người yêu cầu được dùng ở môi trường hiện tại. Gateway vẫn kiểm lại ở mọi lệnh. Lệnh đang chờ duyệt mà công cụ bị tắt hoặc bị thu hẹp quyền thì không thể duyệt để chạy, chỉ còn từ chối được.
 
 ## Gỡ một công cụ
