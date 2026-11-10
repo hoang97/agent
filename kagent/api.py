@@ -246,6 +246,8 @@ def require_org_admin(principal: Principal = Depends(current_user)) -> Principal
 class LLMKey(BaseModel):
     # Kiểm tra độ dài trong handler: lỗi 422 của pydantic sẽ trả lại nguyên giá trị đầu vào.
     key: str
+    base_url: str | None = None
+    auth_type: str = "api_key"
 
 
 @app.get("/api/settings/llm-key")
@@ -258,11 +260,14 @@ def llm_key_save(body: LLMKey, principal: Principal = Depends(require_org_admin)
     key = body.key.strip()
     if not 20 <= len(key) <= 300 or any(c.isspace() or not c.isprintable() for c in key):
         raise HTTPException(400, "key không đúng định dạng")
+    if body.auth_type not in ("api_key", "token"):
+        raise HTTPException(400, "loại xác thực không hợp lệ")
     try:
-        llm.validate_key(key)
+        cred = vault.Credential(key, llm.check_base_url(body.base_url), body.auth_type)
+        llm.validate_key(cred)
     except llm.LLMError as exc:
         raise HTTPException(400, f"không lưu key: {exc}") from exc
-    vault.save(conn, key, principal.username)
+    vault.save(conn, cred, principal.username)
     return vault.status(conn)
 
 

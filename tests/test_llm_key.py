@@ -1,3 +1,5 @@
+from types import SimpleNamespace as NS
+
 import httpx
 import pytest
 import anthropic
@@ -77,9 +79,10 @@ def test_delete_returns_to_heuristic(users, auto_provider):
 def test_ui_key_overrides_env_key(users, auto_provider):
     admin = users["admin"]
     settings.anthropic_key = "sk-ant-env-key-000000000000ENVV"
-    assert admin.get(URL, tenant=False).json() == {"source": "env", "last4": "ENVV", "updated_at": None, "updated_by": None}
+    env = admin.get(URL, tenant=False).json()
+    assert env["source"] == "env" and env["last4"] == "ENVV" and env["auth_type"] == "api_key"
     admin.post(URL, tenant=False, json={"key": KEY})
-    assert vault.resolve() == (KEY, "ui")
+    assert vault.resolve()[0].key == KEY and vault.resolve()[1] == "ui"
 
 
 def test_changed_master_key_falls_back_without_crash(users, auto_provider):
@@ -111,4 +114,70 @@ def test_validate_key_maps_errors(monkeypatch, cls, code, text):
 
     monkeypatch.setattr(llm.anthropic, "Anthropic", Client)
     with pytest.raises(llm.LLMError, match=text):
-        llm.validate_key(KEY)
+        llm.validate_key(vault.Credential(KEY))
+
+
+RELAY = "https://relay.example.test"
+
+
+@pytest.fixture()
+def public_dns(monkeypatch):
+    monkeypatch.setattr(llm.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 443))])
+
+
+def test_relay_token_uses_bearer_and_base_url(users, auto_provider, public_dns):
+    admin = users["admin"]
+    saved = admin.post(URL, tenant=False, json={"key": KEY, "base_url": RELAY + "/", "auth_type": "token"}).json()
+    assert saved["base_url"] == RELAY and saved["auth_type"] == "token" and KEY not in str(saved)
+    provider = llm.get_provider()
+    assert provider.client.auth_token == KEY and not provider.client.api_key
+    assert str(provider.client.base_url).rstrip("/") == RELAY
+    assert provider.client.auth_headers["Authorization"] == f"Bearer {KEY}"
+    assert provider.direct is False
+
+
+def test_relay_requests_skip_server_side_fallback():
+    calls = []
+
+    class Fake:
+        def create(self, **kw):
+            calls.append(kw)
+            return NS(content=[NS(type="text", text='{"items": []}')], stop_reason="end_turn", usage=NS(input_tokens=1, output_tokens=1))
+
+    fake = Fake()
+    p = llm.AnthropicProvider(NS(messages=fake, beta=NS(messages=fake)), vault.Credential(KEY, RELAY, "token"))
+    p.reflect({"input": {"task": "x"}})
+    assert "fallbacks" not in calls[0] and "betas" not in calls[0]
+
+
+def test_relay_validation_sends_small_message_not_models_api(monkeypatch):
+    seen = {}
+
+    class Messages:
+        def create(self, **kw):
+            seen.update(kw)
+
+    class Client:
+        def __init__(self, **kw):
+            seen["init"] = kw
+            self.messages = Messages()
+
+    monkeypatch.setattr(llm.anthropic, "Anthropic", Client)
+    llm.validate_key(vault.Credential(KEY, RELAY, "token"))
+    assert seen["max_tokens"] == 16 and seen["init"]["auth_token"] == KEY and seen["init"]["base_url"] == RELAY
+
+
+@pytest.mark.parametrize("bad", ["http://relay.example.test", "ftp://x.test", "https://u:p@relay.example.test", "https://relay.example.test/?a=1", "relay.example.test"])
+def test_bad_base_url_rejected(users, auto_provider, public_dns, bad):
+    assert users["admin"].post(URL, tenant=False, json={"key": KEY, "base_url": bad}).status_code == 400
+
+
+@pytest.mark.parametrize("ip", ["127.0.0.1", "10.0.0.1", "169.254.169.254", "192.168.1.1", "::1"])
+def test_base_url_to_private_address_rejected(users, auto_provider, monkeypatch, ip):
+    monkeypatch.setattr(llm.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", (ip, 443))])
+    r = users["admin"].post(URL, tenant=False, json={"key": KEY, "base_url": RELAY})
+    assert r.status_code == 400 and "nội bộ" in r.text
+
+
+def test_invalid_auth_type_rejected(users, auto_provider):
+    assert users["admin"].post(URL, tenant=False, json={"key": KEY, "auth_type": "basic"}).status_code == 400

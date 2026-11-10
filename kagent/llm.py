@@ -1,9 +1,12 @@
 """Hai provider: Claude (có ANTHROPIC_API_KEY) và heuristic (không cần mạng, kết quả xác định)."""
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
+import socket
 from typing import Callable
+from urllib.parse import urlsplit
 
 import anthropic
 
@@ -71,6 +74,15 @@ def extract_entities(task: str) -> list[str]:
 
 def has_negation(text: str) -> bool:
     return bool(_NEGATION & set(tokenize(text)))
+
+
+def _client(cred: vault.Credential | None, **options) -> anthropic.Anthropic:
+    if cred is None:
+        return anthropic.Anthropic(**options)
+    auth = {"auth_token": cred.key} if cred.auth_type == "token" else {"api_key": cred.key}
+    if cred.base_url:
+        options["base_url"] = cred.base_url
+    return anthropic.Anthropic(**auth, **options)
 
 
 class HeuristicProvider:
@@ -197,14 +209,16 @@ class HeuristicProvider:
 class AnthropicProvider:
     name = "anthropic"
 
-    def __init__(self, client: anthropic.Anthropic | None = None, api_key: str | None = None) -> None:
-        self.client = client or anthropic.Anthropic(api_key=api_key or settings.anthropic_key or None)
+    def __init__(self, client: anthropic.Anthropic | None = None, credential: vault.Credential | None = None) -> None:
+        self.client = client or _client(credential)
+        # Relay có thể không hỗ trợ beta header của fallback phía server.
+        self.direct = credential is None or credential.base_url is None
 
     def _create(self, tier: str, **params):
         """Opus có fallback phía server khi model từ chối; Haiku không hỗ trợ fallback này."""
         model = settings.model_strong if tier == "strong" else settings.model_fast
         try:
-            if model.startswith("claude-opus") or model.startswith("claude-fable") or model.startswith("claude-sonnet"):
+            if self.direct and (model.startswith("claude-opus") or model.startswith("claude-fable") or model.startswith("claude-sonnet")):
                 response = self.client.beta.messages.create(
                     model=model, betas=["server-side-fallback-2026-07-01"], fallbacks="default", **params)
             else:
@@ -295,25 +309,47 @@ class AnthropicProvider:
         return max(0.0, min(1.0, float(data["score"])))
 
 
-def validate_key(key: str) -> None:
-    """Gọi thử Models API bằng khóa mới; không tốn token."""
-    client = anthropic.Anthropic(api_key=key, timeout=15, max_retries=1)
+def check_base_url(url: str | None) -> str | None:
+    """Chỉ nhận HTTPS tới địa chỉ công khai, vì server sẽ gửi credential tới đó."""
+    url = (url or "").strip().rstrip("/")
+    if not url:
+        return None
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
+        raise LLMError("Base URL phải có dạng https://tên-miền")
     try:
-        client.models.retrieve(settings.model_strong)
+        infos = socket.getaddrinfo(parts.hostname, parts.port or 443, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, UnicodeError) as exc:
+        raise LLMError("không phân giải được tên miền của Base URL") from exc
+    if not all(ipaddress.ip_address(info[4][0]).is_global for info in infos):
+        raise LLMError("Base URL không được trỏ tới địa chỉ nội bộ")
+    return url
+
+
+def validate_key(cred: vault.Credential) -> None:
+    """Thử credential mới. Relay có thể không có Models API nên gửi một tin nhắn rất ngắn."""
+    client = _client(cred, timeout=30, max_retries=1)
+    try:
+        if cred.base_url:
+            client.messages.create(model=settings.model_strong, max_tokens=16, messages=[{"role": "user", "content": "ping"}])
+        else:
+            client.models.retrieve(settings.model_strong)
     except anthropic.AuthenticationError as exc:
-        raise LLMError("Anthropic từ chối key này") from exc
+        raise LLMError("endpoint từ chối credential này") from exc
     except (anthropic.PermissionDeniedError, anthropic.NotFoundError) as exc:
         raise LLMError(f"key không có quyền dùng model {settings.model_strong}") from exc
     except anthropic.RateLimitError as exc:
         raise LLMError("Anthropic đang giới hạn tốc độ, thử lại sau") from exc
     except anthropic.APIStatusError as exc:
-        raise LLMError(f"Anthropic trả lỗi {exc.status_code}") from exc
+        raise LLMError(f"endpoint trả lỗi {exc.status_code}") from exc
     except anthropic.APIConnectionError as exc:
-        raise LLMError("máy chủ không kết nối được tới Anthropic") from exc
+        raise LLMError("máy chủ không kết nối được tới endpoint") from exc
+    except anthropic.AnthropicError as exc:
+        raise LLMError("endpoint trả về dữ liệu không hợp lệ") from exc
 
 
 _override = None
-_cached: tuple[str, AnthropicProvider] | None = None
+_cached: tuple[vault.Credential, AnthropicProvider] | None = None
 
 
 def set_provider(provider) -> None:
@@ -328,9 +364,9 @@ def get_provider():
         return _override
     if settings.llm_provider == "heuristic":
         return HeuristicProvider()
-    key = vault.resolve()[0]
-    if not key:
+    cred = vault.resolve()[0]
+    if cred is None:
         return HeuristicProvider()
-    if _cached is None or _cached[0] != key:
-        _cached = (key, AnthropicProvider(api_key=key))
+    if _cached is None or _cached[0] != cred:
+        _cached = (cred, AnthropicProvider(credential=cred))
     return _cached[1]
