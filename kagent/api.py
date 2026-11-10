@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import agent as agent_mod
-from . import compiler, db, gateway, knowledge, learning, llm, tools
+from . import compiler, db, gateway, knowledge, learning, llm, tools, vault
 from .config import settings
 from .scheduler import Scheduler
 
@@ -235,6 +235,41 @@ def change_password(body: ChangePassword, request: Request, principal: Principal
         # Đổi mật khẩu thì đăng xuất mọi phiên khác của tài khoản này.
         conn.execute("DELETE FROM session WHERE user_id=? AND token_hash!=?", (principal.user_id, _token_hash(request.cookies[COOKIE])))
     return {"ok": True}
+
+
+def require_org_admin(principal: Principal = Depends(current_user)) -> Principal:
+    if not principal.is_org_admin:
+        raise HTTPException(403, "cần quyền org_admin")
+    return principal
+
+
+class LLMKey(BaseModel):
+    # Kiểm tra độ dài trong handler: lỗi 422 của pydantic sẽ trả lại nguyên giá trị đầu vào.
+    key: str
+
+
+@app.get("/api/settings/llm-key")
+def llm_key_status(_: Principal = Depends(require_org_admin), conn=Depends(get_conn)):
+    return vault.status(conn)
+
+
+@app.post("/api/settings/llm-key")
+def llm_key_save(body: LLMKey, principal: Principal = Depends(require_org_admin), conn=Depends(get_conn)):
+    key = body.key.strip()
+    if not 20 <= len(key) <= 300 or any(c.isspace() or not c.isprintable() for c in key):
+        raise HTTPException(400, "key không đúng định dạng")
+    try:
+        llm.validate_key(key)
+    except llm.LLMError as exc:
+        raise HTTPException(400, f"không lưu key: {exc}") from exc
+    vault.save(conn, key, principal.username)
+    return vault.status(conn)
+
+
+@app.delete("/api/settings/llm-key")
+def llm_key_delete(principal: Principal = Depends(require_org_admin), conn=Depends(get_conn)):
+    vault.delete(conn, principal.username)
+    return vault.status(conn)
 
 
 @app.get("/api/health")

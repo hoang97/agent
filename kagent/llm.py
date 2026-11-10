@@ -7,6 +7,7 @@ from typing import Callable
 
 import anthropic
 
+from . import vault
 from .config import settings
 from .retrieval import tokenize
 
@@ -196,8 +197,8 @@ class HeuristicProvider:
 class AnthropicProvider:
     name = "anthropic"
 
-    def __init__(self, client: anthropic.Anthropic | None = None) -> None:
-        self.client = client or anthropic.Anthropic(api_key=settings.anthropic_key or None)
+    def __init__(self, client: anthropic.Anthropic | None = None, api_key: str | None = None) -> None:
+        self.client = client or anthropic.Anthropic(api_key=api_key or settings.anthropic_key or None)
 
     def _create(self, tier: str, **params):
         """Opus có fallback phía server khi model từ chối; Haiku không hỗ trợ fallback này."""
@@ -294,7 +295,25 @@ class AnthropicProvider:
         return max(0.0, min(1.0, float(data["score"])))
 
 
+def validate_key(key: str) -> None:
+    """Gọi thử Models API bằng khóa mới; không tốn token."""
+    client = anthropic.Anthropic(api_key=key, timeout=15, max_retries=1)
+    try:
+        client.models.retrieve(settings.model_strong)
+    except anthropic.AuthenticationError as exc:
+        raise LLMError("Anthropic từ chối key này") from exc
+    except (anthropic.PermissionDeniedError, anthropic.NotFoundError) as exc:
+        raise LLMError(f"key không có quyền dùng model {settings.model_strong}") from exc
+    except anthropic.RateLimitError as exc:
+        raise LLMError("Anthropic đang giới hạn tốc độ, thử lại sau") from exc
+    except anthropic.APIStatusError as exc:
+        raise LLMError(f"Anthropic trả lỗi {exc.status_code}") from exc
+    except anthropic.APIConnectionError as exc:
+        raise LLMError("máy chủ không kết nối được tới Anthropic") from exc
+
+
 _override = None
+_cached: tuple[str, AnthropicProvider] | None = None
 
 
 def set_provider(provider) -> None:
@@ -304,9 +323,14 @@ def set_provider(provider) -> None:
 
 
 def get_provider():
+    global _cached
     if _override is not None:
         return _override
-    choice = settings.llm_provider
-    if choice == "heuristic" or (choice == "auto" and not settings.anthropic_key):
+    if settings.llm_provider == "heuristic":
         return HeuristicProvider()
-    return AnthropicProvider()
+    key = vault.resolve()[0]
+    if not key:
+        return HeuristicProvider()
+    if _cached is None or _cached[0] != key:
+        _cached = (key, AnthropicProvider(api_key=key))
+    return _cached[1]

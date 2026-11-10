@@ -13,6 +13,7 @@ class Settings:
         env = os.environ.get
         self.data_dir = Path(env("KAGENT_DATA_DIR", "data"))
         self.anthropic_key = env("ANTHROPIC_API_KEY", "")
+        self.secret_key = env("KAGENT_SECRET_KEY", "")
         self.llm_provider = env("KAGENT_LLM", "auto")  # auto | anthropic | heuristic
         self.model_strong = env("KAGENT_MODEL_STRONG", "claude-opus-5-5")
         self.model_fast = env("KAGENT_MODEL_FAST", "claude-haiku-5-5")

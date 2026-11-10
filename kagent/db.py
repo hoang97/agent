@@ -133,6 +133,11 @@ CREATE TABLE IF NOT EXISTS golden_task (
   expect_terms TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS app_secret (
+  name TEXT PRIMARY KEY, ciphertext TEXT NOT NULL, last4 TEXT NOT NULL,
+  updated_at TEXT NOT NULL, updated_by TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS compile_run (
   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, status TEXT NOT NULL, branch TEXT, diff TEXT,
   changed TEXT NOT NULL DEFAULT '[]', needs_review INTEGER NOT NULL DEFAULT 0,
