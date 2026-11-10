@@ -1,0 +1,110 @@
+# Kubernetes. Mức rủi ro không khai thì được tính từ metadata; khai thì không được thấp hơn mức tính ra.
+server: mcp-k8s
+description: Kubernetes (backend mô phỏng)
+defaults:
+  envs: [dev, staging, prod]
+  roles: [member]
+tools:
+  - name: k8s.get
+    description: Liệt kê deployment trong một namespace
+    handler: sim:k8s_get
+    action_class: read
+    reversible: n/a
+    blast_radius: object
+    data_sensitivity: internal
+    annotations: {readOnlyHint: true}
+    input_schema:
+      properties:
+        namespace: {type: string, description: Kubernetes namespace}
+
+  - name: k8s.scale
+    description: Đổi số replica của deployment (0-20)
+    handler: sim:k8s_scale
+    check: sim:k8s_scale_check
+    action_class: write
+    reversible: "yes"
+    blast_radius: workload
+    data_sensitivity: internal
+    dry_run: server
+    rollback_hint: Scale lại về số replica cũ
+    annotations: {readOnlyHint: false, idempotentHint: true}
+    input_schema:
+      properties:
+        namespace: {type: string, description: Kubernetes namespace}
+        deployment: {type: string, description: Tên deployment}
+        replicas: {type: integer}
+      required: [deployment, replicas]
+
+  - name: k8s.rollout_restart
+    description: Khởi động lại deployment theo rollout
+    handler: sim:k8s_restart
+    check: sim:k8s_restart_check
+    action_class: write
+    reversible: partial
+    blast_radius: workload
+    data_sensitivity: internal
+    dry_run: server
+    rollback_hint: Rollout undo về revision trước
+    input_schema:
+      properties:
+        namespace: {type: string, description: Kubernetes namespace}
+        deployment: {type: string, description: Tên deployment}
+      required: [deployment]
+
+  - name: k8s.delete
+    description: Xóa deployment
+    handler: sim:k8s_delete
+    check: sim:k8s_delete_check
+    action_class: destructive
+    reversible: "no"
+    blast_radius: workload
+    data_sensitivity: internal
+    dry_run: server
+    rollback_hint: Apply lại manifest từ git
+    annotations: {destructiveHint: true}
+    input_schema:
+      properties:
+        namespace: {type: string, description: Kubernetes namespace}
+        deployment: {type: string, description: Tên deployment}
+      required: [deployment]
+
+  - name: k8s.exec
+    description: Chạy lệnh trong pod
+    handler: sim:k8s_exec
+    action_class: exec
+    reversible: "no"
+    blast_radius: workload
+    data_sensitivity: internal
+    input_schema:
+      properties:
+        namespace: {type: string, description: Kubernetes namespace}
+        pod: {type: string}
+        command: {type: string}
+      required: [pod, command]
+
+  - name: k8s.get_secret_value
+    description: Đọc giá trị Secret
+    handler: sim:k8s_secret
+    action_class: read
+    reversible: n/a
+    blast_radius: object
+    data_sensitivity: secret
+    input_schema:
+      properties:
+        namespace: {type: string, description: Kubernetes namespace}
+        name: {type: string}
+      required: [name]
+
+  - name: k8s.delete_namespace
+    description: Xóa cả namespace
+    handler: sim:k8s_delete_ns
+    action_class: destructive
+    reversible: "no"
+    blast_radius: namespace
+    data_sensitivity: internal
+    rollback_hint: Không thể hoàn tác
+    annotations: {destructiveHint: true}
+    input_schema:
+      properties:
+        namespace: {type: string, description: Kubernetes namespace}
+      required: [namespace]

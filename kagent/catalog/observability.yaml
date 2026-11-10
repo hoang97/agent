@@ -1,0 +1,44 @@
+server: mcp-grafana
+description: Grafana (backend mô phỏng)
+defaults:
+  envs: [dev, staging, prod]
+  roles: [member]
+tools:
+  - name: grafana.query
+    description: Truy vấn metric
+    handler: sim:grafana_query
+    action_class: read
+    reversible: n/a
+    blast_radius: object
+    data_sensitivity: internal
+    annotations: {readOnlyHint: true}
+    input_schema:
+      properties:
+        query: {type: string}
+      required: [query]
+
+  - name: grafana.create_dashboard
+    description: Tạo dashboard
+    handler: sim:grafana_dashboard
+    action_class: write
+    reversible: "yes"
+    blast_radius: object
+    data_sensitivity: internal
+    rollback_hint: Xóa dashboard vừa tạo
+    input_schema:
+      properties:
+        title: {type: string}
+      required: [title]
+
+  - name: grafana.silence_alert
+    description: Tắt cảnh báo
+    handler: sim:grafana_silence
+    action_class: write
+    reversible: "yes"
+    blast_radius: namespace
+    data_sensitivity: internal
+    rollback_hint: Gỡ silence
+    input_schema:
+      properties:
+        alert: {type: string}
+      required: [alert]

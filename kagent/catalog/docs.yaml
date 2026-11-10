@@ -1,0 +1,45 @@
+server: mcp-docs
+description: Tài liệu (backend mô phỏng)
+defaults:
+  envs: [dev, staging, prod]
+  roles: [member]
+tools:
+  - name: docs.read
+    description: Đọc tài liệu
+    handler: sim:docs_read
+    action_class: read
+    reversible: n/a
+    blast_radius: object
+    data_sensitivity: internal
+    input_schema:
+      properties:
+        name: {type: string}
+      required: [name]
+
+  - name: docs.create
+    description: Tạo tài liệu nháp
+    handler: sim:docs_create
+    action_class: write
+    reversible: "yes"
+    blast_radius: object
+    data_sensitivity: internal
+    rollback_hint: Xóa tài liệu nháp
+    input_schema:
+      properties:
+        name: {type: string}
+        content: {type: string}
+      required: [name, content]
+
+  - name: docs.share_external
+    description: Chia sẻ tài liệu ra ngoài tổ chức
+    handler: sim:docs_share
+    action_class: external_send
+    reversible: "no"
+    blast_radius: object
+    data_sensitivity: internal
+    rollback_hint: Thu hồi quyền chia sẻ
+    input_schema:
+      properties:
+        name: {type: string}
+        recipient: {type: string}
+      required: [name, recipient]
