@@ -1,11 +1,15 @@
 __DOMAIN__ {
-	encode gzip
+	# Không nén và không đệm luồng chat, để chữ hiện ngay khi model sinh ra.
+	@compressible not path /api/chat
+	encode @compressible gzip
 	# Chỉ cổng 443 mở từ ngoài nên lấy chứng chỉ bằng TLS-ALPN, không dùng thử thách HTTP.
 	tls {
 		issuer acme {
 			disable_http_challenge
 		}
 	}
-	reverse_proxy 127.0.0.1:8000
+	reverse_proxy 127.0.0.1:8000 {
+		flush_interval -1
+	}
 	header Strict-Transport-Security "max-age=31536000"
 }
