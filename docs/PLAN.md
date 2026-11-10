@@ -19,7 +19,7 @@ mọi lệnh gọi công cụ đi qua gateway có phân mức rủi ro, multi-te
 | Luồng đọc | Router → truy xuất → lắp ngữ cảnh theo ngân sách → ghi episode | Như thiết kế | `kagent/agent.py` |
 | Luồng học | Reflector → Curator → Cổng duyệt → Compiler | Như thiết kế, chạy nền theo lịch và theo sự kiện | `kagent/learning.py`, `kagent/scheduler.py` |
 | Đo lường | Golden task, chỉ số tuần | Golden task chặn publish, trang Đo lường | `kagent/compiler.py`, `kagent/api.py` |
-| MCP Gateway | Danh mục, kiểm quyền, audit | Danh mục + 3 cửa quyết định + audit; **backend công cụ là mô phỏng** | `kagent/gateway.py`, `kagent/tools.py` |
+| MCP Gateway | Danh mục, kiểm quyền, audit | Manifest YAML trong git, đồng bộ theo tenant, quyền theo môi trường và vai trò, 3 cửa quyết định, audit; **backend công cụ là mô phỏng** | `kagent/catalog/`, `kagent/tools.py`, `kagent/gateway.py`, `docs/TOOLS.md` |
 | Phân cấp quyền | R0–R4 × môi trường × tin cậy | Ma trận, `auto_execute`, điểm tin cậy 4 thành phần, ép hỏi | `kagent/gateway.py` |
 | Phê duyệt | Card, 3 lựa chọn, 30 phút, không tự duyệt | Như thiết kế; R3 prod cần 2 người | `kagent/gateway.py` |
 | Multi-tenant | RLS PostgreSQL, overlay chỉ siết | Lọc `tenant_id` ở tầng truy vấn, overlay chỉ siết | `kagent/gateway.py`, `kagent/api.py` |

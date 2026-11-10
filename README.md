@@ -5,6 +5,7 @@ Agent tự tích lũy tri thức, có gateway phân quyền công cụ và giao 
 lịch sử cải tiến ở `docs/IMPROVEMENTS.md`.
 
 Công cụ (k8s, Grafana, Kibana, Docs, Browser) hiện là **bản mô phỏng**, không chạm hạ tầng thật.
+Danh mục công cụ khai bằng manifest trong `kagent/catalog`; cách thêm, gỡ và phân quyền ở `docs/TOOLS.md`.
 
 ## Chạy cục bộ
 
