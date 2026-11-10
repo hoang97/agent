@@ -84,3 +84,17 @@ Dựng MVP theo `docs/PLAN.md`.
 - **Thay đổi công cụ dùng chung vẫn cần admin:** cấu hình danh mục và công cụ học được của tenant.
 - **Công tắc `self_approve` theo tenant:** mặc định bật; tắt thì quay về luật cũ.
 - **Lỗi thấy khi thử giao diện:** lệnh duyệt xong nhưng chạy lỗi vẫn báo "Đã chạy lệnh". Giờ thông báo báo lỗi, và thẻ duyệt làm nổi bật khi lần chạy thử đã thất bại.
+
+## Đợt 12 — 2026-11-11: công cụ thật từ template và kết nối
+
+- **Bỏ mô phỏng:** xóa toàn bộ backend mô phỏng (`kagent/backends`) và danh mục cố định (`kagent/catalog`).
+- **Template:** 7 template trong `kagent/templates`: Kubernetes, Grafana, Elasticsearch/Kibana, Web, HTTP API, PostgreSQL, MySQL. Connector trong `kagent/connectors` gọi REST API, WebSocket exec và driver CSDL thật.
+- **Kết nối:**
+  - Template cộng tham số riêng, gắn tenant (admin quản lý) hoặc cá nhân (chính chủ quản lý), và gắn môi trường.
+  - Secret mã hóa, không trả lại client.
+  - Công cụ đọc bật sẵn, công cụ ghi mặc định tắt.
+- **Lớp mạng `kagent/net.py`:** chặn loopback, link-local, metadata; mạng nội bộ cần org_admin; ghim IP chống DNS rebinding; không tự theo redirect; giới hạn kích thước và thời gian.
+- **Phân quyền:** công cụ cá nhân chỉ chủ sở hữu dùng. Luật chặn khớp cả tên theo template (`k8s.exec`) cho mọi kết nối. Lệnh chờ duyệt không chạy được nếu kết nối bị tắt hoặc gỡ sau đó.
+- **Dữ liệu cũ:** công cụ mô phỏng còn trong DB tự chuyển removed khi khởi động; công cụ học được dựa trên chúng bị chặn.
+- **Test:** chạy connector thật trên hạ tầng giả ở tầng HTTP (`tests/fakes.py`) và SQLite.
+- **Lỗi phát hiện khi gọi Internet thật:** TLS dùng kho chứng chỉ hệ thống nên lỗi trên Windows; nay dùng bộ CA của certifi. Ngoài ra, tên công cụ học được từng kích hoạt nhầm từ khóa của công cụ khác trong planner heuristic.

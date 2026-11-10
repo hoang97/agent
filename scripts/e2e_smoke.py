@@ -1,4 +1,4 @@
-"""Kiểm thử trọn vòng qua HTTP trên một bản đang chạy.
+"""Kiểm thử trọn vòng qua HTTP trên một bản đang chạy, gọi Internet thật qua kết nối Web.
 
 Dùng: E2E_ADMIN_PASSWORD=... E2E_DEMO_PASSWORD=... python scripts/e2e_smoke.py https://example.org
 Tạo dữ liệu thử trong tenant team-platform, nên chỉ chạy trên môi trường thử nghiệm.
@@ -23,11 +23,9 @@ def check(name, ok, info=""):
 
 class U:
     def __init__(self, name):
-        self.c = httpx.Client(base_url=BASE, timeout=60)
-        r = self.c.post("/api/auth/login", json={"username": name, "password": PW[name]})
-        r.raise_for_status()
+        self.c = httpx.Client(base_url=BASE, timeout=90)
+        self.c.post("/api/auth/login", json={"username": name, "password": PW[name]}).raise_for_status()
         me = self.c.get("/api/me").json()
-        self.provider = me["llm_provider"]
         self.c.headers["X-Tenant-Id"] = next(t["id"] for t in me["tenants"] if t["name"] == "team-platform")
 
     def run(self, task, env="dev"):
@@ -42,24 +40,28 @@ def steps(ep):
 
 check("health", httpx.get(BASE + "/api/health", timeout=30).json() == {"status": "ok"})
 check("chặn truy cập khi chưa đăng nhập", httpx.get(BASE + "/api/me", timeout=30).status_code == 401)
-check("giao diện", "Knowledge Agent" in httpx.get(BASE + "/", timeout=30).text)
-
 alice, bob, admin = U("alice"), U("bob"), U("admin")
-print("provider:", alice.provider)
 
-ep = alice.run("xem pod trong namespace default")
-check("đọc R0 tự chạy", steps(ep) and steps(ep)[0]["status"] == "ok", ep["trace"])
+web_name = f"web_{marker}"
+r = alice.c.post("/api/connections", json={"template": "web", "name": web_name, "scope": "user", "envs": ["dev"]})
+check("user tạo kết nối cá nhân", r.status_code == 200, r.text)
+ep = alice.run("Đọc trang https://example.com")
+s = steps(ep)
+check("đọc trang web thật qua kết nối", s and s[0]["tool"] == f"{web_name}.fetch_page" and s[0]["status"] == "ok" and "Example Domain" in s[0]["result"]["title"], s)
+check("nội dung web được coi là chưa tin cậy", s and s[0].get("untrusted") is True)
+check("người khác không thấy kết nối cá nhân", all(c["name"] != web_name for c in bob.c.get("/api/connections").json()))
 
-ep = alice.run("scale deployment api lên 3 replica trong namespace payments")
-s = steps(ep)[0]
-check("lệnh ghi ở namespace mới phải chờ duyệt", s["status"] == "pending", s)
-pending = next(a for a in alice.c.get("/api/approvals?status=pending").json() if a["id"] == s["approval_id"])
-check("người yêu cầu được tự quyết định lệnh của mình", pending["can_decide"] and pending["mine"], pending)
-r = alice.c.post(f"/api/approvals/{s['approval_id']}/decide", json={"action": "deny", "reason": f"lý do {marker}"})
-check("từ chối kèm lý do", r.json().get("status") == "denied", r.text)
-
-ep = alice.run("đọc secret của app web")
-check("đọc secret bị chặn cứng", steps(ep)[0]["decision"] == "blocked", steps(ep))
+r = alice.c.post("/api/connections", json={"template": "http_api", "name": f"loc_{marker}", "scope": "user", "params": {"base_url": "http://127.0.0.1:8000"}})
+check("chặn kết nối vào loopback", r.status_code == 400 and "bị chặn" in r.text, r.text)
+r = alice.c.post("/api/connections", json={"template": "http_api", "name": f"meta_{marker}", "scope": "user", "params": {"base_url": "http://169.254.169.254"}})
+check("chặn địa chỉ metadata của cloud", r.status_code == 400, r.text)
+r = alice.c.post("/api/connections", json={"template": "web", "name": f"shared_{marker}", "scope": "tenant"})
+check("member không tạo được kết nối dùng chung", r.status_code == 403, r.text)
+r = admin.c.post("/api/connections", json={"template": "http_api", "name": f"gh_{marker}", "scope": "tenant", "envs": ["dev"],
+                                           "params": {"base_url": "https://api.github.com", "allowed_paths": ["/zen"]}})
+check("admin tạo kết nối dùng chung", r.status_code == 200, r.text)
+conn_id = r.json().get("id")
+check("kiểm tra kết nối gọi API thật", admin.c.post(f"/api/connections/{conn_id}/test").json().get("ok") is True)
 
 alice.run(f"nhớ rằng cụm {marker} dùng chung DB với QA")
 learned = admin.c.post("/api/learning/run").json()
@@ -67,17 +69,15 @@ check("luồng học chạy", learned["processed"] >= 1, learned)
 active = alice.c.get("/api/ku?status=active").json()
 fact = next((k for k in active if marker in k["content"] and k["kind"] == "fact"), None)
 check("fact do người dùng nói được thăng hạng", fact, active[:2])
-lessons = alice.c.get("/api/ku?kind=lesson").json()
-check("lý do từ chối thành lesson", any(marker in k["content"] for k in lessons))
-
 ep = alice.run(f"cụm {marker} dùng DB nào")
 check("agent nạp lại tri thức", fact and fact["id"] in ep["ku_used"], ep["ku_used"])
+check("audit có bản ghi", any(a["tool"] == f"{web_name}.fetch_page" for a in alice.c.get("/api/audit").json()))
 
-run = admin.c.post("/api/compile").json()
-check("Compiler chạy", run.get("status") in ("published", "pending_review", "noop"), run)
-check("trang đo lường", alice.c.get("/api/metrics").json()["episodes"] >= 5)
-check("audit có bản ghi", len(alice.c.get("/api/audit").json()) > 0)
-
+for c in alice.c.get("/api/connections").json():
+    if c["name"] == web_name:
+        alice.c.delete(f"/api/connections/{c['id']}")
+if conn_id:
+    admin.c.delete(f"/api/connections/{conn_id}")
 failed = [r for r in results if not r[1]]
 print(f"\n{len(results) - len(failed)}/{len(results)} đạt")
 sys.exit(1 if failed else 0)

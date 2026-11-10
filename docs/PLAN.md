@@ -19,7 +19,7 @@ mọi lệnh gọi công cụ đi qua gateway có phân mức rủi ro, multi-te
 | Luồng đọc | Router → truy xuất → lắp ngữ cảnh theo ngân sách → ghi episode | Như thiết kế | `kagent/agent.py` |
 | Luồng học | Reflector → Curator → Cổng duyệt → Compiler | Như thiết kế, chạy nền theo lịch và theo sự kiện | `kagent/learning.py`, `kagent/scheduler.py` |
 | Đo lường | Golden task, chỉ số tuần | Golden task chặn publish, trang Đo lường | `kagent/compiler.py`, `kagent/api.py` |
-| MCP Gateway | Danh mục, kiểm quyền, audit | Manifest YAML trong git, đồng bộ theo tenant, quyền theo môi trường và vai trò, 3 cửa quyết định, audit; **backend công cụ là mô phỏng** | `kagent/catalog/`, `kagent/tools.py`, `kagent/gateway.py`, `docs/TOOLS.md` |
+| MCP Gateway | Danh mục, kiểm quyền, audit | Template công cụ (git) + kết nối do admin/user tạo với tham số riêng, gắn tenant/user/môi trường; connector gọi hệ thống thật qua lớp mạng chống SSRF; secret mã hóa; 3 cửa quyết định, audit | `kagent/templates/`, `kagent/connectors/`, `kagent/connections.py`, `kagent/net.py`, `kagent/gateway.py`, `docs/TOOLS.md` |
 | Phân cấp quyền | R0–R4 × môi trường × tin cậy | Ma trận, `auto_execute`, điểm tin cậy 4 thành phần, ép hỏi | `kagent/gateway.py` |
 | Phê duyệt | Card, 3 lựa chọn, 30 phút, không tự duyệt | **Khác thiết kế theo quyết định của chủ dự án (2026-11-11):** người yêu cầu tự duyệt lệnh của mình ngay trong chat, một xác nhận là đủ. Admin có thể tắt theo tenant để quay về luật cũ (không tự duyệt, R3 prod cần 2 người). Thay đổi công cụ dùng chung vẫn cần admin | `kagent/gateway.py` |
 | Skill / thủ tục chín | Biên dịch procedure thành Skill | Thêm công cụ học được: chuỗi bước tự đề xuất hoặc lưu từ chat, chạy qua gateway | `kagent/learned.py` |
@@ -33,7 +33,7 @@ mọi lệnh gọi công cụ đi qua gateway có phân mức rủi ro, multi-te
 | SQLite (WAL + FTS5) thay PostgreSQL + pgvector | Máy chủ thử nghiệm một node, không phụ thuộc dịch vụ ngoài, dễ sao lưu | Thay `db.py`; schema giữ nguyên tên bảng và cột, thêm RLS |
 | Embedding băm cục bộ 256 chiều | Không cần API embedding; đủ cho so khớp từ vựng | Thay `embed()` bằng model embedding, đặt lại ngưỡng cosine về 0,85 |
 | Tách `tenant_id` ở tầng truy vấn thay RLS | SQLite không có RLS; có test cô lập tenant | Bật RLS khi chuyển PostgreSQL |
-| Công cụ MCP là bản mô phỏng | Chưa có cụm k8s/Grafana thật; không để agent công khai chạm hạ tầng thật | Thay hàm `run` trong `tools.py` bằng client MCP |
+| Connector gọi thẳng REST API của từng hệ thống thay vì qua MCP server | Ít thành phần phải vận hành; cùng lớp gateway, audit và phân quyền | Thêm template kiểu `mcp` gọi MCP server qua HTTP |
 | Hai LLM provider: Claude và heuristic | Chạy được khi chưa có API key; provider heuristic cho kết quả xác định để kiểm thử | Đặt `ANTHROPIC_API_KEY` |
 | Sau khi duyệt lệnh, chỉ thực thi lệnh đó; kết quả vào lịch sử của lượt chat sau | Giữ MVP đơn giản, không tiếp tục vòng lặp LLM | Thêm resume theo `approval_request` |
 | FastAPI + JS thuần, không bước build | Triển khai đơn giản | — |
