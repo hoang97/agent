@@ -58,5 +58,6 @@ pre { background: var(--code); padding: 10px; border-radius: 6px; overflow-x: au
 .toast { position: fixed; right: 16px; bottom: 16px; max-width: min(420px, calc(100vw - 32px)); padding: 10px 14px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 4px 16px rgba(0,0,0,.2); }
 .toast.err { border-color: var(--bad); color: var(--bad); }
 .hidden { display: none; }
+input.wide { flex: 1; min-width: 220px; }
 .notice { background: var(--info-bg); border-radius: 6px; padding: 8px 12px; font-size: 13px; margin-bottom: 12px; }
 @media (max-width: 720px) { .split { grid-template-columns: 1fr; } main { padding: 0 16px 60px; } }

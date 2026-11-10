@@ -65,7 +65,7 @@ function renderLogin() {
   user.focus();
 }
 
-const TABS = [["agent", "Agent"], ["episodes", "Nhật ký"], ["knowledge", "Tri thức"], ["approvals", "Duyệt lệnh"], ["compile", "Biên dịch L2"], ["policy", "Công cụ & Chính sách"], ["metrics", "Đo lường"], ["audit", "Audit"], ["account", "Tài khoản"]];
+const TABS = [["agent", "Agent"], ["episodes", "Nhật ký"], ["knowledge", "Tri thức"], ["approvals", "Duyệt lệnh"], ["compile", "Biên dịch L2"], ["policy", "Công cụ & Chính sách"], ["metrics", "Đo lường"], ["audit", "Audit"], ["settings", "Cài đặt"], ["account", "Tài khoản"]];
 const VIEWS = {};
 
 function renderShell() {
@@ -75,7 +75,7 @@ function renderShell() {
   const header = h("header", { class: "top" }, h("h1", {}, "Knowledge Agent"), select,
     h("span", { class: "badge info" }, "Model: " + (state.me.llm_provider === "anthropic" ? "Claude" : "heuristic (không dùng LLM)")),
     h("span", { class: "spacer" }), h("span", { class: "small" }, state.me.username), h("button", { class: "ghost", onclick: logout }, "Đăng xuất"));
-  const nav = h("nav", { class: "tabs" }, TABS.map(([id, label]) => h("button", { class: state.tab === id ? "active" : "", onclick: () => { state.tab = id; renderShell(); } }, label)));
+  const nav = h("nav", { class: "tabs" }, TABS.filter(([id]) => id !== "settings" || state.me.is_org_admin).map(([id, label]) => h("button", { class: state.tab === id ? "active" : "", onclick: () => { state.tab = id; renderShell(); } }, label)));
   const main = h("main");
   root.replaceChildren(header, nav, main);
   VIEWS[state.tab](main).catch((e) => toast(e.message, true));
@@ -119,7 +119,7 @@ VIEWS.agent = async (main) => {
     const ep = await api("POST", "/api/runs", { task: task.value, env: env.value, project: project.value || null });
     out.replaceChildren(episodeCard(ep));
   });
-  const notice = state.me.llm_provider !== "anthropic" && h("div", { class: "notice" }, "Máy chủ chưa có ANTHROPIC_API_KEY nên agent chạy chế độ heuristic: lập kế hoạch theo từ khóa, không gọi LLM.");
+  const notice = state.me.llm_provider !== "anthropic" && h("div", { class: "notice" }, "Chưa có LLM key nên agent chạy chế độ heuristic: lập kế hoạch theo từ khóa, không gọi LLM." + (state.me.is_org_admin ? " Nhập key ở tab Cài đặt." : ""));
   main.append(h("h2", {}, "Giao nhiệm vụ cho agent"), notice || "", h("div", { class: "notice" }, "Công cụ là bản mô phỏng: không lệnh nào chạm hạ tầng thật."),
     h("div", { class: "card" }, task, h("div", { class: "row" }, env, project, h("button", { onclick: run }, "Chạy"))), out);
 };
@@ -234,6 +234,33 @@ VIEWS.audit = async (main) => {
   const list = await api("GET", "/api/audit");
   main.append(h("h2", {}, "Audit gọi công cụ"), h("div", { class: "card scroll" }, h("table", {}, h("thead", {}, h("tr", {}, ["Thời gian", "Người", "Công cụ", "Môi trường", "Mức", "Quyết định", "Kết quả", "Lý do"].map((x) => h("th", {}, x)))),
     h("tbody", {}, list.map((a) => h("tr", {}, h("td", {}, fmtTime(a.at)), h("td", {}, a.user), h("td", {}, a.tool), h("td", {}, a.env), h("td", {}, a.risk_tier), h("td", {}, badge(a.decision)), h("td", {}, a.result_status), h("td", {}, (a.reasons || []).join("; "))))))));
+};
+
+async function refreshMe() {
+  const id = state.tenant.id;
+  state.me = await api("GET", "/api/me");
+  state.tenant = state.me.tenants.find((t) => t.id === id) || state.me.tenants[0];
+  renderShell();
+}
+
+VIEWS.settings = async (main) => {
+  const s = await api("GET", "/api/settings/llm-key");
+  const describe = { ui: "Đang dùng key nhập trên giao diện", env: "Đang dùng key từ biến môi trường của máy chủ", none: "Chưa có key: agent chạy chế độ heuristic" }[s.source];
+  const key = h("input", { type: "password", autocomplete: "off", placeholder: "sk-ant-...", "aria-label": "Anthropic API key", class: "wide" });
+  const save = guard(async (ev) => {
+    ev.preventDefault();
+    if (!key.value.trim()) throw new Error("Hãy nhập key");
+    await api("POST", "/api/settings/llm-key", { key: key.value });
+    key.value = "";
+    toast("Đã kiểm tra và lưu key");
+    await refreshMe();
+  });
+  const remove = guard(async () => { await api("DELETE", "/api/settings/llm-key"); toast("Đã xóa key"); await refreshMe(); });
+  main.append(h("h2", {}, "Khóa LLM"),
+    h("div", { class: "card" }, h("div", {}, describe, s.last4 && ` (kết thúc bằng ${s.last4})`),
+      s.updated_at && h("div", { class: "small" }, `Cập nhật ${fmtTime(s.updated_at)} bởi ${s.updated_by}`),
+      h("form", { class: "row", onsubmit: save }, key, h("button", { type: "submit" }, "Kiểm tra và lưu"), s.source === "ui" && h("button", { type: "button", class: "danger", onclick: remove }, "Xóa key")),
+      h("p", { class: "small" }, "Key dùng chung cho cả tổ chức, được kiểm tra với Anthropic trước khi lưu, mã hóa khi lưu và không hiển thị lại. Key nhập ở đây được ưu tiên hơn biến môi trường.")));
 };
 
 VIEWS.account = async (main) => {
