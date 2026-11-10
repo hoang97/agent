@@ -211,6 +211,32 @@ def logout(request: Request, response: Response, conn=Depends(get_conn)):
     return {"ok": True}
 
 
+class ChangePassword(BaseModel):
+    current_password: str = Field(max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
+
+
+@app.post("/api/auth/password")
+def change_password(body: ChangePassword, request: Request, principal: Principal = Depends(current_user), conn=Depends(get_conn)):
+    key = "pw|" + _throttle_key(request, principal.username)
+    window = [t for t in _failures[key] if t > time.time() - 300]
+    _failures[key] = window
+    if len(window) >= 5:
+        raise HTTPException(429, "nhập sai quá nhiều lần, thử lại sau 5 phút")
+    stored = conn.execute("SELECT pw_hash FROM app_user WHERE id=?", (principal.user_id,)).fetchone()
+    if not verify_password(body.current_password, stored["pw_hash"]):
+        _failures[key].append(time.time())
+        raise HTTPException(403, "mật khẩu hiện tại không đúng")
+    if body.new_password == body.current_password:
+        raise HTTPException(400, "mật khẩu mới phải khác mật khẩu hiện tại")
+    _failures.pop(key, None)
+    with db.tx(conn):
+        conn.execute("UPDATE app_user SET pw_hash=? WHERE id=?", (hash_password(body.new_password), principal.user_id))
+        # Đổi mật khẩu thì đăng xuất mọi phiên khác của tài khoản này.
+        conn.execute("DELETE FROM session WHERE user_id=? AND token_hash!=?", (principal.user_id, _token_hash(request.cookies[COOKIE])))
+    return {"ok": True}
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok"}

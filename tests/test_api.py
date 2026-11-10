@@ -30,6 +30,40 @@ def test_logout_invalidates_session(users):
     assert alice.get("/api/me", tenant=False).status_code == 401
 
 
+NEW_PASSWORD = "mat-khau-moi-du-dai"
+
+
+def test_change_password_rotates_credentials_and_other_sessions(client, users):
+    alice = users["alice"]
+    other = Session(client, "alice")
+    r = alice.post("/api/auth/password", tenant=False, json={"current_password": PASSWORD, "new_password": NEW_PASSWORD})
+    assert r.status_code == 200, r.text
+    assert alice.get("/api/me", tenant=False).status_code == 200
+    assert other.get("/api/me", tenant=False).status_code == 401
+    assert client.post("/api/auth/login", json={"username": "alice", "password": PASSWORD}).status_code == 401
+    assert client.post("/api/auth/login", json={"username": "alice", "password": NEW_PASSWORD}).status_code == 200
+
+
+def test_change_password_validation(users):
+    alice = users["alice"]
+    url = "/api/auth/password"
+    assert alice.post(url, tenant=False, json={"current_password": "sai", "new_password": NEW_PASSWORD}).status_code == 403
+    assert alice.post(url, tenant=False, json={"current_password": PASSWORD, "new_password": "ngan"}).status_code == 422
+    assert alice.post(url, tenant=False, json={"current_password": PASSWORD, "new_password": PASSWORD}).status_code in (400, 422)
+
+
+def test_change_password_requires_login(client):
+    assert client.post("/api/auth/password", json={"current_password": "a", "new_password": NEW_PASSWORD}).status_code == 401
+
+
+def test_change_password_throttled(users):
+    alice = users["alice"]
+    for _ in range(5):
+        alice.post("/api/auth/password", tenant=False, json={"current_password": "sai", "new_password": NEW_PASSWORD})
+    r = alice.post("/api/auth/password", tenant=False, json={"current_password": PASSWORD, "new_password": NEW_PASSWORD})
+    assert r.status_code == 429
+
+
 def test_security_headers(client):
     headers = client.get("/").headers
     assert "default-src 'self'" in headers["content-security-policy"]
