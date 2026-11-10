@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import stat
 import time
@@ -248,6 +249,19 @@ class LLMKey(BaseModel):
     key: str
     base_url: str | None = None
     auth_type: str = "api_key"
+    provider: str = "anthropic"
+    model_strong: str | None = None
+    model_fast: str | None = None
+
+
+_MODEL_NAME = re.compile(r"[\w.:/-]{1,100}")
+
+
+def _clean_model(value: str | None) -> str | None:
+    value = (value or "").strip()
+    if value and not _MODEL_NAME.fullmatch(value):
+        raise HTTPException(400, "tên model không hợp lệ")
+    return value or None
 
 
 @app.get("/api/settings/llm-key")
@@ -262,8 +276,13 @@ def llm_key_save(body: LLMKey, principal: Principal = Depends(require_org_admin)
         raise HTTPException(400, "key không đúng định dạng")
     if body.auth_type not in ("api_key", "token"):
         raise HTTPException(400, "loại xác thực không hợp lệ")
+    if body.provider not in ("anthropic", "openai"):
+        raise HTTPException(400, "nhà cung cấp không hợp lệ")
+    strong, fast = _clean_model(body.model_strong), _clean_model(body.model_fast)
+    if body.provider == "openai" and not strong:
+        raise HTTPException(400, "OpenAI cần tên model")
     try:
-        cred = vault.Credential(key, llm.check_base_url(body.base_url), body.auth_type)
+        cred = vault.Credential(key, llm.check_base_url(body.base_url), body.auth_type, body.provider, strong, fast)
         llm.validate_key(cred)
     except llm.LLMError as exc:
         raise HTTPException(400, f"không lưu key: {exc}") from exc

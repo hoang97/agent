@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -19,7 +19,10 @@ log = logging.getLogger("kagent.vault")
 class Credential:
     key: str
     base_url: str | None = None  # None = gọi thẳng API của Anthropic
-    auth_type: str = "api_key"  # api_key (x-api-key) | token (Authorization: Bearer)
+    auth_type: str = "api_key"  # api_key (x-api-key) | token (Authorization: Bearer); chỉ áp dụng cho anthropic
+    provider: str = "anthropic"  # anthropic | openai (gồm cả dịch vụ tương thích OpenAI)
+    model_strong: str | None = None
+    model_fast: str | None = None
 
 
 def _fernet() -> Fernet:
@@ -36,7 +39,7 @@ def _fernet() -> Fernet:
 
 
 def save(conn, cred: Credential, username: str) -> None:
-    payload = json.dumps({"key": cred.key, "base_url": cred.base_url, "auth_type": cred.auth_type})
+    payload = json.dumps(asdict(cred))
     conn.execute(
         "INSERT INTO app_secret(name,ciphertext,last4,updated_at,updated_by) VALUES (?,?,?,?,?) "
         "ON CONFLICT(name) DO UPDATE SET ciphertext=excluded.ciphertext, last4=excluded.last4, "
@@ -61,8 +64,7 @@ def _stored(conn) -> Credential | None:
         return None
     if not plain.startswith("{"):  # bản ghi cũ chỉ chứa khóa
         return Credential(plain)
-    data = json.loads(plain)
-    return Credential(data["key"], data.get("base_url"), data.get("auth_type", "api_key"))
+    return Credential(**json.loads(plain))
 
 
 def _env() -> Credential | None:
@@ -95,4 +97,6 @@ def status(conn) -> dict:
         cred = _env()
         source = "env" if cred else "none"
     return {"source": source, "last4": cred.key[-4:] if cred else None, "base_url": cred.base_url if cred else None,
-            "auth_type": cred.auth_type if cred else None, "updated_at": updated_at, "updated_by": updated_by}
+            "auth_type": cred.auth_type if cred else None, "provider": cred.provider if cred else None,
+            "model_strong": cred.model_strong if cred else None, "model_fast": cred.model_fast if cred else None,
+            "updated_at": updated_at, "updated_by": updated_by}
