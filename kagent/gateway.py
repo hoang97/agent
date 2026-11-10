@@ -287,7 +287,7 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
         except (ToolError, ValueError, TypeError) as exc:
             dry_result = {"error": str(exc)}
 
-    tenant = conn.execute("SELECT change_freeze, write_quota_daily FROM tenant WHERE id=?", (ctx.tenant_id,)).fetchone()
+    tenant = conn.execute("SELECT change_freeze, write_quota_daily, self_approve FROM tenant WHERE id=?", (ctx.tenant_id,)).fetchone()
     forced: list[str] = []
     if ctx.tainted:
         forced.append("kế hoạch chịu ảnh hưởng từ nội dung untrusted")
@@ -309,7 +309,9 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
         audit(conn, ctx, tool_name, args, tier, conf, "blocked", decision.reasons, "blocked")
         return {**step, "decision": "blocked", "status": "blocked"}
 
-    if decision.outcome == "ask" and decision.required == 1 and not forced \
+    # Khi tenant cho tự duyệt, một lần xác nhận của chính người yêu cầu là đủ, kể cả ô ma trận cần 2 người.
+    required = 1 if tenant["self_approve"] else decision.required
+    if decision.outcome == "ask" and required == 1 and not forced \
             and policy["environments"][ctx.env]["auto_execute"] != "off" and _has_grant(conn, ctx, tool_name, args):
         decision = Decision("auto", reasons=["dùng quyền đã duyệt cho phiên"])
         step["reasons"] = decision.reasons
@@ -321,9 +323,9 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
             "reasons,rollback_hint,required_approvals,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (approval_id, ctx.tenant_id, ctx.episode_id, ctx.user_id, ctx.task, tool_name, ctx.env, json.dumps(args, ensure_ascii=False),
              json.dumps(dry_result, ensure_ascii=False), tier, conf, json.dumps(decision.reasons, ensure_ascii=False), tool.rollback_hint,
-             decision.required, db.iso(), db.later(minutes=settings.approval_ttl_minutes)))
+             required, db.iso(), db.later(minutes=settings.approval_ttl_minutes)))
         audit(conn, ctx, tool_name, args, tier, conf, "pending", decision.reasons, "pending")
-        return {**step, "decision": "pending", "status": "pending", "approval_id": approval_id, "required_approvals": decision.required}
+        return {**step, "decision": "pending", "status": "pending", "approval_id": approval_id, "required_approvals": required}
 
     status, result = _execute(conn, ctx.tenant_id, ctx.env, tool_name, args)
     audit(conn, ctx, tool_name, args, tier, conf, "auto", decision.reasons, status)
@@ -339,6 +341,20 @@ class ApprovalError(Exception):
 
 def can_approve(roles: set[str], env: str, is_org_admin: bool) -> bool:
     return is_org_admin or "tenant_admin" in roles or f"approver:{env}" in roles
+
+
+def self_approve_enabled(conn, tenant_id: str) -> bool:
+    r = conn.execute("SELECT self_approve FROM tenant WHERE id=?", (tenant_id,)).fetchone()
+    return bool(r and r["self_approve"])
+
+
+def can_decide(req: dict, user_id: str, roles: set[str], is_org_admin: bool, self_approve: bool) -> bool:
+    """Ai được quyết định yêu cầu này: chính người yêu cầu (nếu tenant cho tự duyệt) hoặc người có quyền duyệt."""
+    if req["status"] != "pending" or user_id in req["decided_by"]:
+        return False
+    if user_id == req["requester_id"]:
+        return self_approve
+    return can_approve(roles, req["env"], is_org_admin)
 
 
 def expire_approvals(conn, tenant_id: str | None = None) -> int:
@@ -364,12 +380,13 @@ def decide(conn, tenant_id: str, approval_id: str, user_id: str, roles: set[str]
             raise ApprovalError("không tìm thấy yêu cầu", 404)
         if req["status"] != "pending":
             raise ApprovalError(f"yêu cầu đã ở trạng thái {req['status']}", 409)
-        if user_id == req["requester_id"]:
-            raise ApprovalError("người yêu cầu không được tự duyệt lệnh của mình", 403)
-        if not can_approve(roles, req["env"], is_org_admin):
-            raise ApprovalError(f"không có quyền duyệt ở {req['env']}", 403)
         if user_id in req["decided_by"]:
             raise ApprovalError("bạn đã duyệt yêu cầu này", 409)
+        if user_id == req["requester_id"]:
+            if not self_approve_enabled(conn, tenant_id):
+                raise ApprovalError("tenant này không cho người yêu cầu tự duyệt lệnh của mình", 403)
+        elif not can_approve(roles, req["env"], is_org_admin):
+            raise ApprovalError(f"không có quyền duyệt ở {req['env']}", 403)
         ctx = CallContext(tenant_id, req["requester_id"], req["env"], req["original_request"], req["episode_id"])
         meta = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (tenant_id, req["tool"])).fetchone()
         if action != "deny" and (meta is None or not callable_by(meta, req["env"], user_roles(conn, tenant_id, req["requester_id"]))[0]):

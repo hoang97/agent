@@ -224,6 +224,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
     if "conversation_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(episode)")}:
         conn.execute("ALTER TABLE episode ADD COLUMN conversation_id TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_episode_conversation ON episode(conversation_id, started_at)")
+    if "self_approve" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
+        # Mặc định người yêu cầu tự duyệt lệnh của mình; admin có thể tắt cho tenant cần duyệt chặt.
+        conn.execute("ALTER TABLE tenant ADD COLUMN self_approve INTEGER NOT NULL DEFAULT 1")
     registry = {r["name"] for r in conn.execute("PRAGMA table_info(tool_registry)")}
     for column, ddl in (("catalog_tier", "TEXT"), ("risk_floor", "TEXT"), ("roles", "TEXT NOT NULL DEFAULT '[\"member\"]'"),
                         ("status", "TEXT NOT NULL DEFAULT 'active'"), ("synced_at", "TEXT")):

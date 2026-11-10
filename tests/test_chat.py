@@ -98,6 +98,16 @@ def test_approval_result_visible_in_next_turn_history(users):
     assert alice.get(f"/api/conversations/{cid}").json()["messages"][0]["approvals"][0]["status"] == "approved"
 
 
+def test_chat_approval_card_lets_requester_decide(users):
+    alice = users["alice"]
+    evs = chat(alice, "scale deployment web lên 6 replica")
+    approval = done(evs)["message"]["approvals"][0]
+    assert approval["can_decide"] is True and approval["mine"] is True
+    alice.post(f"/api/approvals/{approval['id']}/decide", json={"action": "approve_once"})
+    after = alice.get(f"/api/conversations/{evs[0]['conversation_id']}").json()["messages"][0]["approvals"][0]
+    assert after["status"] == "approved" and after["can_decide"] is False
+
+
 def test_untrusted_content_taints_following_turns(users):
     alice = users["alice"]
     cid = chat(alice, "tìm log lỗi")[0]["conversation_id"]

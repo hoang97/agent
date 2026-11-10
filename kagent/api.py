@@ -416,7 +416,7 @@ def chat(body: ChatBody, t: Tenant = Depends(current_tenant), conn=Depends(get_c
             with db.session() as worker_conn:
                 episode = agent_mod.run_task(worker_conn, t.tenant_id, t.user_id, message, body.env, body.project, conversation_id=conversation_id,
                                              episode_id=run_id, on_event=events.put, cancelled=cancelled)
-                events.put({"type": "done", "conversation_id": conversation_id, "message": _chat_message(worker_conn, t.tenant_id, episode)})
+                events.put({"type": "done", "conversation_id": conversation_id, "message": _chat_message(worker_conn, t, episode)})
         except agent_mod.QuotaExceeded as exc:
             events.put({"type": "error", "message": str(exc)})
         except Exception:
@@ -453,11 +453,21 @@ def chat_cancel(run_id: str, t: Tenant = Depends(current_tenant)):
     return {"ok": True}
 
 
-def _chat_message(conn, tenant_id: str, ep: dict) -> dict:
+def _approval_views(conn, t: "Tenant", rows: list[dict]) -> list[dict]:
+    self_ok = gateway.self_approve_enabled(conn, t.tenant_id)
+    for a in rows:
+        a["can_decide"] = gateway.can_decide(a, t.user_id, t.roles, t.principal.is_org_admin, self_ok)
+        a["mine"] = a.get("requester_id", t.user_id) == t.user_id
+    return rows
+
+
+def _chat_message(conn, t: "Tenant", ep: dict) -> dict:
+    tenant_id = t.tenant_id
     approvals = db.rows(conn.execute(
         "SELECT a.id, a.tool, a.env, a.args, a.dry_run, a.risk_tier, a.confidence, a.reasons, a.rollback_hint, a.status, a.required_approvals, a.decided_by, "
-        "a.deny_reason, a.result, a.expires_at FROM approval_request a WHERE a.episode_id=? AND a.tenant_id=? ORDER BY a.created_at, a.rowid",
+        "a.deny_reason, a.result, a.expires_at, a.requester_id FROM approval_request a WHERE a.episode_id=? AND a.tenant_id=? ORDER BY a.created_at, a.rowid",
         (ep["id"], tenant_id)).fetchall(), "args", "dry_run", "reasons", "decided_by", "result")
+    approvals = _approval_views(conn, t, approvals)
     return {"id": ep["id"], "task": ep["input"]["task"], "output": ep["output"], "outcome": ep["outcome"], "outcome_src": ep["outcome_src"], "env": ep["env"],
             "task_type": ep["task_type"], "started_at": ep["started_at"], "tokens": ep["tokens"], "ku_used": len(ep["ku_used"]),
             "edited": ep["human_edit"] is not None, "cancelled": any(s["type"] == "cancelled" for s in ep["trace"]),
@@ -476,7 +486,7 @@ def conversation(conversation_id: str, t: Tenant = Depends(current_tenant), conn
     c = _own_conversation(conn, t, conversation_id)
     gateway.expire_approvals(conn, t.tenant_id)
     rs = conn.execute("SELECT * FROM episode WHERE conversation_id=? AND tenant_id=? ORDER BY started_at, rowid", (conversation_id, t.tenant_id)).fetchall()
-    return {**c, "messages": [_chat_message(conn, t.tenant_id, db.row(r, "input", "trace", "ku_used", "human_edit")) for r in rs]}
+    return {**c, "messages": [_chat_message(conn, t, db.row(r, "input", "trace", "ku_used", "human_edit")) for r in rs]}
 
 
 class ConversationPatch(BaseModel):
@@ -727,7 +737,8 @@ def approvals(status: str | None = None, t: Tenant = Depends(current_tenant), co
     if status:
         sql += " AND a.status=?"
         args.append(status)
-    return db.rows(conn.execute(sql + " ORDER BY a.created_at DESC, a.rowid DESC LIMIT 100", args).fetchall(), "args", "dry_run", "reasons", "decided_by", "result")
+    rows = db.rows(conn.execute(sql + " ORDER BY a.created_at DESC, a.rowid DESC LIMIT 100", args).fetchall(), "args", "dry_run", "reasons", "decided_by", "result")
+    return _approval_views(conn, t, rows)
 
 
 class ApprovalDecision(BaseModel):
@@ -860,10 +871,10 @@ def learned_patch(tool_id: str, body: LearnedPatch, t: Tenant = Depends(current_
 
 @app.get("/api/policy")
 def policy_get(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
-    r = conn.execute("SELECT policy, auto_promote, change_freeze FROM tenant WHERE id=?", (t.tenant_id,)).fetchone()
+    r = conn.execute("SELECT policy, auto_promote, change_freeze, self_approve FROM tenant WHERE id=?", (t.tenant_id,)).fetchone()
     overlay = json.loads(r["policy"])
     return {"overlay": overlay, "effective": gateway.merge_policy(overlay), "baseline": gateway.BASELINE,
-            "auto_promote": bool(r["auto_promote"]), "change_freeze": bool(r["change_freeze"])}
+            "auto_promote": bool(r["auto_promote"]), "change_freeze": bool(r["change_freeze"]), "self_approve": bool(r["self_approve"])}
 
 
 class PolicyBody(BaseModel):
@@ -884,6 +895,7 @@ def policy_put(body: PolicyBody, t: Tenant = Depends(current_tenant), conn=Depen
 class TenantSettings(BaseModel):
     auto_promote: bool | None = None
     change_freeze: bool | None = None
+    self_approve: bool | None = None
 
 
 @app.patch("/api/tenant")
@@ -893,6 +905,9 @@ def tenant_patch(body: TenantSettings, t: Tenant = Depends(current_tenant), conn
         conn.execute("UPDATE tenant SET auto_promote=? WHERE id=?", (int(body.auto_promote), t.tenant_id))
     if body.change_freeze is not None:
         conn.execute("UPDATE tenant SET change_freeze=? WHERE id=?", (int(body.change_freeze), t.tenant_id))
+    if body.self_approve is not None:
+        conn.execute("UPDATE tenant SET self_approve=? WHERE id=?", (int(body.self_approve), t.tenant_id))
+        log.info("tenant %s: %s đặt self_approve=%s", t.tenant_id, t.principal.username, body.self_approve)
     return policy_get(t, conn)
 
 

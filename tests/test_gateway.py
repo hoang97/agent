@@ -90,8 +90,61 @@ def test_write_on_unseen_namespace_requires_approval_then_runs(users):
     assert decided["result"]["result"]["to"] == 5
 
 
-def test_requester_cannot_self_approve(users):
+def strict(users):
+    """Tắt tự duyệt: quay về luật cũ, lệnh phải do người có quyền khác duyệt."""
+    assert users["admin"].patch("/api/tenant", json={"self_approve": False}).json()["self_approve"] is False
+
+
+def test_requester_self_approves_by_default(users):
+    alice = users["alice"]  # alice chỉ là member, không có vai trò approver
+    step = tool_steps(alice.run("scale deployment web lên 4 replica"))[0]
+    pending = alice.get("/api/approvals?status=pending").json()[0]
+    assert pending["can_decide"] is True and pending["mine"] is True
+    decided = alice.post(f"/api/approvals/{step['approval_id']}/decide", json={"action": "approve_once"}).json()
+    assert decided["status"] == "approved" and decided["result"]["result"]["to"] == 4
+    audit = next(a for a in alice.get("/api/audit").json() if a["decision"] == "approved")
+    assert audit["user"] == "alice" and audit["tool"] == "k8s.scale"
+
+
+def test_self_approval_still_respects_hard_blocks(users):
+    step = tool_steps(users["alice"].run("đọc secret của app web"))[0]
+    assert step["decision"] == "blocked" and "approval_id" not in step
+
+
+def test_self_approval_makes_prod_r3_single_confirmation(users):
+    alice = users["alice"]
+    step = tool_steps(alice.run("silence alert CPU cao", env="prod"))[0]
+    assert step["required_approvals"] == 1
+    assert alice.post(f"/api/approvals/{step['approval_id']}/decide", json={"action": "approve_once"}).json()["status"] == "approved"
+
+
+def test_self_deny_requires_reason_and_becomes_lesson(users):
+    alice, admin = users["alice"], users["admin"]
+    step = tool_steps(alice.run("scale deployment web lên 9 replica"))[0]
+    url = f"/api/approvals/{step['approval_id']}/decide"
+    assert alice.post(url, json={"action": "deny"}).status_code == 400
+    assert alice.post(url, json={"action": "deny", "reason": "nhầm số replica"}).json()["status"] == "denied"
+    admin.post("/api/learning/run")
+    assert any("nhầm số replica" in k["content"] for k in alice.get("/api/ku?kind=lesson").json())
+
+
+def test_other_member_cannot_decide_someone_elses_request(users):
     step = tool_steps(users["bob"].run("scale deployment web lên 4 replica"))[0]
+    pending = users["alice"].get("/api/approvals?status=pending").json()[0]
+    assert pending["can_decide"] is False and pending["mine"] is False
+    r = users["alice"].post(f"/api/approvals/{step['approval_id']}/decide", json={"action": "approve_once"})
+    assert r.status_code == 403
+
+
+def test_only_admin_can_toggle_self_approval(users):
+    assert users["alice"].patch("/api/tenant", json={"self_approve": False}).status_code == 403
+    assert users["admin"].get("/api/policy").json()["self_approve"] is True
+
+
+def test_requester_cannot_self_approve_in_strict_tenant(users):
+    strict(users)
+    step = tool_steps(users["bob"].run("scale deployment web lên 4 replica"))[0]
+    assert users["bob"].get("/api/approvals?status=pending").json()[0]["can_decide"] is False
     r = users["bob"].post(f"/api/approvals/{step['approval_id']}/decide", json={"action": "approve_once"})
     assert r.status_code == 403
 
@@ -103,6 +156,7 @@ def test_member_without_approver_role_cannot_approve(users):
 
 
 def test_prod_r3_needs_two_people(users):
+    strict(users)
     alice, bob, carol = users["alice"], users["bob"], users["carol"]
     # silence không có namespace nên không dính luật đối tượng mới
     step = tool_steps(alice.run("silence alert CPU cao", env="prod"))[0]
