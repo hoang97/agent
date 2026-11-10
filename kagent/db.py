@@ -133,6 +133,12 @@ CREATE TABLE IF NOT EXISTS golden_task (
   expect_terms TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS conversation (
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenant(id), user_id TEXT NOT NULL,
+  title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_conversation ON conversation(tenant_id, user_id, updated_at);
+
 CREATE TABLE IF NOT EXISTS app_secret (
   name TEXT PRIMARY KEY, ciphertext TEXT NOT NULL, last4 TEXT NOT NULL,
   updated_at TEXT NOT NULL, updated_by TEXT NOT NULL
@@ -200,6 +206,9 @@ def tx(conn: sqlite3.Connection):
 
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    if "conversation_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(episode)")}:
+        conn.execute("ALTER TABLE episode ADD COLUMN conversation_id TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_episode_conversation ON episode(conversation_id, started_at)")
 
 
 def row(r: sqlite3.Row | None, *json_fields: str) -> dict | None:

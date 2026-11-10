@@ -6,9 +6,11 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import re
 import secrets
 import stat
+import threading
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -16,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -329,6 +331,140 @@ def run(body: RunBody, t: Tenant = Depends(current_tenant), conn=Depends(get_con
         return agent_mod.run_task(conn, t.tenant_id, t.user_id, body.task, body.env, body.project)
     except agent_mod.QuotaExceeded as exc:
         raise HTTPException(429, str(exc)) from exc
+
+
+_runs: dict[str, tuple[str, str, threading.Event]] = {}
+_runs_lock = threading.Lock()
+
+
+class ChatBody(BaseModel):
+    message: str = Field(min_length=1, max_length=8000)
+    conversation_id: str | None = None
+    env: str = "dev"
+    project: str | None = Field(default=None, max_length=64)
+
+
+def _own_conversation(conn, t: Tenant, conversation_id: str) -> dict:
+    c = db.row(conn.execute("SELECT * FROM conversation WHERE id=? AND tenant_id=? AND user_id=? AND archived_at IS NULL",
+                            (conversation_id, t.tenant_id, t.user_id)).fetchone())
+    if c is None:
+        raise HTTPException(404, "không tìm thấy hội thoại")
+    return c
+
+
+def _sse(event: dict) -> str:
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+@app.post("/api/chat")
+def chat(body: ChatBody, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    """Chạy một lượt và stream tiến trình bằng SSE. Lượt vẫn chạy tiếp và được ghi lại nếu client ngắt kết nối."""
+    t.require_writer()
+    if body.env not in gateway.ENVS:
+        raise HTTPException(400, "môi trường không hợp lệ")
+    message = body.message.strip()
+    if not message:
+        raise HTTPException(400, "nội dung trống")
+    if body.conversation_id:
+        conversation_id = _own_conversation(conn, t, body.conversation_id)["id"]
+    else:
+        conversation_id = db.new_id()
+        now = db.iso()
+        title = " ".join(message.split())[:60]
+        conn.execute("INSERT INTO conversation(id,tenant_id,user_id,title,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                     (conversation_id, t.tenant_id, t.user_id, title, now, now))
+    run_id = db.new_id()
+    cancelled = threading.Event()
+    with _runs_lock:
+        _runs[run_id] = (t.tenant_id, t.user_id, cancelled)
+    events: queue.Queue = queue.Queue()
+    events.put({"type": "start", "run_id": run_id, "conversation_id": conversation_id})
+
+    def worker() -> None:
+        try:
+            with db.session() as worker_conn:
+                episode = agent_mod.run_task(worker_conn, t.tenant_id, t.user_id, message, body.env, body.project, conversation_id=conversation_id,
+                                             episode_id=run_id, on_event=events.put, cancelled=cancelled)
+                events.put({"type": "done", "conversation_id": conversation_id, "message": _chat_message(worker_conn, t.tenant_id, episode)})
+        except agent_mod.QuotaExceeded as exc:
+            events.put({"type": "error", "message": str(exc)})
+        except Exception:
+            log.exception("lỗi khi chạy lượt chat %s", run_id)
+            events.put({"type": "error", "message": "lỗi máy chủ khi xử lý yêu cầu"})
+        finally:
+            with _runs_lock:
+                _runs.pop(run_id, None)
+            events.put(None)
+
+    threading.Thread(target=worker, name=f"chat-{run_id[:8]}", daemon=True).start()
+
+    def stream():
+        while True:
+            try:
+                event = events.get(timeout=15)
+            except queue.Empty:
+                yield ": ping\n\n"
+                continue
+            if event is None:
+                return
+            yield _sse(event)
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/api/chat/{run_id}/cancel")
+def chat_cancel(run_id: str, t: Tenant = Depends(current_tenant)):
+    with _runs_lock:
+        run = _runs.get(run_id)
+    if run is None or run[0] != t.tenant_id or run[1] != t.user_id:
+        raise HTTPException(404, "không có lượt đang chạy")
+    run[2].set()
+    return {"ok": True}
+
+
+def _chat_message(conn, tenant_id: str, ep: dict) -> dict:
+    approvals = db.rows(conn.execute(
+        "SELECT a.id, a.tool, a.env, a.args, a.dry_run, a.risk_tier, a.confidence, a.reasons, a.rollback_hint, a.status, a.required_approvals, a.decided_by, "
+        "a.deny_reason, a.result, a.expires_at FROM approval_request a WHERE a.episode_id=? AND a.tenant_id=? ORDER BY a.created_at, a.rowid",
+        (ep["id"], tenant_id)).fetchall(), "args", "dry_run", "reasons", "decided_by", "result")
+    return {"id": ep["id"], "task": ep["input"]["task"], "output": ep["output"], "outcome": ep["outcome"], "outcome_src": ep["outcome_src"], "env": ep["env"],
+            "task_type": ep["task_type"], "started_at": ep["started_at"], "tokens": ep["tokens"], "ku_used": len(ep["ku_used"]),
+            "edited": ep["human_edit"] is not None, "cancelled": any(s["type"] == "cancelled" for s in ep["trace"]),
+            "steps": [s for s in ep["trace"] if s["type"] == "tool_call"], "error": next((s["message"] for s in ep["trace"] if s["type"] == "error"), None),
+            "approvals": approvals}
+
+
+@app.get("/api/conversations")
+def conversations(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    return db.rows(conn.execute("SELECT id, title, created_at, updated_at FROM conversation WHERE tenant_id=? AND user_id=? AND archived_at IS NULL "
+                                "ORDER BY updated_at DESC, rowid DESC LIMIT 200", (t.tenant_id, t.user_id)).fetchall())
+
+
+@app.get("/api/conversations/{conversation_id}")
+def conversation(conversation_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    c = _own_conversation(conn, t, conversation_id)
+    gateway.expire_approvals(conn, t.tenant_id)
+    rs = conn.execute("SELECT * FROM episode WHERE conversation_id=? AND tenant_id=? ORDER BY started_at, rowid", (conversation_id, t.tenant_id)).fetchall()
+    return {**c, "messages": [_chat_message(conn, t.tenant_id, db.row(r, "input", "trace", "ku_used", "human_edit")) for r in rs]}
+
+
+class ConversationPatch(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
+@app.patch("/api/conversations/{conversation_id}")
+def conversation_rename(conversation_id: str, body: ConversationPatch, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    _own_conversation(conn, t, conversation_id)
+    conn.execute("UPDATE conversation SET title=? WHERE id=?", (body.title.strip() or "Hội thoại", conversation_id))
+    return {"ok": True}
+
+
+@app.delete("/api/conversations/{conversation_id}")
+def conversation_archive(conversation_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    """Chỉ ẩn hội thoại; episode là nhật ký bất biến nên được giữ lại."""
+    _own_conversation(conn, t, conversation_id)
+    conn.execute("UPDATE conversation SET archived_at=? WHERE id=?", (db.iso(), conversation_id))
+    return {"ok": True}
 
 
 @app.get("/api/episodes")

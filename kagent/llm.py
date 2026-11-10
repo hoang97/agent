@@ -5,6 +5,7 @@ import ipaddress
 import json
 import re
 import socket
+from types import SimpleNamespace
 from typing import Callable
 from urllib.parse import urlsplit
 
@@ -66,6 +67,30 @@ _FACT = re.compile(r"(?:ghi nhớ|nhớ rằng|lưu ý rằng|biết rằng|reme
 
 class LLMError(Exception):
     pass
+
+
+class Cancelled(Exception):
+    """Người dùng bấm dừng."""
+
+
+def check_cancelled(cancelled) -> None:
+    if cancelled is not None and cancelled.is_set():
+        raise Cancelled()
+
+
+def _turn_emitter(on_text, parts: list[str]):
+    """Chèn dòng trống giữa văn bản của các lượt model trong cùng một câu trả lời."""
+    if on_text is None:
+        return None
+    first = {"value": True}
+
+    def emit(text: str) -> None:
+        if first["value"] and parts:
+            on_text("\n\n")
+        first["value"] = False
+        on_text(text)
+
+    return emit
 
 
 def extract_entities(task: str) -> list[str]:
@@ -144,9 +169,10 @@ class HeuristicProvider:
             calls.append(("docs.create", {"name": "nhap", "content": task}))
         return calls
 
-    def run_agent(self, task: str, context: str, tools: list[dict], call_tool: CallTool) -> dict:
+    def run_agent(self, task: str, context: str, tools: list[dict], call_tool: CallTool, history=None, on_text=None, cancelled=None) -> dict:
         lines, statuses = [], []
         for name, args in self.plan(task):
+            check_cancelled(cancelled)
             step = call_tool(name, args)
             statuses.append(step["status"])
             lines.append(f"- {name}: {step['status']}" + (f" — {'; '.join(step.get('reasons') or [])}" if step.get("reasons") else ""))
@@ -154,6 +180,10 @@ class HeuristicProvider:
             answer = "Không có công cụ nào phù hợp; ghi nhận yêu cầu làm dữ liệu cho luồng học."
         else:
             answer = "Kết quả thực thi (chế độ heuristic, backend mô phỏng):\n" + "\n".join(lines)
+        if on_text:
+            for chunk in re.findall(r"\S+\s*", answer):
+                check_cancelled(cancelled)
+                on_text(chunk)
         return {"answer": answer, "tokens": 0, "statuses": statuses}
 
     def reflect(self, episode: dict) -> list[dict]:
@@ -301,15 +331,23 @@ class AnthropicProvider(_StructuredProvider):
         self.direct = credential is None or credential.base_url is None
         self.models = _models(credential)
 
-    def _create(self, tier: str, **params):
+    def _create(self, tier: str, on_text=None, cancelled=None, **params):
         """Opus có fallback phía server khi model từ chối; Haiku không hỗ trợ fallback này."""
         model = self.models[tier]
+        extra: dict = {}
+        api = self.client.messages
+        if self.direct and (model.startswith("claude-opus") or model.startswith("claude-fable") or model.startswith("claude-sonnet")):
+            api = self.client.beta.messages
+            extra = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
         try:
-            if self.direct and (model.startswith("claude-opus") or model.startswith("claude-fable") or model.startswith("claude-sonnet")):
-                response = self.client.beta.messages.create(
-                    model=model, betas=["server-side-fallback-2026-07-01"], fallbacks="default", **params)
+            if on_text is None:
+                response = api.create(model=model, **extra, **params)
             else:
-                response = self.client.messages.create(model=model, **params)
+                with api.stream(model=model, **extra, **params) as stream:
+                    for text in stream.text_stream:
+                        check_cancelled(cancelled)
+                        on_text(text)
+                    response = stream.get_final_message()
         except anthropic.AuthenticationError as exc:
             raise LLMError("API key không hợp lệ") from exc
         except anthropic.RateLimitError as exc:
@@ -336,16 +374,20 @@ class AnthropicProvider(_StructuredProvider):
         text = "".join(b.text for b in response.content if b.type == "text")
         return _parse_json(text), self._tokens(response)
 
-    def run_agent(self, task: str, context: str, tools: list[dict], call_tool: CallTool) -> dict:
+    def run_agent(self, task: str, context: str, tools: list[dict], call_tool: CallTool, history=None, on_text=None, cancelled=None) -> dict:
         system = AGENT_SYSTEM + context
         api_tools = [{"name": t["tool"].replace(".", "__"), "description": t["description"], "input_schema": t["input_schema"]} for t in tools]
-        messages: list[dict] = [{"role": "user", "content": task}]
+        messages: list[dict] = [*(history or []), {"role": "user", "content": task}]
         total = 0
-        response = None
+        parts: list[str] = []
         for _ in range(settings.max_agent_steps):
-            response = self._create("strong", max_tokens=16000, system=system, tools=api_tools, messages=messages,
-                                    output_config={"effort": "high"})
+            check_cancelled(cancelled)
+            response = self._create("strong", on_text=_turn_emitter(on_text, parts), cancelled=cancelled, max_tokens=16000, system=system,
+                                    tools=api_tools, messages=messages, output_config={"effort": "high"})
             total += self._tokens(response)
+            text = "".join(b.text for b in response.content if b.type == "text")
+            if text:
+                parts.append(text)
             messages.append({"role": "assistant", "content": response.content})
             if response.stop_reason == "pause_turn":
                 continue
@@ -360,8 +402,7 @@ class AnthropicProvider(_StructuredProvider):
             messages.append({"role": "user", "content": results})
         else:
             raise LLMError("vượt số bước tối đa")
-        answer = "".join(b.text for b in response.content if b.type == "text") or "(không có nội dung trả lời)"
-        return {"answer": answer, "tokens": total}
+        return {"answer": "\n\n".join(parts) or "(không có nội dung trả lời)", "tokens": total}
 
 
 class _BadRequest(LLMError):
@@ -377,9 +418,41 @@ class OpenAIProvider(_StructuredProvider):
         self.client = client or _openai_client(credential)
         self.models = _models(credential)
 
-    def _complete(self, **params):
+    def _stream(self, on_text, cancelled, params: dict):
+        """Gom các chunk thành cấu trúc giống phản hồi không stream."""
+        content: list[str] = []
+        calls: dict[int, dict] = {}
+        finish, usage = None, None
+        for chunk in self.client.chat.completions.create(stream=True, **params):
+            check_cancelled(cancelled)
+            usage = getattr(chunk, "usage", None) or usage
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            finish = choice.finish_reason or finish
+            if choice.delta.content:
+                content.append(choice.delta.content)
+                on_text(choice.delta.content)
+            for delta in choice.delta.tool_calls or []:
+                call = calls.setdefault(delta.index, {"id": "", "name": "", "arguments": ""})
+                call["id"] = delta.id or call["id"]
+                if delta.function:
+                    call["name"] += delta.function.name or ""
+                    call["arguments"] += delta.function.arguments or ""
+        tool_calls = [SimpleNamespace(id=c["id"], function=SimpleNamespace(name=c["name"], arguments=c["arguments"])) for _, c in sorted(calls.items())]
+        message = SimpleNamespace(content="".join(content) or None, tool_calls=tool_calls or None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason=finish)], usage=usage)
+
+    def _complete(self, on_text=None, cancelled=None, **params):
         try:
-            response = self.client.chat.completions.create(**params)
+            if on_text is None:
+                response = self.client.chat.completions.create(**params)
+            else:
+                try:
+                    response = self._stream(on_text, cancelled, {**params, "stream_options": {"include_usage": True}})
+                except openai.BadRequestError:
+                    # Dịch vụ tương thích có thể chưa hỗ trợ stream_options.
+                    response = self._stream(on_text, cancelled, params)
         except openai.AuthenticationError as exc:
             raise LLMError("API key không hợp lệ") from exc
         except openai.RateLimitError as exc:
@@ -417,16 +490,20 @@ class OpenAIProvider(_StructuredProvider):
             response = self._complete(model=model, messages=messages)
         return _parse_json(response.choices[0].message.content or ""), self._tokens(response)
 
-    def run_agent(self, task: str, context: str, tools: list[dict], call_tool: CallTool) -> dict:
+    def run_agent(self, task: str, context: str, tools: list[dict], call_tool: CallTool, history=None, on_text=None, cancelled=None) -> dict:
         api_tools = [{"type": "function", "function": {"name": t["tool"].replace(".", "__"), "description": t["description"], "parameters": t["input_schema"]}} for t in tools]
-        messages: list[dict] = [{"role": "system", "content": AGENT_SYSTEM + context}, {"role": "user", "content": task}]
+        messages: list[dict] = [{"role": "system", "content": AGENT_SYSTEM + context}, *(history or []), {"role": "user", "content": task}]
         total = 0
+        parts: list[str] = []
         for _ in range(settings.max_agent_steps):
-            response = self._complete(model=self.models["strong"], messages=messages, tools=api_tools)
+            check_cancelled(cancelled)
+            response = self._complete(on_text=_turn_emitter(on_text, parts), cancelled=cancelled, model=self.models["strong"], messages=messages, tools=api_tools)
             total += self._tokens(response)
             message = response.choices[0].message
+            if message.content:
+                parts.append(message.content)
             if not message.tool_calls:
-                return {"answer": message.content or "(không có nội dung trả lời)", "tokens": total}
+                return {"answer": "\n\n".join(parts) or "(không có nội dung trả lời)", "tokens": total}
             messages.append({"role": "assistant", "content": message.content, "tool_calls": [
                 {"id": c.id, "type": "function", "function": {"name": c.function.name, "arguments": c.function.arguments}} for c in message.tool_calls]})
             for call in message.tool_calls:
