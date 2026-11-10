@@ -79,3 +79,32 @@ Agent chỉ được thấy những công cụ mà người yêu cầu được 
 ## Gỡ một công cụ
 
 Xóa mục khỏi manifest rồi triển khai. Bản ghi của công cụ ở mọi tenant chuyển trạng thái **Đã gỡ** và mọi lệnh gọi bị chặn. Audit và cấu hình cũ được giữ lại. Nếu sau này thêm lại đúng tên đó, cấu hình cũ của tenant được dùng tiếp.
+
+## Chạy nhiều công cụ cùng lúc
+
+Các lệnh mà model gọi trong cùng một lượt được chạy song song, tối đa 4 lệnh một lúc, mỗi lệnh dùng kết nối riêng. Mỗi lệnh vẫn đi riêng qua gateway và được ghi audit riêng.
+
+Kết quả chưa tin cậy của một lệnh trong nhóm không làm các lệnh cùng nhóm bị ép hỏi, vì chúng được lập kế hoạch cùng lúc. Nó chỉ ảnh hưởng tới các lượt sau. Ở chế độ heuristic, các lệnh đọc liền nhau chạy song song, còn lệnh ghi luôn chạy riêng.
+
+Máy chủ `mcp-sql` (mô phỏng, có dữ liệu mẫu `customers` và `orders`) có hai công cụ:
+- `sql.query` chỉ đọc, mức R1.
+- `sql.execute` cho INSERT, UPDATE, DELETE, mức R3, có dry-run.
+
+`k8s.exec` hiểu lệnh `psql -c "…"` và `mysql -e "…"` để chạy SQL bên trong pod. Đây vẫn là lệnh R4 nên luôn phải duyệt.
+
+## Công cụ học được
+
+Một công cụ học được là một chuỗi bước gọi công cụ trong danh mục, có tên dạng `learned.<ten>`. Công cụ học được sinh ra theo hai cách:
+
+- **Tự đề xuất:** khi cùng một chuỗi công cụ thành công từ 3 lượt trở lên trong 30 ngày. Giá trị giống nhau giữa các lượt thành hằng số, giá trị khác nhau thành tham số. Nếu chỉ một người dùng chuỗi đó thì đề xuất là công cụ cá nhân của người đó, ngược lại là công cụ của tenant. Chuỗi đã bị từ chối sẽ không được đề xuất lại.
+- **Lưu từ chat:** bấm biểu tượng lưu dưới một câu trả lời. Giá trị bạn đã gõ trong yêu cầu sẽ thành tham số.
+
+Quy tắc an toàn:
+
+- Mỗi bước vẫn đi qua gateway với quyền của người gọi. Ghép bước không tạo thêm quyền nào: nếu không được dùng một bước, cả công cụ bị chặn.
+- Tham số chỉ thay nguyên giá trị (`"{{ten}}"`), không nội suy vào chuỗi lệnh.
+- Công cụ của tenant cần tenant_admin duyệt. Công cụ cá nhân do chính chủ bật và chỉ chủ sở hữu thấy.
+- Lượt có bước chạy sau nội dung chưa tin cậy thì không được học và không lưu được.
+- Tỷ lệ thành công dưới 50% sau từ 4 lần dùng thì công cụ tự tắt. Bật lại thì bộ đếm được đặt lại.
+
+Ngoài ra, bài học về từng công cụ (KU loại lesson hoặc procedure có entity `tool:<tên>`) được nạp vào ngữ cảnh kèm danh sách công cụ. Nhờ vậy cách dùng công cụ được bổ sung dần từ lỗi và thành công thực tế.
