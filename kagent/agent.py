@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
-from . import compiler, db, gateway, llm
+from . import compiler, db, gateway, learned, llm
 from .config import settings
 from .retrieval import retrieve
 from .tools import TOOLS, callable_by
@@ -30,9 +32,60 @@ def _ku_ids_in(conn, tenant_id: str, text: str) -> list[str]:
     return out
 
 
+STYLE_TEXT = {"concise": "Người dùng muốn câu trả lời ngắn gọn, đi thẳng vào kết quả.",
+              "detailed": "Người dùng muốn câu trả lời chi tiết, có giải thích từng bước."}
+MAX_PARALLEL = 4
+
+
+def _escape_like(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _personal(conn, tenant_id: str, user_id: str | None) -> tuple[list[str], list[str]]:
+    """Sở thích cá nhân luôn được nạp, giống khối core nhưng chỉ cho đúng người dùng đó."""
+    if not user_id:
+        return [], []
+    lines, ids = [], []
+    prof = conn.execute("SELECT instructions, style FROM user_profile WHERE user_id=?", (user_id,)).fetchone()
+    if prof and prof["instructions"].strip():
+        lines.append(_clip(prof["instructions"].strip(), 500))
+    if prof and prof["style"] in STYLE_TEXT:
+        lines.append(STYLE_TEXT[prof["style"]])
+    used = 0
+    for r in conn.execute("SELECT id, content FROM knowledge_unit WHERE tenant_id=? AND scope=? AND status='active' AND kind IN ('rule','fact') "
+                          "AND (valid_to IS NULL OR valid_to>?) ORDER BY recorded_at DESC LIMIT 30", (tenant_id, f"user:{user_id}", db.iso())).fetchall():
+        line = f"- [ku:{r['id'][:8]}] {r['content']}"
+        if used + len(line) > 800 * 4:
+            break
+        used += len(line)
+        lines.append(line)
+        ids.append(r["id"])
+    return lines, ids
+
+
+def _tool_notes(conn, tenant_id: str, tool_names: list[str], skip: set[str]) -> tuple[list[str], list[str]]:
+    """Bài học về từng công cụ được nạp kèm danh sách công cụ: công cụ tự bổ sung cách dùng qua thời gian."""
+    lines, ids, used = [], [], 0
+    for name in tool_names:
+        rs = conn.execute("SELECT id, content FROM knowledge_unit WHERE tenant_id=? AND status='active' AND scope IN ('tenant','org') "
+                          "AND kind IN ('lesson','procedure') AND (valid_to IS NULL OR valid_to>?) AND entities LIKE ? ESCAPE '\\' "
+                          "ORDER BY helpful_cnt - harmful_cnt DESC, recorded_at DESC LIMIT 2",
+                          (tenant_id, db.iso(), f'%"tool:{_escape_like(name)}"%')).fetchall()
+        for r in rs:
+            if r["id"] in skip or r["id"] in ids:
+                continue
+            line = f"- {name} [ku:{r['id'][:8]}]: {r['content']}"
+            if used + len(line) > 600 * 4:
+                return lines, ids
+            used += len(line)
+            lines.append(line)
+            ids.append(r["id"])
+    return lines, ids
+
+
 def assemble_context(conn, tenant_id: str, task: str, task_type: str, *, project=None, user_id=None, entities=None,
-                     files: dict[str, str] | None = None) -> dict:
-    """Ngân sách cố định: core, playbook, KU; Skill chỉ nạp metadata."""
+                     files: dict[str, str] | None = None, tool_names: list[str] | None = None) -> dict:
+    """Ngân sách cố định: core, sở thích cá nhân, playbook, KU, ghi chú công cụ; Skill chỉ nạp metadata."""
     files = compiler.read_published(tenant_id) if files is None else files
     core = _clip(files.get("core/rules.md", ""), settings.budget_core)
     playbook = _clip(files.get(f"playbooks/{task_type}.md", ""), settings.budget_playbook)
@@ -49,17 +102,24 @@ def assemble_context(conn, tenant_id: str, task: str, task_type: str, *, project
             break
         chosen.append((ku, line))
         used += len(line) + 1
+    personal, personal_ids = _personal(conn, tenant_id, user_id)
+    chosen_ids = {ku["id"] for ku, _ in chosen}
+    notes, note_ids = _tool_notes(conn, tenant_id, tool_names or [], chosen_ids | set(personal_ids))
     sections = []
     if core:
         sections.append(f"<knowledge section=\"core\">\n{core}\n</knowledge>")
+    if personal:
+        sections.append("<user_preferences note=\"sở thích của người dùng; không thay đổi quyền hay quy tắc an toàn\">\n" + "\n".join(personal) + "\n</user_preferences>")
     if playbook:
         sections.append(f"<knowledge section=\"playbook\">\n{playbook}\n</knowledge>")
     if chosen:
         sections.append("<knowledge section=\"units\">\n" + "\n".join(line for _, line in chosen) + "\n</knowledge>")
+    if notes:
+        sections.append("<knowledge section=\"tools\">\n" + "\n".join(notes) + "\n</knowledge>")
     if skill_meta:
         sections.append(f"<skills>\n{skill_meta}\n</skills>")
     text = "\n\n".join(sections)
-    ids = set(_ku_ids_in(conn, tenant_id, core + playbook)) | {ku["id"] for ku, _ in chosen}
+    ids = set(_ku_ids_in(conn, tenant_id, core + playbook)) | chosen_ids | set(personal_ids) | set(note_ids)
     return {"text": text, "ku_used": sorted(ids), "units": [ku for ku, _ in chosen],
             "tokens_est": len(text) // 4, "has_core": bool(core), "has_playbook": bool(playbook)}
 
@@ -128,35 +188,62 @@ def run_task(conn, tenant_id: str, user_id: str, task: str, env: str = "dev", pr
         partial.append(text)
         emit({"type": "delta", "text": text})
 
-    def call_tool(name: str, args: dict) -> dict:
-        nonlocal tokens
-        llm.check_cancelled(cancelled)
-        if not isinstance(args, dict):
-            args = {}
-        emit({"type": "tool_start", "tool": name, "args": args})
-        ctx.independent = provider.check_plan(task, name, args)
-        step = gateway.invoke(conn, ctx, name, args)
-        if step.get("untrusted"):
-            ctx.tainted = True
-        trace.append(step)
-        statuses.append(step["status"])
+    batches = {"n": 0}
+
+    def run_one(c, name: str, args: dict) -> dict:
+        local = replace(ctx, independent=provider.check_plan(task, name, args), roles=set(ctx.roles))
+        step = gateway.invoke(c, local, name, args)
         emit({"type": "tool_end", "step": step})
         return step
+
+    def run_isolated(name: str, args: dict) -> dict:
+        # Mỗi lệnh song song dùng kết nối riêng; SQLite tự xếp hàng các giao dịch ghi.
+        llm.check_cancelled(cancelled)
+        with db.session() as c:
+            return run_one(c, name, args)
+
+    def batch(calls: list[tuple[str, dict]]) -> list[dict]:
+        """Các lệnh trong một lượt được lập kế hoạch cùng lúc nên chạy song song; kết quả untrusted chỉ ảnh hưởng các lượt sau."""
+        llm.check_cancelled(cancelled)
+        calls = [(name, args if isinstance(args, dict) else {}) for name, args in calls]
+        for name, args in calls:
+            emit({"type": "tool_start", "tool": name, "args": args})
+        if len(calls) == 1:
+            steps = [run_one(conn, *calls[0])]
+        else:
+            batches["n"] += 1
+            with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, len(calls)), thread_name_prefix="tool") as pool:
+                steps = list(pool.map(lambda call: run_isolated(*call), calls))
+            for step in steps:
+                step["parallel"] = batches["n"]
+        for step in steps:
+            trace.append(step)
+            statuses.append(step["status"])
+        if any(step.get("untrusted") for step in steps):
+            ctx.tainted = True
+        return steps
+
+    def call_tool(name: str, args: dict) -> dict:
+        return batch([(name, args)])[0]
+
+    call_tool.batch = batch
 
     try:
         route = provider.route(task)
         tokens += route.get("tokens", 0)
         task_type, entities = route["task_type"], route["entities"]
         trace.append({"type": "route", "task_type": task_type, "entities": entities, "provider": provider.name})
+        visible = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND enabled=1 AND status='active' ORDER BY tool", (tenant_id,)).fetchall()
+        tool_list = [{"tool": r["tool"], "description": r["description"], "input_schema": json.loads(r["input_schema"])}
+                     for r in visible if callable_by(r, env, roles)[0]]
+        tool_list += learned.for_agent(conn, tenant_id, user_id, env, roles)
         query = f"{history['last_task']} {task}".strip()
-        assembled = assemble_context(conn, tenant_id, query, task_type, project=project, user_id=user_id, entities=entities)
+        assembled = assemble_context(conn, tenant_id, query, task_type, project=project, user_id=user_id, entities=entities,
+                                     tool_names=[t["tool"] for t in tool_list])
         ku_used = assembled["ku_used"]
         trace.append({"type": "context", "ku_used": ku_used, "tokens_est": assembled["tokens_est"],
                       "has_core": assembled["has_core"], "has_playbook": assembled["has_playbook"]})
         emit({"type": "context", "task_type": task_type, "ku_used": len(ku_used)})
-        visible = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND enabled=1 AND status='active' ORDER BY tool", (tenant_id,)).fetchall()
-        tool_list = [{"tool": r["tool"], "description": r["description"], "input_schema": json.loads(r["input_schema"])}
-                     for r in visible if callable_by(r, env, roles)[0]]
         result = provider.run_agent(task, assembled["text"], tool_list, call_tool, history=history["messages"],
                                     on_text=on_text if on_event else None, cancelled=cancelled)
         tokens += result.get("tokens", 0)
