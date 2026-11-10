@@ -65,7 +65,7 @@ function renderLogin() {
   user.focus();
 }
 
-const TABS = [["episodes", "Nhật ký"], ["knowledge", "Tri thức"], ["approvals", "Duyệt lệnh"], ["compile", "Biên dịch L2"], ["policy", "Công cụ & Chính sách"], ["metrics", "Đo lường"], ["audit", "Audit"], ["settings", "Cài đặt"], ["account", "Tài khoản"]];
+const TABS = [["connections", "Kết nối công cụ"], ["episodes", "Nhật ký"], ["knowledge", "Tri thức"], ["approvals", "Duyệt lệnh"], ["compile", "Biên dịch L2"], ["policy", "Công cụ & Chính sách"], ["metrics", "Đo lường"], ["audit", "Audit"], ["settings", "Cài đặt"], ["account", "Tài khoản"]];
 const VIEWS = {};
 let conversationList = null;
 
@@ -243,7 +243,7 @@ function toolCatalogSection() {
   const admin = isAdmin();
   const box = h("div", {}, h("div", { class: "card muted" }, "Đang tải danh mục…"));
   const search = h("input", { type: "search", placeholder: "Tìm công cụ", "aria-label": "Tìm công cụ" });
-  const filter = h("select", { "aria-label": "Lọc công cụ" }, [["all", "Tất cả"], ["enabled", "Đang bật"], ["new", "Mới, chưa duyệt"], ["off", "Đang tắt"], ["removed", "Đã gỡ"]].map(([v, l]) => h("option", { value: v }, l)));
+  const filter = h("select", { "aria-label": "Lọc công cụ" }, [["all", "Tất cả"], ["enabled", "Đang bật"], ["off", "Đang tắt"], ["personal", "Cá nhân"]].map(([v, l]) => h("option", { value: v }, l)));
   let list = [];
   const patch = (t, body) => guard(async () => {
     const fresh = await api("PATCH", `/api/tools/${encodeURIComponent(t.tool)}`, body);
@@ -256,43 +256,139 @@ function toolCatalogSection() {
 
   function item(t) {
     const removed = t.status !== "active";
-    const locked = !admin || removed;
+    const locked = !(admin || t.personal) || removed;
     const lastOne = (arr, v) => arr.length === 1 && arr.includes(v);
     const envs = t.catalog_envs.map((e) => chip(e, t.effective_envs.includes(e), patch(t, { envs: flip(t.effective_envs, e) }), locked || lastOne(t.effective_envs, e), "Môi trường được dùng công cụ"));
     const roles = t.role_choices.map((r) => chip(ROLE_LABEL[r] || r, t.effective_roles.includes(r), patch(t, { roles: flip(t.effective_roles, r) }), locked || lastOne(t.effective_roles, r), "Vai trò được gọi công cụ"));
     const tier = h("select", { "aria-label": `Mức rủi ro của ${t.tool}`, disabled: locked, onchange: (e) => patch(t, { risk_tier: e.target.value })() },
       (t.tier_choices.length ? t.tier_choices : [t.risk_tier]).map((r) => h("option", { selected: r === t.risk_tier }, r)));
-    const state = removed ? null : admin
+    const state = removed ? null : (admin || t.personal)
       ? h("button", { type: "button", class: t.enabled ? "ghost small-btn" : "small-btn", onclick: patch(t, { enabled: !t.enabled }) }, t.enabled ? "Tắt" : "Bật")
       : h("span", { class: "small" }, t.enabled ? "đang bật" : "đang tắt");
     return h("div", { class: "tool-item" + (t.enabled && !removed ? "" : " off") },
       h("div", { class: "tool-head" }, h("code", {}, t.tool), h("span", { class: "badge " + tierClass(t.risk_tier) }, t.risk_tier),
-        t.risk_tier !== t.catalog_tier && h("span", { class: "small" }, `danh mục: ${t.catalog_tier}`), h("span", { class: "badge" }, ACTION_LABEL[t.action_class] || t.action_class),
+        t.risk_tier !== t.catalog_tier && h("span", { class: "small" }, `template: ${t.catalog_tier}`), t.personal && h("span", { class: "badge info" }, "cá nhân"), h("span", { class: "badge" }, ACTION_LABEL[t.action_class] || t.action_class),
         t.untrusted_output ? h("span", { class: "badge warn" }, "nội dung ngoài") : null, t.is_new && !removed && h("span", { class: "badge info" }, "Mới"),
         removed && h("span", { class: "badge bad" }, "Đã gỡ khỏi danh mục"), !t.classified && h("span", { class: "badge warn" }, "Chưa phân loại"), h("span", { class: "spacer" }), state),
       h("div", { class: "small" }, t.description + (t.rollback_hint ? ` · Hoàn tác: ${t.rollback_hint}` : "")),
-      !removed && h("div", { class: "tool-perms" }, h("span", { class: "small" }, "Môi trường"), envs, h("span", { class: "small sep" }, "Vai trò"), roles, h("span", { class: "small sep" }, "Mức"), tier),
+      !removed && h("div", { class: "tool-perms" }, h("span", { class: "small" }, "Môi trường"), envs, !t.personal && h("span", { class: "small sep" }, "Vai trò"), t.personal ? null : roles, h("span", { class: "small sep" }, "Mức"), tier),
       t.warnings.length > 0 && h("div", { class: "small warn-text" }, "Cảnh báo: " + t.warnings.join("; ")));
   }
 
   function paint() {
     const q = search.value.trim().toLowerCase();
-    const match = { all: () => true, enabled: (t) => t.enabled && t.status === "active", new: (t) => t.is_new && t.status === "active", off: (t) => !t.enabled && t.status === "active", removed: (t) => t.status !== "active" }[filter.value];
+    const match = { all: () => true, enabled: (t) => t.enabled, off: (t) => !t.enabled, personal: (t) => t.personal }[filter.value];
     const shown = list.filter((t) => match(t) && (!q || t.tool.includes(q) || t.description.toLowerCase().includes(q)));
     const groups = new Map();
     for (const t of shown) { if (!groups.has(t.server)) groups.set(t.server, []); groups.get(t.server).push(t); }
-    const fresh = list.filter((t) => t.is_new && t.status === "active").length;
     box.replaceChildren(
-      ...(fresh ? [h("div", { class: "notice" }, `${fresh} công cụ mới từ danh mục đang tắt, chờ admin xem và bật.`)] : []),
       ...(shown.length ? [...groups].map(([server, items]) => h("div", { class: "card" }, h("h3", {}, server, " ", h("span", { class: "small" }, items[0].server_description)), items.map(item)))
-        : [h("div", { class: "card muted" }, "Không có công cụ phù hợp.")]));
+        : [h("div", { class: "card muted" }, list.length ? "Không có công cụ phù hợp." : "Chưa có công cụ nào. Tạo kết nối ở trang Kết nối công cụ.")]));
   }
   search.addEventListener("input", paint);
   filter.addEventListener("change", paint);
   api("GET", "/api/tools").then((r) => { list = r; paint(); }).catch((e) => toast(e.message, true));
-  return h("div", {}, h("p", { class: "small" }, "Thêm, gỡ hoặc phân loại công cụ bằng manifest trong kagent/catalog (xem docs/TOOLS.md). Ở đây tenant chỉ được siết thêm: bật/tắt, nâng mức rủi ro, thu hẹp môi trường và vai trò."),
+  return h("div", {}, h("p", { class: "small" }, "Công cụ sinh ra từ các kết nối (trang Kết nối công cụ). Ở đây chỉ được siết thêm: bật/tắt, nâng mức rủi ro so với template, thu hẹp môi trường trong phạm vi của kết nối và vai trò. Công cụ dùng chung do admin quản lý, công cụ cá nhân do chính chủ quản lý."),
     h("div", { class: "row" }, search, filter), box);
 }
+
+const FIELD_HINT = { url: "https://…", secret: "", list: "giá trị 1, giá trị 2" };
+
+function connectionForm(templates, existing, onDone) {
+  const admin = isAdmin();
+  const tplSelect = h("select", { "aria-label": "Template", disabled: !!existing }, templates.map((t) => h("option", { value: t.name, selected: existing && existing.template === t.name }, t.title)));
+  const name = h("input", { placeholder: "tên_kết_nối, ví dụ k8s_prod", "aria-label": "Tên kết nối", value: existing ? existing.name : "", disabled: !!existing });
+  const title = h("input", { placeholder: "Tên hiển thị", "aria-label": "Tên hiển thị", value: existing ? existing.title : "", class: "wide" });
+  const scope = h("select", { "aria-label": "Phạm vi", disabled: !!existing }, h("option", { value: "user" }, "Cá nhân (chỉ mình tôi)"), admin && h("option", { value: "tenant", selected: existing && existing.scope === "tenant" }, "Dùng chung cho tenant"));
+  let envs = existing ? [...existing.envs] : ["dev"];
+  let roles = existing ? [...existing.roles] : ["member"];
+  const chips = h("div", { class: "tool-perms" });
+  const allowPrivate = h("input", { type: "checkbox", checked: existing && existing.allow_private, "aria-label": "Cho phép mạng nội bộ" });
+  const fieldsBox = h("div", { class: "fields" });
+  const inputs = {};
+  const desc = h("div", { class: "small" });
+  const flip = (arr, v) => (arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]);
+  function paintChips() {
+    const chip = (label, on, onclick) => h("button", { type: "button", class: "chip" + (on ? " on" : ""), "aria-pressed": on ? "true" : "false", onclick }, label);
+    chips.replaceChildren(h("span", { class: "small" }, "Môi trường"), ...["dev", "staging", "prod"].map((e) => chip(e, envs.includes(e), () => { envs = flip(envs, e); paintChips(); })),
+      ...(scope.value === "tenant" ? [h("span", { class: "small sep" }, "Vai trò được dùng"), ...Object.keys(ROLE_LABEL).map((r) => chip(ROLE_LABEL[r], roles.includes(r), () => { roles = flip(roles, r); paintChips(); }))] : []));
+  }
+  function paintFields() {
+    const tpl = templates.find((t) => t.name === tplSelect.value);
+    desc.textContent = tpl.description + " Công cụ: " + tpl.tools.map((t) => `${t.name} (${t.risk_tier})`).join(", ") + ".";
+    for (const k of Object.keys(inputs)) delete inputs[k];
+    fieldsBox.replaceChildren(...tpl.fields.map((f) => {
+      const current = existing ? existing.params[f.name] : undefined;
+      let input;
+      if (f.type === "boolean") input = h("input", { type: "checkbox", checked: current !== undefined ? current : f.default === true });
+      else if (f.type === "text") input = h("textarea", { rows: 3, value: current || "" });
+      else {
+        const isSecret = f.type === "secret";
+        const set = existing && existing.secrets_set[f.name];
+        input = h("input", { type: isSecret ? "password" : f.type === "integer" ? "number" : "text", autocomplete: "off",
+          placeholder: isSecret ? (set ? "đã lưu, để trống để giữ nguyên" : "") : (f.default !== null && f.default !== undefined ? String(f.default) : FIELD_HINT[f.type] || ""),
+          value: isSecret ? "" : Array.isArray(current) ? current.join(", ") : current !== undefined && current !== null ? String(current) : "" });
+      }
+      input.setAttribute("aria-label", f.name);
+      inputs[f.name] = { f, input };
+      return h("label", { class: "field" }, `${f.name}${f.required ? " *" : ""}${f.description ? " · " + f.description : ""}`, input);
+    }));
+  }
+  tplSelect.addEventListener("change", paintFields);
+  scope.addEventListener("change", paintChips);
+  const submit = guard(async (ev) => {
+    ev.preventDefault();
+    const params = {}, secrets = {};
+    for (const [key, { f, input }] of Object.entries(inputs)) {
+      if (f.type === "boolean") params[key] = input.checked;
+      else if (f.type === "secret") { if (input.value) secrets[key] = input.value; }
+      else if (input.value.trim() !== "") params[key] = f.type === "integer" ? Number(input.value) : input.value;
+    }
+    const body = { title: title.value, envs, params, secrets, ...(scope.value === "tenant" ? { roles } : {}), ...(state.me.is_org_admin ? { allow_private: allowPrivate.checked } : {}) };
+    const saved = existing ? await api("PATCH", `/api/connections/${existing.id}`, body)
+      : await api("POST", "/api/connections", { ...body, template: tplSelect.value, name: name.value.trim(), scope: scope.value });
+    for (const { input } of Object.values(inputs)) if (input.type === "password") input.value = "";
+    toast(existing ? "Đã lưu kết nối" : `Đã tạo kết nối ${saved.name}. Công cụ đọc đã bật; công cụ ghi đang tắt, bật ở trang Công cụ & Chính sách.`);
+    onDone();
+  });
+  paintFields();
+  paintChips();
+  return h("form", { class: "card", onsubmit: submit }, h("h3", {}, existing ? `Sửa kết nối ${existing.name}` : "Tạo kết nối từ template"),
+    h("div", { class: "row" }, tplSelect, name, scope), desc, h("div", { class: "row" }, title), chips,
+    state.me.is_org_admin && h("label", { class: "row small" }, allowPrivate, "Cho phép kết nối vào mạng nội bộ (chỉ org admin)"),
+    fieldsBox, h("div", { class: "row" }, h("button", { type: "submit" }, existing ? "Lưu" : "Tạo kết nối"), existing && h("button", { type: "button", class: "ghost", onclick: onDone }, "Đóng")));
+}
+
+VIEWS.connections = async (main) => {
+  const [templates, list] = await Promise.all([api("GET", "/api/templates"), api("GET", "/api/connections")]);
+  const editor = h("div");
+  const reload = () => { state.tab = "connections"; renderShell(); };
+  const action = (c, fn) => guard(async () => { await fn(); reload(); });
+  function card(c) {
+    const result = h("div", { class: "small" });
+    const test = guard(async () => { result.textContent = "Đang kiểm tra…"; const r = await api("POST", `/api/connections/${c.id}/test`); result.className = "small " + (r.ok ? "ok-text" : "warn-text"); result.textContent = r.ok ? "Kết nối được: " + JSON.stringify(r.detail) : "Lỗi: " + r.error; });
+    const remove = h("button", { type: "button", class: "danger small-btn", onclick: () => {
+      if (remove.dataset.confirm) action(c, () => api("DELETE", `/api/connections/${c.id}`))();
+      else { remove.dataset.confirm = "1"; remove.textContent = "Bấm lần nữa để gỡ"; setTimeout(() => { delete remove.dataset.confirm; remove.textContent = "Gỡ"; }, 4000); }
+    } }, "Gỡ");
+    return h("div", { class: "card" },
+      h("div", { class: "tool-head" }, h("strong", {}, c.title), h("code", {}, c.name), h("span", { class: "badge" }, c.template_title), h("span", { class: "badge " + (c.personal ? "info" : "") }, c.personal ? "cá nhân" : "dùng chung"),
+        badge(c.status === "active" ? "active" : "disabled"), c.allow_private ? h("span", { class: "badge warn" }, "mạng nội bộ") : null, h("span", { class: "spacer" }),
+        h("button", { type: "button", class: "ghost small-btn", onclick: test }, "Kiểm tra"),
+        c.can_manage && h("button", { type: "button", class: "ghost small-btn", onclick: () => { editor.replaceChildren(connectionForm(templates, c, reload)); editor.scrollIntoView(); } }, "Sửa"),
+        c.can_manage && h("button", { type: "button", class: "ghost small-btn", onclick: action(c, () => api("PATCH", `/api/connections/${c.id}`, { status: c.status === "active" ? "disabled" : "active" })) }, c.status === "active" ? "Tạm tắt" : "Bật lại"),
+        c.can_manage && remove),
+      h("div", { class: "small" }, `Môi trường: ${c.envs.join(", ")}` + (c.personal ? "" : ` · vai trò: ${c.roles.join(", ")}`)),
+      h("div", { class: "tool-perms" }, c.tools.map((t) => h("span", { class: "badge " + (t.enabled ? "ok" : "") }, `${t.tool.split(".")[1]} ${t.risk_tier}${t.enabled ? "" : " · tắt"}`))),
+      result);
+  }
+  const shared = list.filter((c) => !c.personal), mine = list.filter((c) => c.personal);
+  main.append(h("h2", {}, "Kết nối công cụ"),
+    h("p", { class: "small" }, "Tạo công cụ thật từ template bằng tham số của riêng bạn. Kết nối dùng chung do admin tạo và quản lý; kết nối cá nhân chỉ bạn thấy và dùng. Thông tin bí mật được mã hóa và không hiển thị lại. Kết nối vào mạng nội bộ cần org admin cho phép."),
+    connectionForm(templates, null, reload), editor,
+    h("h2", {}, `Dùng chung (${shared.length})`), ...(shared.length ? shared.map(card) : [h("div", { class: "card muted" }, "Chưa có kết nối dùng chung.")]),
+    h("h2", {}, `Của bạn (${mine.length})`), ...(mine.length ? mine.map(card) : [h("div", { class: "card muted" }, "Bạn chưa có kết nối cá nhân.")]));
+};
 
 function learnedToolsSection(personalOnly) {
   const box = h("div", {}, h("div", { class: "card muted" }, "Đang tải…"));

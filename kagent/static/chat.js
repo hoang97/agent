@@ -275,7 +275,7 @@ function chatView(main) {
 
   function emptyState() {
     const fill = (text) => () => { input.value = text; resize(); syncSend(); input.focus(); };
-    const ideas = ["Xem pod trong namespace default", "Tìm log lỗi của dịch vụ checkout", "Nhớ rằng staging dùng chung DB với QA", "Scale deployment web lên 5 replica"];
+    const ideas = ["Xem pod trong namespace default", "Tìm log lỗi trong 1 giờ qua", "Xem các cảnh báo đang kích hoạt", "Đọc trang https://example.com"];
     return h("div", { class: "empty" }, h("h2", {}, `Xin chào, ${state.me.username}`), h("p", { class: "muted" }, "Hôm nay agent có thể giúp gì cho bạn?"),
       h("div", { class: "ideas" }, ideas.map((t) => h("button", { type: "button", class: "idea", onclick: fill(t) }, t))));
   }
@@ -410,7 +410,7 @@ function chatView(main) {
     : "";
   const composer = h("div", { class: "composer-wrap" },
     h("div", { class: "composer" }, input, h("div", { class: "composer-bar" }, env, h("span", { class: "spacer" }), sendBtn)),
-    h("div", { class: "hint" }, notice + "Công cụ là bản mô phỏng. Enter để gửi, Shift+Enter xuống dòng."));
+    h("div", { class: "hint" }, notice + "Agent dùng công cụ thật qua các kết nối bạn được phép. Enter để gửi, Shift+Enter xuống dòng."));
   main.append(scroller, toBottom, composer);
 
   return (async () => {

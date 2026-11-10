@@ -170,6 +170,10 @@ input.wide { flex: 1; min-width: 220px; }
 .tool-perms select { padding: 1px 6px; font-size: 12px; }
 .sep { margin-left: 10px; }
 .warn-text { color: var(--warn); }
+.ok-text { color: var(--ok); }
+.fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-top: 10px; }
+.fields input, .fields textarea { width: 100%; }
+.fields input[type=checkbox] { width: auto; align-self: flex-start; }
 .card > .tool-item:first-child, .card > h3 + .tool-item { border-top: 0; padding-top: 0; }
 .sub-steps { margin: 2px 0 0 4px; }
 .card > details { margin-top: 6px; }
