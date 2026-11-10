@@ -209,6 +209,11 @@ def init_schema(conn: sqlite3.Connection) -> None:
     if "conversation_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(episode)")}:
         conn.execute("ALTER TABLE episode ADD COLUMN conversation_id TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_episode_conversation ON episode(conversation_id, started_at)")
+    registry = {r["name"] for r in conn.execute("PRAGMA table_info(tool_registry)")}
+    for column, ddl in (("catalog_tier", "TEXT"), ("risk_floor", "TEXT"), ("roles", "TEXT NOT NULL DEFAULT '[\"member\"]'"),
+                        ("status", "TEXT NOT NULL DEFAULT 'active'"), ("synced_at", "TEXT")):
+        if column not in registry:
+            conn.execute(f"ALTER TABLE tool_registry ADD COLUMN {column} {ddl}")
 
 
 def row(r: sqlite3.Row | None, *json_fields: str) -> dict | None:

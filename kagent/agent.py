@@ -7,7 +7,7 @@ import re
 from . import compiler, db, gateway, llm
 from .config import settings
 from .retrieval import retrieve
-from .tools import TOOLS
+from .tools import TOOLS, callable_by
 
 
 class QuotaExceeded(Exception):
@@ -121,7 +121,8 @@ def run_task(conn, tenant_id: str, user_id: str, task: str, env: str = "dev", pr
     emit = on_event or (lambda event: None)
     history = load_history(conn, tenant_id, conversation_id)
 
-    ctx = gateway.CallContext(tenant_id, user_id, env, task, episode_id, tainted=history["tainted"])
+    roles = gateway.user_roles(conn, tenant_id, user_id)
+    ctx = gateway.CallContext(tenant_id, user_id, env, task, episode_id, tainted=history["tainted"], roles=roles)
 
     def on_text(text: str) -> None:
         partial.append(text)
@@ -153,8 +154,9 @@ def run_task(conn, tenant_id: str, user_id: str, task: str, env: str = "dev", pr
         trace.append({"type": "context", "ku_used": ku_used, "tokens_est": assembled["tokens_est"],
                       "has_core": assembled["has_core"], "has_playbook": assembled["has_playbook"]})
         emit({"type": "context", "task_type": task_type, "ku_used": len(ku_used)})
-        visible = conn.execute("SELECT tool, description, input_schema FROM tool_registry WHERE tenant_id=? AND enabled=1 ORDER BY tool", (tenant_id,)).fetchall()
-        tool_list = [{"tool": r["tool"], "description": r["description"], "input_schema": json.loads(r["input_schema"])} for r in visible]
+        visible = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND enabled=1 AND status='active' ORDER BY tool", (tenant_id,)).fetchall()
+        tool_list = [{"tool": r["tool"], "description": r["description"], "input_schema": json.loads(r["input_schema"])}
+                     for r in visible if callable_by(r, env, roles)[0]]
         result = provider.run_agent(task, assembled["text"], tool_list, call_tool, history=history["messages"],
                                     on_text=on_text if on_event else None, cancelled=cancelled)
         tokens += result.get("tokens", 0)

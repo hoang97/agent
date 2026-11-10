@@ -54,6 +54,7 @@ def seed() -> None:
     with db.session() as conn:
         db.init_schema(conn)
         if conn.execute("SELECT 1 FROM org").fetchone():
+            tools.sync_registry(conn)
             return
         creds: dict[str, str] = {}
 
@@ -75,7 +76,7 @@ def seed() -> None:
             tid = db.new_id()
             tenants[name] = tid
             conn.execute("INSERT INTO tenant(id,org_id,name,policy) VALUES (?,?,?,?)", (tid, org, name, json.dumps(policy)))
-            tools.seed_registry(conn, tid)
+            tools.sync_registry(conn, tid, enable_new=True)
         users = {"admin": (settings.admin_password, 1), "alice": (settings.demo_password, 0), "bob": (settings.demo_password, 0), "carol": (settings.demo_password, 0)}
         ids = {}
         for name, (configured, is_admin) in users.items():
@@ -684,31 +685,66 @@ def approval_decide(approval_id: str, body: ApprovalDecision, t: Tenant = Depend
         raise HTTPException(exc.status, str(exc)) from exc
 
 
+def _tool_view(row) -> dict:
+    d = db.row(row, "input_schema", "envs", "roles")
+    spec = tools.TOOLS.get(d["tool"])
+    eff = tools.effective(row)
+    d.update(effective_envs=eff["envs"], effective_roles=eff["roles"],
+             catalog_envs=list(spec.envs) if spec else [], catalog_roles=list(spec.roles) if spec else [],
+             role_choices=tools.role_choices(spec),
+             tier_choices=list(tools.TIERS[tools.TIERS.index(d["catalog_tier"]):]) if d["catalog_tier"] in tools.TIERS else [],
+             classified=spec.classified if spec else False, warnings=spec.warnings if spec else [],
+             server_description=tools.SERVERS.get(d["server"], ""), is_new=d["approved_by"] is None)
+    return d
+
+
 @app.get("/api/tools")
 def tool_list(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
-    return db.rows(conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? ORDER BY tool", (t.tenant_id,)).fetchall(), "input_schema", "envs")
+    rows = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? ORDER BY status, server, tool", (t.tenant_id,)).fetchall()
+    return [_tool_view(r) for r in rows]
 
 
 class ToolPatch(BaseModel):
     enabled: bool | None = None
     risk_tier: str | None = None
+    envs: list[str] | None = None
+    roles: list[str] | None = None
 
 
 @app.patch("/api/tools/{tool}")
 def tool_patch(tool: str, body: ToolPatch, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    """Tenant chỉ được siết so với danh mục: nâng mức rủi ro, thu hẹp môi trường và vai trò."""
     t.require_admin()
-    current = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (t.tenant_id, tool)).fetchone()
-    if current is None:
+    row = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (t.tenant_id, tool)).fetchone()
+    if row is None:
         raise HTTPException(404, "không tìm thấy công cụ")
-    if body.enabled is not None:
-        conn.execute("UPDATE tool_registry SET enabled=?, approved_by=? WHERE tenant_id=? AND tool=?", (int(body.enabled), t.principal.username, t.tenant_id, tool))
+    spec = tools.TOOLS.get(tool)
+    if spec is None or row["status"] != "active":
+        raise HTTPException(409, "công cụ đã bị gỡ khỏi danh mục")
+    changes: dict = {}
     if body.risk_tier is not None:
-        if body.risk_tier not in gateway.TIERS:
+        if body.risk_tier not in tools.TIERS:
             raise HTTPException(400, "mức rủi ro không hợp lệ")
-        if gateway.TIERS.index(body.risk_tier) < gateway.TIERS.index(current["risk_tier"]) and not t.principal.is_org_admin:
-            raise HTTPException(403, "chỉ org_admin được hạ mức rủi ro")
-        conn.execute("UPDATE tool_registry SET risk_tier=?, approved_by=? WHERE tenant_id=? AND tool=?", (body.risk_tier, t.principal.username, t.tenant_id, tool))
-    return db.row(conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (t.tenant_id, tool)).fetchone(), "input_schema", "envs")
+        if tools.TIERS.index(body.risk_tier) < tools.TIERS.index(spec.risk_tier):
+            raise HTTPException(403, f"không được thấp hơn mức {spec.risk_tier} của danh mục")
+        changes.update(risk_tier=body.risk_tier, risk_floor=None if body.risk_tier == spec.risk_tier else body.risk_tier)
+    if body.envs is not None:
+        if not body.envs or set(body.envs) - set(spec.envs):
+            raise HTTPException(400, f"môi trường phải là tập con không rỗng của {list(spec.envs)}")
+        changes["envs"] = json.dumps([e for e in tools.ENVS if e in body.envs])
+    if body.roles is not None:
+        allowed = set(tools.role_choices(spec))
+        if not body.roles or set(body.roles) - allowed:
+            raise HTTPException(400, f"vai trò phải là tập con không rỗng của {sorted(allowed)}")
+        changes["roles"] = json.dumps([r for r in tools.ROLE_CHOICES if r in body.roles])
+    if body.enabled is not None:
+        changes["enabled"] = int(body.enabled)
+    if changes:
+        changes["approved_by"] = t.principal.username
+        cols = ", ".join(f"{k}=?" for k in changes)
+        conn.execute(f"UPDATE tool_registry SET {cols} WHERE tenant_id=? AND tool=?", (*changes.values(), t.tenant_id, tool))
+        log.info("tenant %s: %s đổi cấu hình công cụ %s: %s", t.tenant_id, t.principal.username, tool, sorted(changes))
+    return _tool_view(conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (t.tenant_id, tool)).fetchone())
 
 
 @app.get("/api/policy")

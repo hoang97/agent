@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from . import db
 from .config import settings
 from .retrieval import tokenize
-from .tools import TOOLS, ToolError, load_state, save_state
+from .tools import TOOLS, ToolError, callable_by, load_state, save_state
 
 ENVS = ("dev", "staging", "prod")
 TIERS = ("R0", "R1", "R2", "R3", "R4")
@@ -153,6 +153,15 @@ class CallContext:
     tainted: bool = False  # kế hoạch đã chịu ảnh hưởng từ nội dung untrusted
     independent: float = 0.5
     tokens: list = field(default_factory=list)
+    roles: set | None = None  # vai trò của người yêu cầu trong tenant; None = tra cứu khi gọi
+
+
+def user_roles(conn, tenant_id: str, user_id: str) -> set[str]:
+    """org_admin được coi như tenant_admin ở mọi tenant."""
+    roles = {r["role"] for r in conn.execute("SELECT role FROM membership WHERE tenant_id=? AND user_id=?", (tenant_id, user_id)).fetchall()}
+    if conn.execute("SELECT 1 FROM app_user WHERE id=? AND is_org_admin=1", (user_id,)).fetchone():
+        roles.add("tenant_admin")
+    return roles
 
 
 def args_hash(args: dict) -> str:
@@ -249,15 +258,18 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
     step: dict = {"type": "tool_call", "tool": tool_name, "args": args, "env": ctx.env}
     meta = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (ctx.tenant_id, tool_name)).fetchone()
     tool = TOOLS.get(tool_name)
-    if meta is None or tool is None:
+    if meta is None:
         # Công cụ chưa phân loại mặc định bị coi là destructive: không chạy.
         audit(conn, ctx, tool_name, args, "R3", 0.0, "blocked", ["công cụ chưa được đăng ký"], "blocked")
         return {**step, "decision": "blocked", "status": "blocked", "reasons": ["công cụ chưa được đăng ký"]}
     meta = dict(meta)
     tier = meta["risk_tier"]
-    if not meta["enabled"]:
-        audit(conn, ctx, tool_name, args, tier, 0.0, "blocked", ["công cụ chưa bật cho tenant"], "blocked")
-        return {**step, "decision": "blocked", "status": "blocked", "risk_tier": tier, "reasons": ["công cụ chưa bật cho tenant"]}
+    if ctx.roles is None:
+        ctx.roles = user_roles(conn, ctx.tenant_id, ctx.user_id)
+    allowed, why = callable_by(meta, ctx.env, ctx.roles)
+    if not allowed:
+        audit(conn, ctx, tool_name, args, tier, 0.0, "blocked", [why], "blocked")
+        return {**step, "decision": "blocked", "status": "blocked", "risk_tier": tier, "reasons": [why]}
     missing = [f for f in tool.required if f not in args]
     if missing or not isinstance(args, dict):
         audit(conn, ctx, tool_name, args, tier, 0.0, "blocked", [f"thiếu tham số: {missing}"], "invalid")
@@ -356,6 +368,9 @@ def decide(conn, tenant_id: str, approval_id: str, user_id: str, roles: set[str]
         if user_id in req["decided_by"]:
             raise ApprovalError("bạn đã duyệt yêu cầu này", 409)
         ctx = CallContext(tenant_id, req["requester_id"], req["env"], req["original_request"], req["episode_id"])
+        meta = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (tenant_id, req["tool"])).fetchone()
+        if action != "deny" and (meta is None or not callable_by(meta, req["env"], user_roles(conn, tenant_id, req["requester_id"]))[0]):
+            raise ApprovalError("công cụ đã bị tắt, gỡ hoặc thu hẹp quyền sau khi yêu cầu được tạo; không thể thực thi", 409)
 
         if action == "deny":
             if not reason or not reason.strip():
