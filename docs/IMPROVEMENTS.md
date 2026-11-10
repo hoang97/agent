@@ -41,3 +41,9 @@ Dựng MVP theo `docs/PLAN.md`.
 - Form LLM thêm Base URL và loại xác thực (API key hoặc Auth token), cũng đọc `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` từ môi trường.
 - Base URL chỉ nhận HTTPS tới địa chỉ công khai, vì server gửi credential tới đó.
 - Với relay: kiểm tra bằng một tin nhắn ngắn thay cho Models API, và không gửi beta server-side fallback.
+
+## Đợt 7 — 2026-11-11: hỗ trợ OpenAI và dịch vụ tương thích
+
+- Thêm `OpenAIProvider` dùng Chat Completions; form LLM có chọn nhà cung cấp và tên model (cũng áp dụng cho relay Anthropic).
+- Dịch vụ tương thích không hỗ trợ `json_schema` thì tự chuyển sang đưa schema vào chỉ dẫn.
+- Đầu ra của Router, Reflector, Curator được kiểm lại trước khi ghi, vì không phải dịch vụ nào cũng ép đúng schema.

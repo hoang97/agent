@@ -18,9 +18,10 @@ KAGENT_ADMIN_PASSWORD=<mật-khẩu> KAGENT_DEMO_PASSWORD=<mật-khẩu> .venv/b
 Tài khoản mẫu: `admin` (quản trị), `alice` (member), `bob` và `carol` (approver). Không đặt biến mật khẩu thì ứng dụng
 sinh mật khẩu ngẫu nhiên vào `data/initial-credentials.txt`. API docs ở `/api/docs`.
 
-## Bật Claude
+## Bật LLM
 
-Org admin nhập key ở tab **Cài đặt** (được mã hóa khi lưu, ưu tiên hơn biến môi trường), hoặc đặt `ANTHROPIC_API_KEY`.
+Org admin chọn nhà cung cấp (Anthropic, relay Anthropic, OpenAI hoặc dịch vụ tương thích OpenAI) và nhập key ở tab **Cài đặt**.
+OpenAI bắt buộc nhập tên model. Thông tin được mã hóa khi lưu, ưu tiên hơn biến môi trường `ANTHROPIC_API_KEY`.
 Thiếu khóa, agent chạy chế độ heuristic: lập kế hoạch theo từ khóa, không gọi LLM.
 Model mặc định: `claude-opus-5-5` cho agent, Reflector, Curator; `claude-haiku-5-5` cho router và kiểm tra độc lập
 (đổi bằng `KAGENT_MODEL_STRONG`, `KAGENT_MODEL_FAST`). Yêu cầu tới Opus bật server-side fallback khi model từ chối.
