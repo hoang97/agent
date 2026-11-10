@@ -65,7 +65,7 @@ function renderLogin() {
   user.focus();
 }
 
-const TABS = [["agent", "Agent"], ["episodes", "Nhật ký"], ["knowledge", "Tri thức"], ["approvals", "Duyệt lệnh"], ["compile", "Biên dịch L2"], ["policy", "Công cụ & Chính sách"], ["metrics", "Đo lường"], ["audit", "Audit"]];
+const TABS = [["agent", "Agent"], ["episodes", "Nhật ký"], ["knowledge", "Tri thức"], ["approvals", "Duyệt lệnh"], ["compile", "Biên dịch L2"], ["policy", "Công cụ & Chính sách"], ["metrics", "Đo lường"], ["audit", "Audit"], ["account", "Tài khoản"]];
 const VIEWS = {};
 
 function renderShell() {
@@ -234,6 +234,24 @@ VIEWS.audit = async (main) => {
   const list = await api("GET", "/api/audit");
   main.append(h("h2", {}, "Audit gọi công cụ"), h("div", { class: "card scroll" }, h("table", {}, h("thead", {}, h("tr", {}, ["Thời gian", "Người", "Công cụ", "Môi trường", "Mức", "Quyết định", "Kết quả", "Lý do"].map((x) => h("th", {}, x)))),
     h("tbody", {}, list.map((a) => h("tr", {}, h("td", {}, fmtTime(a.at)), h("td", {}, a.user), h("td", {}, a.tool), h("td", {}, a.env), h("td", {}, a.risk_tier), h("td", {}, badge(a.decision)), h("td", {}, a.result_status), h("td", {}, (a.reasons || []).join("; "))))))));
+};
+
+VIEWS.account = async (main) => {
+  const current = h("input", { type: "password", autocomplete: "current-password", "aria-label": "Mật khẩu hiện tại" });
+  const next = h("input", { type: "password", autocomplete: "new-password", minlength: 12, "aria-label": "Mật khẩu mới" });
+  const again = h("input", { type: "password", autocomplete: "new-password", "aria-label": "Nhập lại mật khẩu mới" });
+  const submit = guard(async (ev) => {
+    ev.preventDefault();
+    if (next.value.length < 12) throw new Error("Mật khẩu mới cần ít nhất 12 ký tự");
+    if (next.value !== again.value) throw new Error("Hai lần nhập mật khẩu mới không khớp");
+    await api("POST", "/api/auth/password", { current_password: current.value, new_password: next.value });
+    current.value = next.value = again.value = "";
+    toast("Đã đổi mật khẩu, các phiên khác đã bị đăng xuất");
+  });
+  const field = (label, input) => h("label", { class: "field" }, label, input);
+  main.append(h("h2", {}, "Đổi mật khẩu"), h("form", { class: "card", onsubmit: submit },
+    h("div", { class: "row" }, field("Mật khẩu hiện tại", current), field("Mật khẩu mới (ít nhất 12 ký tự)", next), field("Nhập lại mật khẩu mới", again)),
+    h("div", { class: "row" }, h("button", { type: "submit" }, "Đổi mật khẩu"))));
 };
 
 async function boot() {
