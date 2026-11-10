@@ -139,6 +139,21 @@ CREATE TABLE IF NOT EXISTS conversation (
 );
 CREATE INDEX IF NOT EXISTS ix_conversation ON conversation(tenant_id, user_id, updated_at);
 
+CREATE TABLE IF NOT EXISTS learned_tool (
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenant(id), name TEXT NOT NULL, scope TEXT NOT NULL,
+  description TEXT NOT NULL, params TEXT NOT NULL, steps TEXT NOT NULL, signature TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('proposed','active','rejected','disabled')), origin TEXT NOT NULL,
+  source_eps TEXT NOT NULL, created_by TEXT NOT NULL, approved_by TEXT, note TEXT,
+  uses INTEGER NOT NULL DEFAULT 0, successes INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  UNIQUE (tenant_id, scope, name)
+);
+CREATE INDEX IF NOT EXISTS ix_learned_signature ON learned_tool(tenant_id, signature);
+
+CREATE TABLE IF NOT EXISTS user_profile (
+  user_id TEXT PRIMARY KEY REFERENCES app_user(id), instructions TEXT NOT NULL DEFAULT '',
+  style TEXT NOT NULL DEFAULT 'default', default_env TEXT NOT NULL DEFAULT 'dev', updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS app_secret (
   name TEXT PRIMARY KEY, ciphertext TEXT NOT NULL, last4 TEXT NOT NULL,
   updated_at TEXT NOT NULL, updated_by TEXT NOT NULL

@@ -255,6 +255,9 @@ def _has_grant(conn, ctx: CallContext, tool: str, args: dict) -> bool:
 
 def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
     """Điểm vào duy nhất để gọi công cụ. Trả về bước trace."""
+    if tool_name.startswith("learned."):
+        from . import learned  # công cụ học được: mỗi bước lại gọi invoke() này
+        return learned.invoke_by_name(conn, ctx, tool_name, args)
     step: dict = {"type": "tool_call", "tool": tool_name, "args": args, "env": ctx.env}
     meta = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (ctx.tenant_id, tool_name)).fetchone()
     tool = TOOLS.get(tool_name)
