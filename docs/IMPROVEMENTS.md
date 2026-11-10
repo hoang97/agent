@@ -35,3 +35,9 @@ Dựng MVP theo `docs/PLAN.md`.
 - Tab Cài đặt cho org admin: key được kiểm tra bằng Models API trước khi lưu, mã hóa Fernet trong bảng `app_secret`, API chỉ trả 4 ký tự cuối.
 - Khóa chủ `KAGENT_SECRET_KEY` nằm trong `/etc/kagent/kagent.env`, ngoài thư mục dữ liệu, để bản sao DB không kèm khóa giải mã.
 - Thứ tự dùng key: giao diện → biến môi trường → chế độ heuristic.
+
+## Đợt 6 — 2026-11-11: hỗ trợ relay tương thích Anthropic
+
+- Form LLM thêm Base URL và loại xác thực (API key hoặc Auth token), cũng đọc `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` từ môi trường.
+- Base URL chỉ nhận HTTPS tới địa chỉ công khai, vì server gửi credential tới đó.
+- Với relay: kiểm tra bằng một tin nhắn ngắn thay cho Models API, và không gửi beta server-side fallback.
