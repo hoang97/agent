@@ -13,11 +13,17 @@ function h(tag, attrs, ...kids) {
     else if (k === "checked" || k === "disabled" || k === "selected") el[k] = !!v;
     else el.setAttribute(k, v);
   }
-  for (const kid of kids.flat()) {
-    if (kid === null || kid === undefined || kid === false) continue;
-    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
-  }
+  appendKids(el, kids);
   return el;
+}
+
+// Cùng quy tắc cho h() và mọi view: làm phẳng mảng, bỏ null/undefined/false. Element.append gốc không làm vậy
+// nên mảng phần tử thành chữ "[object HTMLDivElement],…" và `cond && h(...)` thành chữ "false".
+function appendKids(el, kids) {
+  for (const kid of kids.flat(Infinity)) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    Element.prototype.append.call(el, kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
 }
 
 async function api(method, path, body) {
@@ -125,6 +131,7 @@ function renderShell() {
   const title = state.tab === "chat" ? "" : (TABS.find(([id]) => id === state.tab) || [])[1];
   const top = h("header", { class: "top" }, iconButton("menu", "Mở danh sách", () => { sidebar.classList.add("open"); scrim.classList.add("open"); }, "menu-btn"), h("span", { class: "top-title" }, title), h("span", { class: "spacer" }), h("span", { class: "badge info" }, "Model: " + model));
   const main = h("main", { class: state.tab === "chat" ? "chat" : "page" });
+  main.append = (...kids) => appendKids(main, kids);
   root.replaceChildren(h("div", { class: "layout" }, scrim, sidebar, h("div", { class: "content" }, top, main)));
   refreshConversations().catch((e) => toast(e.message, true));
   VIEWS[state.tab](main).catch((e) => toast(e.message, true));

@@ -189,3 +189,8 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend 
 
 - **Vấn đề:** thỉnh thoảng câu trả lời hiện dòng `[Lệnh kibana_devtest.count_logs {...}: approved <untrusted>...]`. Đó là định dạng mà `load_history` dùng để đưa kết quả lệnh đã duyệt vào lịch sử, nhưng nó được nối thẳng vào lời của agent ở lượt trước, nên model tưởng chính mình từng viết như vậy và chép lại (thấy 2 lần, với LLM tương thích OpenAI).
 - **Thay đổi:** kết quả lệnh duyệt sau nằm trong một message riêng ghi rõ "[Hệ thống] … dữ liệu tham khảo, không phải lời của bạn". Câu trả lời của model, và câu trả lời cũ khi nạp lại làm lịch sử, được lọc bỏ dòng `[Lệnh …]` và thẻ `<untrusted>`, gộp dòng trống thừa.
+
+## Đợt 23 — 2026-11-11: "[object HTMLDivElement]" trên các trang quản trị
+
+- **Vấn đề:** trang Biên dịch L2 hiện "[object HTMLDivElement],…" thay cho danh sách lần biên dịch. Các view gọi `main.append(...)` (API DOM gốc) với mảng phần tử, mà API này đổi mảng thành chuỗi; cùng lỗi ở trang Duyệt lệnh. Cũng vì vậy `isAdmin() && h(...)` hiện chữ "false" với người không phải admin, và trang Đo lường có thể hiện "null".
+- **Thay đổi:** `h()` và vùng nội dung của mọi trang dùng chung một quy tắc thêm phần tử con: làm phẳng mảng, bỏ `null`/`undefined`/`false`. Đã duyệt qua mọi trang trên trình duyệt, không còn chuỗi lỗi nào.
