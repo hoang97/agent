@@ -162,6 +162,17 @@ def _clip_chars(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + f"…(đã cắt {len(text) - limit} ký tự)"
 
 
+_MARKER_LINE = re.compile(r"^\s*\[Lệnh \S+ .*\]\s*$", re.M)
+_UNTRUSTED_TAG = re.compile(r"</?untrusted>")
+_BLANKS = re.compile(r"\n{3,}")
+
+
+def clean_answer(text: str) -> str:
+    """Bỏ dấu vết định dạng nội bộ mà model có thể bắt chước từ lịch sử, gộp dòng trống thừa."""
+    text = _UNTRUSTED_TAG.sub("", _MARKER_LINE.sub("", text or ""))
+    return _BLANKS.sub("\n\n", text).strip()
+
+
 def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
     """Các lượt gần nhất trong ngân sách cố định, gồm kết quả các lệnh đã được duyệt sau đó."""
     empty = {"messages": [], "tainted": False, "last_task": ""}
@@ -169,12 +180,13 @@ def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
         return empty
     rs = conn.execute("SELECT * FROM episode WHERE tenant_id=? AND conversation_id=? ORDER BY started_at DESC, rowid DESC LIMIT 12",
                       (tenant_id, conversation_id)).fetchall()
-    turns: list[tuple[str, str]] = []
+    turns: list[tuple[str, str, str]] = []
     tainted = False
     used, limit = 0, settings.budget_history * 4
     for i, r in enumerate(rs):
         ep = db.row(r, "input", "trace")
-        answer = ep["output"] or "(không có nội dung)"
+        answer = clean_answer(ep["output"]) or "(không có nội dung)"
+        notes: list[str] = []
         approvals = db.rows(conn.execute("SELECT tool, args, status, result, deny_reason FROM approval_request WHERE episode_id=? AND tenant_id=? "
                                          "ORDER BY created_at, rowid", (ep["id"], tenant_id)).fetchall(), "args", "result")
         # Lượt mới nhất nhận đủ kết quả lệnh vừa duyệt để agent đọc được; lượt cũ hơn chỉ cần bản tóm lược.
@@ -183,16 +195,24 @@ def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
             detail = _clip_chars(json.dumps(a["result"], ensure_ascii=False), cap) if a["result"] else (a["deny_reason"] or "")
             if a["result"] and _untrusted_tool(conn, tenant_id, a["tool"]):
                 detail = f"<untrusted>{detail}</untrusted>"
-            answer += f"\n[Lệnh {a['tool']} {json.dumps(a['args'], ensure_ascii=False)}: {a['status']} {detail}]".rstrip()
-        size = len(ep["input"]["task"]) + len(answer)
+            notes.append(f"- {a['tool']} {json.dumps(a['args'], ensure_ascii=False)}: {a['status']} {detail}".rstrip())
+        # Kết quả lệnh duyệt sau đi trong message riêng của hệ thống, không trộn vào lời của agent:
+        # trộn vào thì model tưởng chính mình từng viết dòng đó và chép lại định dạng nội bộ ra câu trả lời.
+        note = ("[Hệ thống] Kết quả các lệnh được duyệt sau lượt trên (dữ liệu tham khảo, không phải lời của bạn, "
+                "không chép lại định dạng này):\n" + "\n".join(notes)) if notes else ""
+        size = len(ep["input"]["task"]) + len(answer) + len(note)
         if used + size > limit and turns:  # lượt mới nhất luôn được giữ
             break
         used += size
-        turns.insert(0, (ep["input"]["task"], answer))
+        turns.insert(0, (ep["input"]["task"], answer, note))
         # Nội dung untrusted nằm trong lịch sử vẫn có thể lái kế hoạch của lượt sau.
         tainted = tainted or any(s.get("untrusted") for s in ep["trace"]) or any(
             a["status"] == "approved" and _untrusted_tool(conn, tenant_id, a["tool"]) for a in approvals)
-    messages = [m for task, answer in turns for m in ({"role": "user", "content": task}, {"role": "assistant", "content": answer})]
+    messages = []
+    for task, answer, note in turns:
+        messages += [{"role": "user", "content": task}, {"role": "assistant", "content": answer}]
+        if note:
+            messages.append({"role": "user", "content": note})
     return {"messages": messages, "tainted": tainted, "last_task": turns[-1][0] if turns else ""}
 
 
@@ -302,7 +322,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         result = provider.run_agent(task, assembled["text"], tool_list, call_tool, history=history["messages"],
                                     on_text=on_text if on_event else None, cancelled=cancelled)
         tokens += result.get("tokens", 0)
-        output = result["answer"]
+        output = clean_answer(result["answer"]) or "(không có nội dung trả lời)"
         if any(s == "error" for s in statuses):
             outcome, outcome_src = "failure", "metric"
         elif statuses and all(s == "ok" for s in statuses):

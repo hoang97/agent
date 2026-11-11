@@ -184,3 +184,8 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend 
 - **Vấn đề:** lấy danh sách model của dịch vụ tương thích OpenAI chạy trong mạng nội bộ báo "Base URL không được trỏ tới địa chỉ nội bộ". Base URL chỉ nhận https tới địa chỉ công khai, và key phải dài 20–300 ký tự, nên LLM tự host (vLLM, Ollama, LiteLLM) không dùng được.
 - **Thay đổi:** form LLM có ô "Cho phép địa chỉ mạng nội bộ" (chỉ org admin, lưu cùng credential đã mã hóa). Khi bật: nhận địa chỉ nội bộ, nhận cả http nhưng chỉ khi mọi IP phân giải ra đều nội bộ, giao diện cảnh báo khi dùng http; dịch vụ tương thích OpenAI nội bộ nhận key ngắn. Địa chỉ công khai vẫn bắt buộc https; loopback, link-local (gồm metadata của cloud) luôn bị chặn.
 - **Docker:** thêm `host.docker.internal` để gọi LLM chạy trên chính máy host (trong container, `localhost` là container).
+
+## Đợt 22 — 2026-11-11: định dạng nội bộ lọt ra câu trả lời
+
+- **Vấn đề:** thỉnh thoảng câu trả lời hiện dòng `[Lệnh kibana_devtest.count_logs {...}: approved <untrusted>...]`. Đó là định dạng mà `load_history` dùng để đưa kết quả lệnh đã duyệt vào lịch sử, nhưng nó được nối thẳng vào lời của agent ở lượt trước, nên model tưởng chính mình từng viết như vậy và chép lại (thấy 2 lần, với LLM tương thích OpenAI).
+- **Thay đổi:** kết quả lệnh duyệt sau nằm trong một message riêng ghi rõ "[Hệ thống] … dữ liệu tham khảo, không phải lời của bạn". Câu trả lời của model, và câu trả lời cũ khi nạp lại làm lịch sử, được lọc bỏ dòng `[Lệnh …]` và thẻ `<untrusted>`, gộp dòng trống thừa.
