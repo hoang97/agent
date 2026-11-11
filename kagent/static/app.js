@@ -789,37 +789,155 @@ async function policyView(main) {
 const KIND_CLASS = { rule: "s1", fact: "s2", procedure: "s3", lesson: "s4", insight: "s5" };
 const KIND_LABEL = { rule: "quy ước", fact: "sự thật", procedure: "thủ tục", lesson: "bài học", insight: "chiến lược" };
 
-// Bố cục lực đơn giản (đẩy nhau, kéo theo cạnh, hút nhẹ về tâm); đủ cho vài trăm nút, không cần thư viện.
+// Bố cục lực (đẩy nhau, kéo theo cạnh, hút nhẹ về tâm, chống chồng); đủ cho vài trăm nút, không cần thư viện.
+// Khởi tạo theo góc vàng để cùng dữ liệu luôn cho cùng bố cục.
 function forceLayout(nodes, links, W, H) {
   const idx = new Map(nodes.map((n, i) => [n.id, i]));
-  nodes.forEach((n, i) => { const a = (i / nodes.length) * Math.PI * 2; n.x = W / 2 + Math.cos(a) * W * 0.3; n.y = H / 2 + Math.sin(a) * H * 0.3; });
+  nodes.forEach((n, i) => { const a = i * 2.39996, r = 18 * Math.sqrt(i + 1); n.x = W / 2 + Math.cos(a) * r; n.y = H / 2 + Math.sin(a) * r; });
   const L = links.map((l) => [idx.get(l.source), idx.get(l.target)]).filter(([a, b]) => a !== undefined && b !== undefined);
-  for (let it = 0; it < 220; it++) {
-    const t = 1 - it / 220;
+  const N = 300;
+  for (let it = 0; it < N; it++) {
+    const t = 1 - it / N;
     const fx = new Float64Array(nodes.length), fy = new Float64Array(nodes.length);
     for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
-      const dx = nodes[i].x - nodes[j].x, dy = nodes[i].y - nodes[j].y, d2 = Math.max(dx * dx + dy * dy, 25), f = 1800 / d2;
+      let dx = nodes[i].x - nodes[j].x, dy = nodes[i].y - nodes[j].y;
+      if (!dx && !dy) { dx = 0.5; dy = 0.5; }
+      const d2 = dx * dx + dy * dy, d = Math.sqrt(d2), min = nodes[i].r + nodes[j].r + 6;
+      let f = (nodes[i].entity || nodes[j].entity ? 2600 : 1400) / Math.max(d2, 30);
+      if (d < min) f += (min - d) * 0.5 / d;
       fx[i] += dx * f; fy[i] += dy * f; fx[j] -= dx * f; fy[j] -= dy * f;
     }
     for (const [a, b] of L) {
-      const dx = nodes[b].x - nodes[a].x, dy = nodes[b].y - nodes[a].y, d = Math.sqrt(dx * dx + dy * dy) || 1, f = (d - 60) * 0.06;
+      const dx = nodes[b].x - nodes[a].x, dy = nodes[b].y - nodes[a].y, d = Math.sqrt(dx * dx + dy * dy) || 1, f = (d - 70) * 0.05;
       fx[a] += (dx / d) * f; fy[a] += (dy / d) * f; fx[b] -= (dx / d) * f; fy[b] -= (dy / d) * f;
     }
     nodes.forEach((n, i) => {
-      fx[i] += (W / 2 - n.x) * 0.01; fy[i] += (H / 2 - n.y) * 0.01;
-      n.x = Math.min(W - 12, Math.max(12, n.x + Math.max(-20, Math.min(20, fx[i])) * t));
-      n.y = Math.min(H - 12, Math.max(12, n.y + Math.max(-20, Math.min(20, fy[i])) * t));
+      fx[i] += (W / 2 - n.x) * 0.012; fy[i] += (H / 2 - n.y) * 0.012;
+      n.x += Math.max(-25, Math.min(25, fx[i])) * t; n.y += Math.max(-25, Math.min(25, fy[i])) * t;
     });
   }
+}
+
+// Gợi ý gộp: tên giống nhau khi bỏ dấu câu, hoặc tên này chứa tên kia (đủ dài để không bắt nhầm).
+const bare = (s) => s.replace(/^tool:/, "").replace(/[^a-z0-9à-ỹ]+/g, "");
+function similarEntities(name, all) {
+  const b = bare(name);
+  if (b.length < 3 || name.startsWith("tool:")) return [];
+  return all.filter((e) => e !== name && !e.startsWith("tool:")).filter((e) => { const o = bare(e); return o === b || (Math.min(o.length, b.length) >= 4 && (o.includes(b) || b.includes(o))); });
+}
+
+function graphCanvas({ nodes, links, W, H, onKu, onEntity, selected }) {
+  const pos = new Map(nodes.map((n) => [n.id, n]));
+  const adj = new Map(nodes.map((n) => [n.id, new Set([n.id])]));
+  for (const l of links) { adj.get(l.source)?.add(l.target); adj.get(l.target)?.add(l.source); }
+  let view = { k: 1, x: 0, y: 0 };
+  const layer = svg("g", {});
+  const linkEls = links.map((l) => { const a = pos.get(l.source), b = pos.get(l.target); return a && b ? { l, el: svg("line", { class: "kg-link " + l.rel }) } : null; }).filter(Boolean);
+  const nodeEls = new Map();
+  for (const n of nodes) {
+    const g = svg("g", { class: n.entity ? "kg-ent" : "kg-node", tabindex: 0, role: "button",
+      "aria-label": n.entity ? "Thực thể " + n.entity : n.ku.title });
+    if (n.entity) {
+      g.append(svg("rect", { x: -n.r, y: -n.r, width: n.r * 2, height: n.r * 2, rx: 3 }),
+        svg("text", { class: "kg-label", x: n.r + 4, y: 4 }, n.entity.length > 30 ? n.entity.slice(0, 29) + "…" : n.entity), svg("title", {}, `${n.entity} · ${n.deg} tri thức`));
+    } else {
+      g.append(svg("circle", { class: `kg-ku ${KIND_CLASS[n.ku.kind]}${n.ku.status !== "active" ? " cand" : ""}`, r: n.r }), svg("text", { class: "kg-label kg-ku-label" + (n.pin ? " pin" : ""), x: n.r + 4, y: 4 },
+        n.ku.title.length > 40 ? n.ku.title.slice(0, 39) + "…" : n.ku.title), svg("title", {}, n.ku.title));
+    }
+    nodeEls.set(n.id, g);
+  }
+  layer.append(...linkEls.map((x) => x.el), ...nodeEls.values());
+  const el = svg("svg", { class: "kg-svg", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Đồ thị tri thức, cuộn để phóng to, kéo để di chuyển" }, layer);
+
+  const placeLinks = (only) => linkEls.forEach(({ l, el: line }) => {
+    if (only && l.source !== only && l.target !== only) return;
+    const a = pos.get(l.source), b = pos.get(l.target);
+    line.setAttribute("x1", a.x); line.setAttribute("y1", a.y); line.setAttribute("x2", b.x); line.setAttribute("y2", b.y);
+  });
+  const placeNode = (n) => nodeEls.get(n.id).setAttribute("transform", `translate(${n.x},${n.y})`);
+  const apply = () => { layer.setAttribute("transform", `translate(${view.x},${view.y}) scale(${view.k})`); el.classList.toggle("zoomed", view.k >= 1.6); };
+  nodes.forEach(placeNode); placeLinks();
+
+  function fit() {
+    if (!nodes.length) return;
+    const xs = nodes.map((n) => n.x), ys = nodes.map((n) => n.y), pad = 40;
+    const x0 = Math.min(...xs) - pad, x1 = Math.max(...xs) + pad + 80, y0 = Math.min(...ys) - pad, y1 = Math.max(...ys) + pad;
+    const k = Math.min(2.5, W / (x1 - x0), H / (y1 - y0));
+    view = { k, x: (W - (x1 - x0) * k) / 2 - x0 * k, y: (H - (y1 - y0) * k) / 2 - y0 * k };
+    apply();
+  }
+  const toSvg = (ev) => { const p = new DOMPoint(ev.clientX, ev.clientY).matrixTransform(el.getScreenCTM().inverse()); return { x: p.x, y: p.y }; };
+  function zoomAt(factor, cx = W / 2, cy = H / 2) {
+    const k = Math.max(0.2, Math.min(6, view.k * factor)), r = k / view.k;
+    view = { k, x: cx - (cx - view.x) * r, y: cy - (cy - view.y) * r };
+    apply();
+  }
+  el.addEventListener("wheel", (ev) => { ev.preventDefault(); const p = toSvg(ev); zoomAt(Math.exp(-ev.deltaY * 0.0015), p.x, p.y); }, { passive: false });
+
+  let drag = null;
+  el.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0) return;
+    const g = ev.target.closest(".kg-node, .kg-ent"), id = g && [...nodeEls].find(([, v]) => v === g)?.[0];
+    drag = { id, start: toSvg(ev), view: { ...view }, moved: false, n: id ? { x: pos.get(id).x, y: pos.get(id).y } : null };
+    el.setPointerCapture(ev.pointerId);
+    el.classList.add(id ? "dragging-node" : "panning");
+  });
+  el.addEventListener("pointermove", (ev) => {
+    if (!drag) return;
+    const p = toSvg(ev), dx = p.x - drag.start.x, dy = p.y - drag.start.y;
+    if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+    if (!drag.moved) return;
+    if (drag.id) {
+      const n = pos.get(drag.id);
+      n.x = drag.n.x + dx / view.k; n.y = drag.n.y + dy / view.k;
+      placeNode(n); placeLinks(drag.id);
+    } else {
+      view = { ...view, x: drag.view.x + dx, y: drag.view.y + dy }; apply();
+    }
+  });
+  const end = () => {
+    if (drag && !drag.moved && drag.id) {
+      const n = pos.get(drag.id);
+      select(drag.id);
+      n.entity ? onEntity(n.entity) : onKu(n.ku);
+    }
+    drag = null; el.classList.remove("dragging-node", "panning");
+  };
+  el.addEventListener("pointerup", end); el.addEventListener("pointercancel", end);
+  el.addEventListener("dblclick", (ev) => { if (!ev.target.closest(".kg-node, .kg-ent")) fit(); });
+
+  // Rê chuột lên một nút: làm mờ phần không nối với nó để thấy cụm liên quan.
+  const focus = (id) => {
+    const near = id ? adj.get(id) : null;
+    el.classList.toggle("focus", !!near);
+    nodeEls.forEach((g, nid) => g.classList.toggle("near", !!near && near.has(nid)));
+    linkEls.forEach(({ l, el: line }) => line.classList.toggle("near", !!near && (l.source === id || l.target === id)));
+  };
+  function select(id) { nodeEls.forEach((g, nid) => g.classList.toggle("sel", nid === id)); }
+  nodeEls.forEach((g, id) => {
+    g.addEventListener("pointerenter", () => !drag && focus(id));
+    g.addEventListener("pointerleave", () => !drag && focus(null));
+    g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); const n = pos.get(id); select(id); n.entity ? onEntity(n.entity) : onKu(n.ku); } });
+  });
+  if (selected) select(selected);
+
+  const tools = h("div", { class: "kg-tools" },
+    h("button", { type: "button", class: "icon-btn", title: "Phóng to", "aria-label": "Phóng to", onclick: () => zoomAt(1.3) }, "+"),
+    h("button", { type: "button", class: "icon-btn", title: "Thu nhỏ", "aria-label": "Thu nhỏ", onclick: () => zoomAt(1 / 1.3) }, "−"),
+    h("button", { type: "button", class: "icon-btn", title: "Vừa khung (nháy đúp nền)", "aria-label": "Vừa khung", onclick: fit }, "⤢"));
+  fit();
+  return h("div", { class: "kg-canvas" }, el, tools);
 }
 
 async function knowledgeGraphView(main) {
   const q = persist(h("input", { class: "wide", placeholder: "Tra cứu như khi hỏi agent, ví dụ: đếm lỗi 500 của cmp-backend", "aria-label": "Tra cứu tri thức" }), "kg:q");
   const withCandidates = persist(h("input", { type: "checkbox", "aria-label": "Gồm cả ứng viên" }), "kg:cand");
   let entity = store.get("kg:entity", "");
+  let allEntities = [];
   const chips = h("div", { class: "tool-perms" });
   const graphBox = h("div", { class: "card kg-graph" });
-  const detail = h("div", { class: "card kg-detail" }, h("div", { class: "small muted" }, "Chọn một nút để xem chi tiết. Nút tròn nhỏ là tri thức, nút vuông là thực thể (service, công cụ…)."));
+  const hint = () => h("div", { class: "small muted" }, "Chọn một nút để xem chi tiết. Cuộn chuột để phóng to, kéo nền để di chuyển, kéo nút để sắp lại, nháy đúp nền để vừa khung.");
+  const detail = h("div", { class: "card kg-detail" }, hint());
   const list = h("div");
   const setEntity = (e) => { entity = e; store.set("kg:entity", e); if (e) { q.value = ""; store.set("kg:q", null); } load(); };
 
@@ -831,43 +949,53 @@ async function knowledgeGraphView(main) {
       k.entities.length > 0 && h("div", { class: "tool-perms" }, k.entities.map((e) => h("button", { type: "button", class: "chip", onclick: () => setEntity(e) }, e))));
   }
 
+  function showEntity(name) {
+    const n = allEntities.find((e) => e.entity === name)?.n || 0;
+    const names = allEntities.map((e) => e.entity);
+    const similar = similarEntities(name, names);
+    const other = h("input", { list: "kg-entity-names", placeholder: "tên khác cần gộp vào", "aria-label": "Tên thực thể cần gộp" });
+    const merge = (sources) => guard(async () => {
+      const r = await api("POST", "/api/knowledge/entities/merge", { sources, target: name });
+      toast(`Đã gộp ${r.merged.join(", ")} vào ${r.target} (${r.kus} tri thức)`);
+      setEntity(r.target);
+    });
+    detail.replaceChildren(h("div", { class: "row" }, h("span", { class: "badge" }, name.startsWith("tool:") ? "công cụ" : "thực thể"), h("span", { class: "small muted" }, `${n} tri thức`)),
+      h("h3", {}, name),
+      isAdmin() && !name.startsWith("tool:") && h("div", {},
+        similar.length > 0 && h("div", { class: "small" }, "Tên có vẻ cùng một thứ:"),
+        similar.length > 0 && h("div", { class: "tool-perms" }, similar.map((s) => h("button", { type: "button", class: "chip", title: `Gộp ${s} vào ${name}`, onclick: merge([s]) }, `+ ${s}`))),
+        h("form", { class: "row", onsubmit: (ev) => { ev.preventDefault(); if (other.value.trim()) merge([other.value.trim()])(ev); } }, other, h("button", { type: "submit", class: "ghost" }, "Gộp vào đây")),
+        h("datalist", { id: "kg-entity-names" }, names.filter((e) => e !== name && !e.startsWith("tool:")).map((e) => h("option", { value: e }))),
+        h("div", { class: "small muted" }, "Gộp xong, tri thức học sau này dùng tên cũ cũng tự đổi sang tên này.")));
+  }
+
   function draw(data) {
-    const W = 760, H = 460;
-    const shownEnt = new Map();
-    for (const k of data.nodes) for (const e of k.entities) shownEnt.set(e, (shownEnt.get(e) || 0) + 1);
+    const W = 900, H = 560;
+    const deg = new Map();
+    for (const k of data.nodes) for (const e of k.entities) deg.set(e, (deg.get(e) || 0) + 1);
     // Thực thể chỉ có một tri thức không giúp thấy liên hệ, trừ khi đang lọc theo nó.
-    const ents = [...shownEnt].filter(([e, n]) => n >= 2 || e === entity).map(([e]) => ({ id: "e:" + e, entity: e }));
+    const ents = [...deg].filter(([e, n]) => n >= 2 || e === entity).map(([e, n]) => ({ id: "e:" + e, entity: e, deg: n, r: 5 + Math.min(7, n) }));
     const entSet = new Set(ents.map((e) => e.entity));
-    const nodes = [...ents, ...data.nodes.map((k) => ({ id: k.id, ku: k }))];
+    const top = new Set(data.nodes.filter((k) => k.score !== undefined).slice(0, 5).map((k) => k.id));
+    const nodes = [...ents, ...data.nodes.map((k) => ({ id: k.id, ku: k, pin: top.has(k.id),
+      r: k.score !== undefined ? 6 + Math.min(6, k.score * 8) : 6 + Math.min(5, Math.sqrt(k.helpful_cnt || 0) * 1.5) }))];
     const links = [...data.nodes.flatMap((k) => k.entities.filter((e) => entSet.has(e)).map((e) => ({ source: k.id, target: "e:" + e, rel: "entity" }))),
       ...data.edges.map((e) => ({ source: e.src, target: e.dst, rel: e.rel }))];
     if (!data.nodes.length) return graphBox.replaceChildren(h("div", { class: "muted" }, "Không có tri thức nào khớp."));
     forceLayout(nodes, links, W, H);
-    const pos = new Map(nodes.map((n) => [n.id, n]));
-    const svgEl = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Đồ thị tri thức" },
-      links.map((l) => { const a = pos.get(l.source), b = pos.get(l.target); return a && b ? svg("line", { class: "kg-link " + l.rel, x1: a.x, y1: a.y, x2: b.x, y2: b.y }) : null; }),
-      nodes.map((n) => {
-        if (n.entity) {
-          const g = svg("g", { class: "kg-ent", transform: `translate(${n.x},${n.y})` }, svg("rect", { x: -6, y: -6, width: 12, height: 12, rx: 2 }),
-            svg("text", { x: 9, y: 4 }, n.entity.length > 28 ? n.entity.slice(0, 27) + "…" : n.entity), svg("title", {}, n.entity));
-          g.addEventListener("click", () => setEntity(n.entity));
-          return g;
-        }
-        const c = svg("circle", { class: `kg-ku ${KIND_CLASS[n.ku.kind]}${n.ku.status !== "active" ? " cand" : ""}`, cx: n.x, cy: n.y, r: n.ku.score !== undefined ? 5 + Math.min(5, n.ku.score * 6) : 5 },
-          svg("title", {}, n.ku.title));
-        c.addEventListener("click", () => showKu(n.ku));
-        return c;
-      }));
     graphBox.replaceChildren(h("div", { class: "chart-legend" }, Object.entries(KIND_LABEL).map(([k, l]) => h("span", {}, h("span", { class: `sw ${KIND_CLASS[k]}` }), l)),
-      h("span", {}, h("span", { class: "sw ent-sw" }), "thực thể"), h("span", { class: "small muted" }, "nét đứt: gộp từ · đỏ: mâu thuẫn · viền rỗng: ứng viên")), svgEl);
+      h("span", {}, h("span", { class: "sw ent-sw" }), "thực thể"), h("span", { class: "small muted" }, "nét đứt: gộp từ · đỏ: mâu thuẫn · viền rỗng: ứng viên · phóng to để xem tên")),
+      graphCanvas({ nodes, links, W, H, onKu: showKu, onEntity: (e) => (e === entity ? showEntity(e) : setEntity(e)), selected: entity ? "e:" + entity : null }));
   }
 
   async function load() {
     const params = new URLSearchParams({ q: q.value.trim(), entity: entity || "", include_candidates: withCandidates.checked ? "true" : "false" });
     const data = await api("GET", "/api/knowledge/graph?" + params);
+    allEntities = data.entities;
     chips.replaceChildren(h("span", { class: "small" }, "Thực thể:"), ...data.entities.slice(0, 24).map((e) =>
       h("button", { type: "button", class: "chip" + (e.entity === entity ? " on" : ""), onclick: () => setEntity(e.entity === entity ? "" : e.entity) }, `${e.entity} (${e.n})`)));
     draw(data);
+    if (entity) showEntity(entity); else detail.replaceChildren(hint());
     const title = q.value.trim() ? `Agent sẽ nạp ${data.nodes.length} tri thức cho câu hỏi này (xếp theo điểm truy xuất)`
       : entity ? `${data.nodes.length} tri thức về ${entity}` : `${data.nodes.length} tri thức${withCandidates.checked ? " (gồm ứng viên)" : " đang hiệu lực"}`;
     list.replaceChildren(h("h3", {}, title), ...data.nodes.slice(0, 50).map((k) => h("div", { class: "card kg-item", onclick: () => showKu(k) },

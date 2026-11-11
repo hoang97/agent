@@ -80,7 +80,9 @@ Thất bại → lesson; thành công lặp lại → procedure hoặc insight; 
 scope là "user" khi đó là sở thích hoặc cách làm riêng của người yêu cầu (ví dụ cách trình bày câu trả lời cho họ);
 "tenant" khi là quy ước, sự thật hoặc bài học chung của nhóm.
 source là "user_input" chỉ khi người dùng trực tiếp nói điều đó trong yêu cầu; "tool" nếu từ kết quả công cụ tin cậy;
-"external" nếu từ nội dung ngoài (log, web). blame_ku là id KU gây lỗi nếu quy được nguyên nhân, ngược lại null."""
+"external" nếu từ nội dung ngoài (log, web). blame_ku là id KU gây lỗi nếu quy được nguyên nhân, ngược lại null.
+entities: tối đa 5 tên cụ thể (service, kết nối, công cụ, index, trường dữ liệu, mã lỗi), viết thường;
+cùng một thứ thì dùng lại đúng tên trong known_entities; không dùng chủ đề chung chung như log, query, error analysis."""
 
 REFLECT_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["items"],

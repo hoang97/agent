@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import agent as agent_mod
-from . import compiler, connections, db, gateway, knowledge, learned, learning, llm, tools, vault
+from . import compiler, connections, db, entities, gateway, knowledge, learned, learning, llm, tools, vault
 from .config import settings
 from .retrieval import retrieve
 from .scheduler import Scheduler
@@ -103,6 +103,8 @@ def seed() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     seed()
+    with db.session() as conn:
+        entities.renormalize(conn)
     resume_consolidations()
     sched = Scheduler()
     if settings.scheduler_enabled:
@@ -761,6 +763,20 @@ def knowledge_graph(q: str = "", entity: str = "", include_candidates: bool = Fa
     if hits:
         nodes.sort(key=lambda n: -n.get("score", 0))
     return {"nodes": nodes, "edges": edges, "entities": counts}
+
+
+class EntityMerge(BaseModel):
+    sources: list[str] = Field(min_length=1, max_length=50)
+    target: str = Field(min_length=1, max_length=80)
+
+
+@app.post("/api/knowledge/entities/merge")
+def entity_merge(body: EntityMerge, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_admin()
+    try:
+        return entities.merge(conn, t.tenant_id, body.sources, body.target, t.principal.username)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/ku")

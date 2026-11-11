@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import threading
 
-from . import db, knowledge, learned, llm
+from . import db, entities, knowledge, learned, llm
 from .config import settings
 from .knowledge import scrub
 from .retrieval import near, tokenize
@@ -153,7 +153,9 @@ def process_episode(conn, tenant_id: str, provider, episode: dict) -> dict:
     blamed: set[str] = set()
     ops: list[str] = []
     _judge(conn, tenant_id, provider, episode)
-    for item in provider.reflect(_episode_view(episode)):
+    view = _episode_view(episode)
+    view["known_entities"] = entities.top(conn, tenant_id)
+    for item in provider.reflect(view):
         if item.get("blame_ku") in episode["ku_used"]:
             blamed.add(item["blame_ku"])
         ops.append(curate_item(conn, tenant_id, provider, item, episode, _source_trust(item, episode, untrusted_seen)))

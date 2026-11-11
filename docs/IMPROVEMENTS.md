@@ -259,3 +259,11 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend 
 - **Công cụ** gộp "Kết nối công cụ" với danh mục công cụ và công cụ học được (tab con "Kết nối", "Danh mục & quyền").
 - **Cài đặt** gồm tab "Chính sách" (mọi người xem, admin sửa) và "LLM" (chỉ org admin). Giữ trang Duyệt lệnh.
 - Link và trạng thái cũ (`connections`, `compile`, `policy`) tự chuyển sang mục mới; tab con nằm trên URL.
+
+## Đợt 33 — 2026-11-11: chuẩn hoá tên thực thể, đồ thị L3 kéo thả và phóng to
+
+- `kagent/entities.py`: tên thực thể được chuẩn hoá khi thêm hoặc sửa KU và khi truy xuất. Tên viết thường, gộp khoảng trắng; bỏ `.keyword` và `*` cuối index pattern; mã HTTP viết thành `http 500`; tên lệnh được đổi thành `tool:<kết nối>.<lệnh>` kèm tên kết nối, chỉ khi tên lệnh không trùng giữa các kết nối.
+- Admin gộp được nhiều tên vào một tên (`POST /api/knowledge/entities/merge`). Tên cũ thành bí danh của tenant, nên KU học sau này dùng tên cũ cũng tự đổi sang tên mới.
+- Reflector nhận danh sách thực thể đang dùng để dùng lại đúng tên, tối đa 5 tên cụ thể mỗi mục.
+- KU đã có được chuẩn hoá lại khi khởi động, mỗi phiên bản luật chạy một lần. Trên team-finance, số tên khác nhau giảm từ 126 xuống 94.
+- Đồ thị: cuộn chuột để phóng to, kéo nền để di chuyển, kéo nút để sắp lại, nháy đúp để vừa khung. Rê chuột lên một nút thì làm mờ phần không liên quan. Khi phóng to thì hiện tên tri thức. Khung chi tiết của một thực thể gợi ý các tên gần giống để gộp.

@@ -6,6 +6,7 @@ import re
 import sqlite3
 
 from . import db
+from .entities import normalize as normalize_entities
 from .retrieval import embed
 
 KU_JSON = ("entities", "source_eps", "embedding")
@@ -62,7 +63,7 @@ def add(conn: sqlite3.Connection, tenant_id: str, *, kind: str, title: str, cont
         entities: list[str] | None = None, actor: str = "curator", status: str = "candidate",
         reason: str | None = None) -> dict:
     title, content, applies_when = scrub(title), scrub(content), scrub(applies_when)
-    entities = sorted(set(entities or []))
+    entities = normalize_entities(conn, tenant_id, entities)
     ku_id = db.new_id()
     vec = embed(f"{title} {content} {applies_when or ''}")
     now = db.iso()
@@ -89,6 +90,8 @@ def update(conn, tenant_id: str, ku_id: str, changes: dict, op: str, actor: str,
         if before is None:
             raise KeyError(ku_id)
         values = dict(changes)
+        if "entities" in values:
+            values["entities"] = normalize_entities(conn, tenant_id, values["entities"])
         for f in ("title", "content", "applies_when"):
             if f in values:
                 values[f] = scrub(values[f])

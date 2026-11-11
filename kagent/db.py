@@ -135,6 +135,11 @@ CREATE TABLE IF NOT EXISTS llm_profile (
 
 CREATE TABLE IF NOT EXISTS app_setting (key TEXT PRIMARY KEY, value TEXT);
 
+CREATE TABLE IF NOT EXISTS entity_alias (
+  tenant_id TEXT NOT NULL, alias TEXT NOT NULL, canonical TEXT NOT NULL, created_by TEXT, created_at TEXT,
+  PRIMARY KEY (tenant_id, alias)
+);
+
 CREATE TABLE IF NOT EXISTS ku_consolidation (
   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, status TEXT NOT NULL, considered INTEGER NOT NULL,
   items TEXT NOT NULL, batches TEXT NOT NULL, done_batches TEXT NOT NULL DEFAULT '[]',

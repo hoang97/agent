@@ -9,6 +9,7 @@ import sqlite3
 from datetime import datetime, timedelta
 
 from . import db
+from .entities import normalize as normalize_entities
 
 DIM = 256
 _TOKEN = re.compile(r"[^\W_]+(?:[.:_-][^\W_]+)*", re.UNICODE)
@@ -85,7 +86,7 @@ def retrieve(conn: sqlite3.Connection, tenant_id: str, query: str, *, project: s
 
     qvec = embed(query)
     bm25 = _bm25(conn, tenant_id, query)
-    wanted = set(entities or [])
+    wanted = set(normalize_entities(conn, tenant_id, entities)) if entities else set()
     cutoff = db.now() - timedelta(days=90)
     scored: dict[str, float] = {}
     for ku_id, ku in kus.items():
