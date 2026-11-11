@@ -1,4 +1,5 @@
 """Duyệt hàng loạt và tổng hợp KU ứng viên trùng ý."""
+import json
 import time
 
 from kagent import api as api_mod, db, knowledge, llm
@@ -123,3 +124,47 @@ def test_consolidation_job_is_per_tenant(client, users):
     job = users["admin"].post("/api/ku/consolidate", json={}).json()
     finance = Session(client, "admin", "team-finance")
     assert finance.get(f"/api/ku/consolidate/{job['id']}").status_code == 404
+
+
+def test_job_survives_server_restart_and_resumes_only_unfinished_batches(users):
+    """Server dừng giữa chừng: khởi động lại thì chạy tiếp lô còn dở, không chạy lại lô đã xong."""
+    admin = users["admin"]
+    for i in range(2):
+        _add(admin.tenant, f"Bài học trùng {i}", "gateway giữ lệnh chờ duyệt khi kế hoạch dựa trên nội dung untrusted", kind="lesson")
+        _add(admin.tenant, f"Sự thật trùng {i}", "index log dạng k8s env service ngày theo quy ước đặt tên", kind="fact")
+    seen = []
+
+    class Recording(llm.HeuristicProvider):
+        def consolidate(self, items):
+            seen.append(items[0]["kind"])
+            return super().consolidate(items)
+
+    llm.set_provider(Recording())
+    job = _consolidate(admin)
+    assert job["status"] == "done" and sorted(seen) == ["fact", "lesson"] and len(job["groups"]) == 2
+    # Giả lập server bị dừng khi mới xong một lô: job còn "running", một lô chưa ghi kết quả.
+    with db.session() as conn:
+        row = api_mod._job(conn, job["id"])
+        lesson_batch = next(i for i, ids in enumerate(row["batches"]) if row["items"][ids[0]]["kind"] == "lesson")
+        keep = [g for g in row["groups"] if row["items"][g["ids"][0]]["kind"] != "lesson"]
+        conn.execute("UPDATE ku_consolidation SET status='running', done_batches=?, groups=? WHERE id=?",
+                     (json.dumps([i for i in row["done_batches"] if i != lesson_batch]), json.dumps(keep), job["id"]))
+    seen.clear()
+    api_mod.resume_consolidations()
+    for _ in range(100):
+        again = admin.get(f"/api/ku/consolidate/{job['id']}").json()
+        if again["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert again["status"] == "done" and seen == ["lesson"] and len(again["groups"]) == 2
+
+
+def test_stale_running_job_is_marked_error_on_startup(users):
+    admin = users["admin"]
+    _add(admin.tenant, "A trùng", "x y z"); _add(admin.tenant, "B trùng", "x y z")
+    job = _consolidate(admin)
+    with db.session() as conn:
+        conn.execute("UPDATE ku_consolidation SET status='running', done_batches='[]', created_at=? WHERE id=?", (db.later(days=-2), job["id"]))
+    api_mod.resume_consolidations()
+    again = admin.get(f"/api/ku/consolidate/{job['id']}").json()
+    assert again["status"] == "error" and "quá hạn" in again["errors"][-1]

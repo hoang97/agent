@@ -35,7 +35,9 @@ async function api(method, path, body) {
   if (res.status === 401 && path !== "/api/auth/login") { state.me = null; renderLogin(); throw new Error("Phiên đã hết hạn"); }
   if (!res.ok) {
     const detail = data && data.detail;
-    throw new Error(typeof detail === "string" ? detail : `Lỗi ${res.status}`);
+    const err = new Error(typeof detail === "string" ? detail : `Lỗi ${res.status}`);
+    err.status = res.status;  // để nơi gọi phân biệt "không còn" (404) với lỗi tạm thời
+    throw err;
   }
   return data;
 }
@@ -264,11 +266,14 @@ VIEWS.knowledge = async (main) => {
     store.set("ku:consolidate", job.id);
     const progress = h("div", { class: "card muted" });
     consolidated.replaceChildren(progress);
+    let offline = false;
     while (job.status === "running") {
-      progress.replaceChildren(busy(`Đang tổng hợp ${job.considered} ứng viên: xong ${job.done}/${job.total} lô… (có thể mất vài phút, cứ để trang mở)`));
+      progress.replaceChildren(busy(`Đang tổng hợp ${job.considered} ứng viên: xong ${job.done}/${job.total} lô…` +
+        (offline ? " (mất kết nối tới máy chủ, đang thử lại)" : " (có thể mất vài phút; chuyển màn hay tải lại trang vẫn theo dõi tiếp)")));
       await new Promise((r) => setTimeout(r, 3000));
-      if (!document.contains(progress)) return;  // người dùng đã rời trang hoặc đóng đề xuất
-      job = await api("GET", `/api/ku/consolidate/${job.id}`);
+      if (!document.contains(progress)) return;  // người dùng đã rời trang hoặc đóng đề xuất; quay lại thì resume() theo dõi tiếp
+      try { job = await api("GET", `/api/ku/consolidate/${job.id}`); offline = false; }
+      catch (e) { if (e.status === 404) throw e; offline = true; }  // server khởi động lại hay mạng chập chờn: job vẫn còn, thử lại
     }
     if (job.status === "error") { store.set("ku:consolidate", null); consolidated.replaceChildren(); throw new Error("Không tổng hợp được: " + job.errors.join("; ")); }
     renderProposal(job);
@@ -278,7 +283,11 @@ VIEWS.knowledge = async (main) => {
     const id = store.get("ku:consolidate", null);
     if (!id || !isAdmin()) return;
     try { await follow(await api("GET", `/api/ku/consolidate/${id}`)); }
-    catch { store.set("ku:consolidate", null); consolidated.replaceChildren(); }  // máy chủ đã khởi động lại: đề xuất không còn
+    catch (e) {
+      if (e.status !== 404) return toast(e.message, true);  // lỗi tạm thời: giữ job, lần mở lại màn sẽ thử tiếp
+      store.set("ku:consolidate", null);  // job không còn (đã có lần tổng hợp mới hơn)
+      consolidated.replaceChildren();
+    }
   }
   bulkBar.append(h("label", { class: "small" }, selectAll, " Chọn tất cả"), countLabel, h("span", { class: "spacer" }),
     h("button", { type: "button", class: "needs-sel", onclick: doBatch(true) }, "Chấp nhận đã chọn"),

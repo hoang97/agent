@@ -102,6 +102,7 @@ def seed() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     seed()
+    resume_consolidations()
     sched = Scheduler()
     if settings.scheduler_enabled:
         sched.start()
@@ -793,8 +794,10 @@ class Consolidate(BaseModel):
 
 MAX_CONSOLIDATE = 300
 CONSOLIDATE_BATCH = 40  # mỗi lần gọi LLM; lô lớn hơn làm request chậm (khoảng 60 giây cho 33 KU qua relay) và dễ chạm giới hạn output
-_consolidations: dict[str, dict] = {}
-_consolidations_lock = threading.Lock()
+# Job lưu trong bảng ku_consolidation để sống qua lần khởi động lại server: lô nào xong được ghi ngay,
+# khởi động lại thì chạy tiếp các lô còn dở. Khóa này chỉ tuần tự hóa việc ghi kết quả của các lô chạy song song.
+_consolidation_write = threading.Lock()
+_consolidation_threads: set[str] = set()
 
 
 def _batches(items: list[dict]) -> list[list[dict]]:
@@ -805,41 +808,91 @@ def _batches(items: list[dict]) -> list[list[dict]]:
     return [group[i:i + CONSOLIDATE_BATCH] for group in by_kind.values() if len(group) >= 2 for i in range(0, len(group), CONSOLIDATE_BATCH)]
 
 
-def _run_consolidation(job_id: str, tenant_id: str, items: list[dict]) -> None:
-    job = _consolidations[job_id]
-    scope = {it["id"]: it["scope"] for it in items}
-    provider = llm.get_provider()
+def _job(conn, job_id: str) -> dict | None:
+    return db.row(conn.execute("SELECT * FROM ku_consolidation WHERE id=?", (job_id,)).fetchone(),
+                  "items", "batches", "done_batches", "groups", "drops", "errors")
 
-    def one(batch: list[dict]) -> dict:
-        with llm.collect_usage() as usage:
-            try:
-                return provider.consolidate(batch)
-            finally:
-                if usage:
-                    with db.session() as conn:
-                        llm.save_usage(conn, tenant_id, None, usage)
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="consolidate") as pool:
-        futures = [pool.submit(contextvars.copy_context().run, one, b) for b in _batches(items)]
-        for fut in as_completed(futures):
-            try:
-                part = fut.result()
-            except llm.LLMError as exc:
-                job["errors"].append(str(exc))
-                part = {"groups": [], "drop": []}
-            except Exception:
-                log.exception("lỗi khi tổng hợp KU")
-                job["errors"].append("lỗi máy chủ khi tổng hợp một lô")
-                part = {"groups": [], "drop": []}
-            with _consolidations_lock:
-                # Gom chỉ trong cùng phạm vi: bỏ id khác phạm vi với KU đầu nhóm.
-                for g in part["groups"]:
-                    g["ids"] = [i for i in g["ids"] if scope[i] == scope[g["ids"][0]]]
-                job["groups"] += [g for g in part["groups"] if len(g["ids"]) >= 2]
-                job["drop"] += part["drop"]
-                job["done"] += 1
-    job["status"] = "done" if len(job["errors"]) < job["total"] else "error"
+def _record_batch(job_id: str, index: int, part: dict | None, error: str | None) -> None:
+    with _consolidation_write, db.session() as conn:
+        job = _job(conn, job_id)
+        if job is None or index in job["done_batches"]:
+            return
+        scope = {i: it["scope"] for i, it in job["items"].items()}
+        groups = job["groups"]
+        if part:
+            # Gom chỉ trong cùng phạm vi: bỏ id khác phạm vi với KU đầu nhóm.
+            for g in part["groups"]:
+                g["ids"] = [i for i in g["ids"] if scope.get(i) == scope.get(g["ids"][0])]
+            groups += [g for g in part["groups"] if len(g["ids"]) >= 2]
+        done = job["done_batches"] + [index]
+        errors = job["errors"] + ([error] if error else [])
+        status = "running" if len(done) < len(job["batches"]) else ("error" if len(errors) == len(job["batches"]) else "done")
+        conn.execute("UPDATE ku_consolidation SET groups=?, drops=?, errors=?, done_batches=?, status=?, updated_at=? WHERE id=?",
+                     (json.dumps(groups, ensure_ascii=False), json.dumps(job["drops"] + (part["drop"] if part else []), ensure_ascii=False),
+                      json.dumps(errors, ensure_ascii=False), json.dumps(done), status, db.iso(), job_id))
+
+
+def _run_consolidation(job_id: str, tenant_id: str) -> None:
+    """Chạy các lô chưa xong của job (lần đầu, hoặc tiếp tục sau khi server khởi động lại)."""
+    try:
+        with db.session() as conn:
+            job = _job(conn, job_id)
+        if job is None:
+            return
+        todo = [(i, [{"id": x, **job["items"][x]} for x in ids if x in job["items"]]) for i, ids in enumerate(job["batches"]) if i not in job["done_batches"]]
+        provider = llm.get_provider()
+
+        def one(index: int, batch: list[dict]) -> None:
+            with llm.collect_usage() as usage:
+                try:
+                    part, error = provider.consolidate(batch), None
+                except llm.LLMError as exc:
+                    part, error = None, str(exc)
+                except Exception:
+                    log.exception("lỗi khi tổng hợp KU")
+                    part, error = None, "lỗi máy chủ khi tổng hợp một lô"
+                finally:
+                    if usage:
+                        with db.session() as conn:
+                            llm.save_usage(conn, tenant_id, None, usage)
+            _record_batch(job_id, index, part, error)
+
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="consolidate") as pool:
+            list(pool.map(lambda job_batch: contextvars.copy_context().run(one, *job_batch), todo))
+    finally:
+        _consolidation_threads.discard(job_id)
+
+
+def _start_consolidation(job_id: str, tenant_id: str) -> None:
+    if job_id in _consolidation_threads:
+        return
+    _consolidation_threads.add(job_id)
+    threading.Thread(target=_run_consolidation, args=(job_id, tenant_id), name=f"consolidate-{job_id[:8]}", daemon=True).start()
+
+
+def resume_consolidations() -> None:
+    """Gọi khi khởi động: job còn dở (server bị dừng giữa chừng) chạy tiếp các lô chưa xong; job quá 1 ngày thì bỏ."""
+    with db.session() as conn:
+        stale = db.iso(db.now() - timedelta(days=1))
+        conn.execute("UPDATE ku_consolidation SET status='error', errors=json_insert(errors, '$[#]', 'quá hạn, hãy tổng hợp lại') "
+                     "WHERE status='running' AND created_at<?", (stale,))
+        rows = conn.execute("SELECT id, tenant_id FROM ku_consolidation WHERE status='running'").fetchall()
+    for r in rows:
+        log.info("chạy tiếp job tổng hợp KU %s sau khi khởi động lại", r["id"])
+        _start_consolidation(r["id"], r["tenant_id"])
+
+
+def _job_view(conn, job: dict, tenant_id: str) -> dict:
+    """Bản trả về client. Bỏ KU đã được xử lý trong lúc đó để không gộp hay loại lại."""
+    ids = list(job["items"])
+    live = {r["id"] for r in conn.execute(f"SELECT id FROM knowledge_unit WHERE tenant_id=? AND status='candidate' AND id IN ({','.join('?' * len(ids))})",
+                                          (tenant_id, *ids)).fetchall()} if ids else set()
+    groups = [{**g, "ids": [i for i in g["ids"] if i in live]} for g in job["groups"]]
+    return {"id": job["id"], "status": job["status"], "considered": job["considered"], "total": len(job["batches"]), "done": len(job["done_batches"]),
+            "errors": job["errors"], "groups": [g for g in groups if len(g["ids"]) >= 2], "drop": [d for d in job["drops"] if d["id"] in live],
+            "items": {i: {k: it[k] for k in ("kind", "title", "content", "source_trust")} for i, it in job["items"].items()}}
 
 
 @app.post("/api/ku/consolidate")
@@ -852,36 +905,25 @@ def ku_consolidate(body: Consolidate, t: Tenant = Depends(current_tenant), conn=
         sql += " AND kind=?"
         args.append(body.kind)
     items = db.rows(conn.execute(sql + " ORDER BY recorded_at DESC LIMIT ?", (*args, MAX_CONSOLIDATE)).fetchall())
-    job_id = db.new_id()
-    job = {"id": job_id, "tenant_id": t.tenant_id, "status": "running", "done": 0, "total": len(_batches(items)), "considered": len(items),
-           "groups": [], "drop": [], "errors": [], "items": {it["id"]: {k: it[k] for k in ("kind", "title", "content", "source_trust")} for it in items}}
-    with _consolidations_lock:
-        for old in [k for k, v in _consolidations.items() if v["tenant_id"] == t.tenant_id]:
-            _consolidations.pop(old)  # mỗi tenant giữ một đề xuất gần nhất
-        _consolidations[job_id] = job
-    if job["total"] == 0:
-        job["status"] = "done"
-    else:
-        threading.Thread(target=_run_consolidation, args=(job_id, t.tenant_id, items), name=f"consolidate-{job_id[:8]}", daemon=True).start()
-    return {k: v for k, v in job.items() if k != "tenant_id"}
+    batches = [[it["id"] for it in b] for b in _batches(items)]
+    job_id, now = db.new_id(), db.iso()
+    conn.execute("DELETE FROM ku_consolidation WHERE tenant_id=?", (t.tenant_id,))  # mỗi tenant giữ một đề xuất gần nhất
+    conn.execute("INSERT INTO ku_consolidation(id,tenant_id,status,considered,items,batches,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                 (job_id, t.tenant_id, "running" if batches else "done", len(items),
+                  json.dumps({it["id"]: {k: it[k] for k in ("kind", "title", "content", "applies_when", "source_trust", "scope")} for it in items}, ensure_ascii=False),
+                  json.dumps(batches), now, now))
+    if batches:
+        _start_consolidation(job_id, t.tenant_id)
+    return _job_view(conn, _job(conn, job_id), t.tenant_id)
 
 
 @app.get("/api/ku/consolidate/{job_id}")
 def ku_consolidate_status(job_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     t.require_admin()
-    job = _consolidations.get(job_id)
+    job = _job(conn, job_id)
     if job is None or job["tenant_id"] != t.tenant_id:
-        raise HTTPException(404, "không có đề xuất này (máy chủ có thể đã khởi động lại)")
-    with _consolidations_lock:
-        out = {k: v for k, v in job.items() if k != "tenant_id"}
-    # Mở lại đề xuất sau khi tải trang: bỏ các KU đã được xử lý trong lúc đó để không gộp hay loại lại.
-    ids = list(out["items"])
-    live = {r["id"] for r in conn.execute(f"SELECT id FROM knowledge_unit WHERE tenant_id=? AND status='candidate' AND id IN ({','.join('?' * len(ids))})",
-                                          (t.tenant_id, *ids)).fetchall()} if ids else set()
-    out["groups"] = [{**g, "ids": [i for i in g["ids"] if i in live]} for g in out["groups"]]
-    out["groups"] = [g for g in out["groups"] if len(g["ids"]) >= 2]
-    out["drop"] = [d for d in out["drop"] if d["id"] in live]
-    return out
+        raise HTTPException(404, "không có đề xuất này (có thể đã có lần tổng hợp mới hơn)")
+    return _job_view(conn, job, t.tenant_id)
 
 
 class Merge(BaseModel):

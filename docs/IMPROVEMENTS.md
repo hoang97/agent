@@ -222,3 +222,9 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend 
 
 - Helper `busy(text)`: spinner 12px ở đầu dòng kèm nội dung, `role="status"`. Dùng cho: tiến độ tổng hợp KU, công cụ đang chạy trong chat, lượt chat đang chờ sau khi tải lại trang, kiểm tra kết nối, tải danh mục công cụ và công cụ học được. Hệ thống bật giảm chuyển động thì spinner đứng yên thành chấm tròn.
 - Kiểm tra kết nối mà request lỗi thì xóa spinner thay vì để quay mãi.
+
+## Đợt 28 — 2026-11-11: đề xuất tổng hợp KU mất khi F5 hoặc chuyển màn
+
+- **Nguyên nhân:** job chỉ nằm trong bộ nhớ server, nên mất mỗi lần server khởi động lại (kể cả khi triển khai bản mới). Ngoài ra trong lúc theo dõi, chỉ một lần hỏi tiến độ bị lỗi (server đang khởi động lại, mạng chập chờn) là giao diện xóa job đã ghi nhớ.
+- **Thay đổi:** job lưu trong bảng `ku_consolidation` (danh sách lô, lô đã xong, kết quả từng lô ghi ngay khi xong). Server khởi động lại thì chạy tiếp các lô còn dở, không chạy lại lô đã xong; job quá 1 ngày thì đánh dấu lỗi. Giao diện chỉ bỏ job khi server trả 404 (đã có lần tổng hợp mới hơn); lỗi tạm thời thì hiện "mất kết nối, đang thử lại" và tiếp tục.
+- Đã thử trên trình duyệt với job 27 KU: chuyển màn giữa chừng, F5 giữa chừng, khởi động lại container giữa chừng; job chạy tiếp và trang tự hiện đề xuất khi xong.

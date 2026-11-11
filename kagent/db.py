@@ -135,6 +135,13 @@ CREATE TABLE IF NOT EXISTS llm_profile (
 
 CREATE TABLE IF NOT EXISTS app_setting (key TEXT PRIMARY KEY, value TEXT);
 
+CREATE TABLE IF NOT EXISTS ku_consolidation (
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, status TEXT NOT NULL, considered INTEGER NOT NULL,
+  items TEXT NOT NULL, batches TEXT NOT NULL, done_batches TEXT NOT NULL DEFAULT '[]',
+  groups TEXT NOT NULL DEFAULT '[]', drops TEXT NOT NULL DEFAULT '[]', errors TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tool_result (
   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT, episode_id TEXT, tool TEXT NOT NULL,
   untrusted INTEGER NOT NULL DEFAULT 0, chars INTEGER NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL
