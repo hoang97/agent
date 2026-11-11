@@ -26,9 +26,21 @@ def _source_trust(item: dict, episode: dict, untrusted_seen: bool) -> str:
     return "verified_tool"
 
 
+STEP_RESULT_CHARS = 1500  # Reflector cần biết bước nào làm gì và ra sao, không cần toàn bộ dữ liệu trả về
+
+
 def _episode_view(episode: dict) -> dict:
-    """Bản lọc bí mật để gửi cho Reflector."""
-    return json.loads(scrub(json.dumps(episode, ensure_ascii=False)))
+    """Bản gửi cho Reflector/judge: lọc bí mật và chỉ giữ phần đầu kết quả của từng bước để không tốn token vô ích."""
+    view = dict(episode)
+    view["trace"] = []
+    for step in episode.get("trace") or []:
+        if step.get("type") == "tool_call":
+            step = {k: v for k, v in step.items() if k not in ("confidence_parts", "dry_run")}
+            text = json.dumps(step.get("result"), ensure_ascii=False)
+            if len(text) > STEP_RESULT_CHARS:
+                step["result"] = text[:STEP_RESULT_CHARS] + f"…(đã cắt {len(text) - STEP_RESULT_CHARS} ký tự)"
+        view["trace"].append(step)
+    return json.loads(scrub(json.dumps(view, ensure_ascii=False)))
 
 
 def _judge(conn, tenant_id: str, provider, episode: dict) -> None:
