@@ -802,17 +802,17 @@ function forceLayout(nodes, links, W, H) {
     for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
       let dx = nodes[i].x - nodes[j].x, dy = nodes[i].y - nodes[j].y;
       if (!dx && !dy) { dx = 0.5; dy = 0.5; }
-      const d2 = dx * dx + dy * dy, d = Math.sqrt(d2), min = nodes[i].r + nodes[j].r + 6;
-      let f = (nodes[i].entity || nodes[j].entity ? 2600 : 1400) / Math.max(d2, 30);
-      if (d < min) f += (min - d) * 0.5 / d;
+      const d2 = dx * dx + dy * dy, d = Math.sqrt(d2), min = nodes[i].r + nodes[j].r + 10;
+      let f = (nodes[i].entity || nodes[j].entity ? 1500 : 800) / Math.max(d2, 30);
+      if (d < min) f += (min - d) * 0.6 / d;
       fx[i] += dx * f; fy[i] += dy * f; fx[j] -= dx * f; fy[j] -= dy * f;
     }
     for (const [a, b] of L) {
-      const dx = nodes[b].x - nodes[a].x, dy = nodes[b].y - nodes[a].y, d = Math.sqrt(dx * dx + dy * dy) || 1, f = (d - 70) * 0.05;
+      const dx = nodes[b].x - nodes[a].x, dy = nodes[b].y - nodes[a].y, d = Math.sqrt(dx * dx + dy * dy) || 1, f = (d - 42) * 0.08;
       fx[a] += (dx / d) * f; fy[a] += (dy / d) * f; fx[b] -= (dx / d) * f; fy[b] -= (dy / d) * f;
     }
     nodes.forEach((n, i) => {
-      fx[i] += (W / 2 - n.x) * 0.012; fy[i] += (H / 2 - n.y) * 0.012;
+      fx[i] += (W / 2 - n.x) * 0.02; fy[i] += (H / 2 - n.y) * 0.02;
       n.x += Math.max(-25, Math.min(25, fx[i])) * t; n.y += Math.max(-25, Math.min(25, fy[i])) * t;
     });
   }
@@ -839,9 +839,9 @@ function graphCanvas({ nodes, links, W, H, onKu, onEntity, selected }) {
       "aria-label": n.entity ? "Thực thể " + n.entity : n.ku.title });
     if (n.entity) {
       g.append(svg("rect", { x: -n.r, y: -n.r, width: n.r * 2, height: n.r * 2, rx: 3 }),
-        svg("text", { class: "kg-label", x: n.r + 4, y: 4 }, n.entity.length > 30 ? n.entity.slice(0, 29) + "…" : n.entity), svg("title", {}, `${n.entity} · ${n.deg} tri thức`));
+        svg("text", { class: "kg-label", x: n.r + 5, y: 5 }, n.entity.length > 30 ? n.entity.slice(0, 29) + "…" : n.entity), svg("title", {}, `${n.entity} · ${n.deg} tri thức`));
     } else {
-      g.append(svg("circle", { class: `kg-ku ${KIND_CLASS[n.ku.kind]}${n.ku.status !== "active" ? " cand" : ""}`, r: n.r }), svg("text", { class: "kg-label kg-ku-label" + (n.pin ? " pin" : ""), x: n.r + 4, y: 4 },
+      g.append(svg("circle", { class: `kg-ku ${KIND_CLASS[n.ku.kind]}${n.ku.status !== "active" ? " cand" : ""}`, r: n.r }), svg("text", { class: "kg-label kg-ku-label" + (n.pin ? " pin" : ""), x: n.r + 5, y: 5 },
         n.ku.title.length > 40 ? n.ku.title.slice(0, 39) + "…" : n.ku.title), svg("title", {}, n.ku.title));
     }
     nodeEls.set(n.id, g);
@@ -855,13 +855,13 @@ function graphCanvas({ nodes, links, W, H, onKu, onEntity, selected }) {
     line.setAttribute("x1", a.x); line.setAttribute("y1", a.y); line.setAttribute("x2", b.x); line.setAttribute("y2", b.y);
   });
   const placeNode = (n) => nodeEls.get(n.id).setAttribute("transform", `translate(${n.x},${n.y})`);
-  const apply = () => { layer.setAttribute("transform", `translate(${view.x},${view.y}) scale(${view.k})`); el.classList.toggle("zoomed", view.k >= 1.6); };
+  const apply = () => { layer.setAttribute("transform", `translate(${view.x},${view.y}) scale(${view.k})`); el.classList.toggle("zoomed", view.k >= 1.3); };
   nodes.forEach(placeNode); placeLinks();
 
   function fit() {
     if (!nodes.length) return;
     const xs = nodes.map((n) => n.x), ys = nodes.map((n) => n.y), pad = 40;
-    const x0 = Math.min(...xs) - pad, x1 = Math.max(...xs) + pad + 80, y0 = Math.min(...ys) - pad, y1 = Math.max(...ys) + pad;
+    const x0 = Math.min(...xs) - pad, x1 = Math.max(...xs) + pad + 120, y0 = Math.min(...ys) - pad, y1 = Math.max(...ys) + pad;
     const k = Math.min(2.5, W / (x1 - x0), H / (y1 - y0));
     view = { k, x: (W - (x1 - x0) * k) / 2 - x0 * k, y: (H - (y1 - y0) * k) / 2 - y0 * k };
     apply();
@@ -970,15 +970,15 @@ async function knowledgeGraphView(main) {
   }
 
   function draw(data) {
-    const W = 900, H = 560;
+    const W = 760, H = 520;
     const deg = new Map();
     for (const k of data.nodes) for (const e of k.entities) deg.set(e, (deg.get(e) || 0) + 1);
     // Thực thể chỉ có một tri thức không giúp thấy liên hệ, trừ khi đang lọc theo nó.
-    const ents = [...deg].filter(([e, n]) => n >= 2 || e === entity).map(([e, n]) => ({ id: "e:" + e, entity: e, deg: n, r: 5 + Math.min(7, n) }));
+    const ents = [...deg].filter(([e, n]) => n >= 2 || e === entity).map(([e, n]) => ({ id: "e:" + e, entity: e, deg: n, r: 8 + Math.min(8, n) }));
     const entSet = new Set(ents.map((e) => e.entity));
     const top = new Set(data.nodes.filter((k) => k.score !== undefined).slice(0, 5).map((k) => k.id));
     const nodes = [...ents, ...data.nodes.map((k) => ({ id: k.id, ku: k, pin: top.has(k.id),
-      r: k.score !== undefined ? 6 + Math.min(6, k.score * 8) : 6 + Math.min(5, Math.sqrt(k.helpful_cnt || 0) * 1.5) }))];
+      r: k.score !== undefined ? 8 + Math.min(7, k.score * 10) : 8 + Math.min(6, Math.sqrt(k.helpful_cnt || 0) * 1.8) }))];
     const links = [...data.nodes.flatMap((k) => k.entities.filter((e) => entSet.has(e)).map((e) => ({ source: k.id, target: "e:" + e, rel: "entity" }))),
       ...data.edges.map((e) => ({ source: e.src, target: e.dst, rel: e.rel }))];
     if (!data.nodes.length) return graphBox.replaceChildren(h("div", { class: "muted" }, "Không có tri thức nào khớp."));
