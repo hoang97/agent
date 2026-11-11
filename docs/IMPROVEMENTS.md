@@ -138,3 +138,16 @@ Phát hiện khi người dùng điều tra lỗi 500 qua Kibana thật: 6 lư�
 | Duyệt xong agent dừng; người dùng gõ "đã duyệt", agent lại đặt truy vấn mới và lại phải chờ duyệt | Khi lượt mới nhất không còn lệnh chờ, agent tự chạy tiếp với kết quả đó; server chặn chạy tiếp hai lần |
 | Kết quả lệnh đã duyệt vào lịch sử chỉ 300 ký tự đầu, agent không đọc được `request_id` | Lượt mới nhất nhận tới 24.000 ký tự kết quả, kèm tham số lệnh, bọc `<untrusted>` khi là log/web |
 | Thẻ duyệt trong chat không hiện tham số; nhiều lệnh song song phải duyệt từng cái | Thẻ hiện tham số, kết quả thu gọn; nút "Chạy tất cả" và "Cho phép tất cả trong 1 giờ"; grant mới cấp chạy luôn các lệnh đọc cùng loại đang chờ |
+
+## Đợt 18 — 2026-11-11: thử luồng duyệt trên trình duyệt với Kibana và Kubernetes thật
+
+Điều tra lỗi 500 của cmp-backend devtest chạy trọn từ đầu tới nguyên nhân gốc (IaaS trả 409 Conflict, `clients/iaas/http.py` không map lại mã lỗi), không còn vòng lặp duyệt lại. Những gì thấy khi thử:
+
+| Vấn đề | Thay đổi |
+| --- | --- |
+| Lệnh đọc R0 (`list_pods`) ở dev vẫn phải duyệt sau khi đọc log | Bảng cấu hình theo môi trường thêm cột "lệnh đọc tự chạy khi có nội dung untrusted" (`none` / `R0` / `R1`); mặc định dev R0, staging và prod không; prod tối đa R0 |
+| Thẻ duyệt chỉ hiện khi lượt kết thúc | Thẻ hiện ngay khi lệnh chuyển sang chờ duyệt, nút duyệt hiện khi lượt xong |
+| Agent chép lại `approval_id`, trạng thái, lý do chặn thành bảng | System prompt: giao diện đã có thẻ duyệt, chỉ nói ngắn lệnh nào chờ và để làm gì; sau khi duyệt agent tự được chạy tiếp |
+| Nút "Tiếp tục" còn lại trên lượt đã được chạy tiếp, và hiện cả khi agent đang chạy | Ẩn nút khi lượt chạy tiếp bắt đầu, làm mới lượt gốc khi lượt chạy tiếp xong |
+
+Còn mở: điểm tin cậy thực tế rất thấp (0,02–0,34 với hệ thống mới, chưa có Skill và tiền lệ), nên ngưỡng mặc định 0,5 của grant ở staging gần như không bao giờ đạt.

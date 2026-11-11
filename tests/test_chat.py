@@ -109,9 +109,9 @@ def test_chat_approval_card_lets_requester_decide(users):
 
 
 def test_untrusted_content_taints_following_turns(users):
-    alice = users["alice"]
-    cid = chat(alice, "tìm log lỗi")[0]["conversation_id"]
-    message = done(chat(alice, "xem pod", cid))["message"]
+    alice = users["alice"]  # staging: lệnh đọc R0 không được tự chạy khi có nội dung untrusted (dev thì được, xem test_approval_flow)
+    cid = chat(alice, "tìm log lỗi", env="staging")[0]["conversation_id"]
+    message = done(chat(alice, "xem pod", cid, env="staging"))["message"]
     assert message["steps"][0]["status"] == "pending"
     assert any("untrusted" in r for r in message["steps"][0]["reasons"])
 

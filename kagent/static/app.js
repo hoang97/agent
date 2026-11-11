@@ -461,18 +461,21 @@ function grantPolicyCard(p) {
     const mode = h("select", { "aria-label": `Phạm vi ở ${e}`, disabled: !isAdmin() },
       Object.entries(GRANT_MODE).filter(([k]) => !(e === "prod" && k === "all")).map(([k, label]) => h("option", { value: k, selected: cur.untrusted === k }, label)));
     const conf = h("input", { type: "number", min: 0, max: 1, step: 0.05, value: String(cur.min_confidence), "aria-label": `Tin cậy tối thiểu ở ${e}`, disabled: !isAdmin() });
-    controls[e] = { mode, conf };
-    return h("tr", {}, h("td", {}, e), h("td", {}, mode), h("td", {}, conf));
+    const auto = h("select", { "aria-label": `Lệnh đọc tự chạy ở ${e}`, disabled: !isAdmin() },
+      [["none", "không"], ["R0", "R0 (đọc thường)"], ["R1", "R0, R1 (cả đọc nhạy cảm)"]].filter(([k]) => !(e === "prod" && k === "R1"))
+        .map(([k, label]) => h("option", { value: k, selected: cur.untrusted_auto === k }, label)));
+    controls[e] = { mode, conf, auto };
+    return h("tr", {}, h("td", {}, e), h("td", {}, auto), h("td", {}, mode), h("td", {}, conf));
   });
   const save = guard(async () => {
-    const grant_policy = Object.fromEntries(envs.map((e) => [e, { untrusted: controls[e].mode.value, min_confidence: Number(controls[e].conf.value) }]));
+    const grant_policy = Object.fromEntries(envs.map((e) => [e, { untrusted: controls[e].mode.value, min_confidence: Number(controls[e].conf.value), untrusted_auto: controls[e].auto.value }]));
     await api("PATCH", "/api/tenant", { grant_policy });
     toast("Đã lưu");
     renderShell();
   });
   return h("div", { class: "card" },
-    h("p", { class: "small" }, "Khi kế hoạch của agent chịu ảnh hưởng từ nội dung untrusted (log, trang web), mọi lệnh đều phải hỏi. Bảng này quy định quyền \"Cho phép trong 1 giờ\" có được thay cho việc hỏi lại ở từng môi trường không, và điểm tin cậy tối thiểu của lệnh. Không có nội dung untrusted thì quyền này luôn có hiệu lực. Ở prod không cho phủ lệnh ghi."),
-    h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Môi trường"), h("th", {}, "Grant phủ khi có nội dung untrusted"), h("th", {}, "Tin cậy tối thiểu"))), h("tbody", {}, rows)),
+    h("p", { class: "small" }, "Khi kế hoạch của agent chịu ảnh hưởng từ nội dung untrusted (log, trang web), mọi lệnh đều phải hỏi. Bảng này quy định, ở từng môi trường: lệnh đọc mức nào vẫn tự chạy; và quyền \"Cho phép trong 1 giờ\" có được thay cho việc hỏi lại không, với điểm tin cậy tối thiểu của lệnh. Không có nội dung untrusted thì quyền này luôn có hiệu lực. Ở prod không cho phủ lệnh ghi."),
+    h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Môi trường"), h("th", {}, "Lệnh đọc tự chạy, không cần grant"), h("th", {}, "Grant phủ thêm"), h("th", {}, "Tin cậy tối thiểu của grant"))), h("tbody", {}, rows)),
     isAdmin() && h("div", { class: "row" }, h("button", { onclick: save }, "Lưu")));
 }
 

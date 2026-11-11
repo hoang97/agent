@@ -309,7 +309,7 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
 
     tenant = conn.execute("SELECT change_freeze, write_quota_daily, self_approve FROM tenant WHERE id=?", (ctx.tenant_id,)).fetchone()
     forced: list[str] = []
-    if ctx.tainted:
+    if ctx.tainted and not _auto_read_despite_taint(grant_policy(conn, ctx.tenant_id), ctx.env, meta["action_class"], tier):
         forced.append(UNTRUSTED_REASON)
     if meta["action_class"] != "read":
         unseen = _unseen_object(conn, ctx, args)
@@ -371,9 +371,11 @@ def self_approve_enabled(conn, tenant_id: str) -> bool:
 UNTRUSTED_REASON = "kế hoạch chịu ảnh hưởng từ nội dung untrusted"
 GRANT_MODES = ("off", "read", "all")
 # Grant "cho phép trong 1 giờ" có được vượt qua lý do untrusted không, theo môi trường. Tenant admin chỉnh được.
-DEFAULT_GRANT_POLICY = {"dev": {"untrusted": "read", "min_confidence": 0.0},
-                        "staging": {"untrusted": "read", "min_confidence": 0.5},
-                        "prod": {"untrusted": "off", "min_confidence": 0.8}}
+# untrusted_auto: mức cao nhất của lệnh đọc vẫn tự chạy khi kế hoạch chịu ảnh hưởng từ nội dung untrusted (none | R0 | R1).
+AUTO_READ_TIERS = ("none", "R0", "R1")
+DEFAULT_GRANT_POLICY = {"dev": {"untrusted": "read", "min_confidence": 0.0, "untrusted_auto": "R0"},
+                        "staging": {"untrusted": "read", "min_confidence": 0.5, "untrusted_auto": "none"},
+                        "prod": {"untrusted": "off", "min_confidence": 0.8, "untrusted_auto": "none"}}
 
 
 def check_grant_policy(policy: dict) -> dict:
@@ -382,17 +384,22 @@ def check_grant_policy(policy: dict) -> dict:
         raise PolicyError(f"chính sách grant phải là object theo môi trường {list(ENVS)}")
     merged = copy.deepcopy(DEFAULT_GRANT_POLICY)
     for env, conf in policy.items():
-        if not isinstance(conf, dict) or set(conf) - {"untrusted", "min_confidence"}:
-            raise PolicyError(f"{env}: chỉ gồm untrusted và min_confidence")
+        if not isinstance(conf, dict) or set(conf) - {"untrusted", "min_confidence", "untrusted_auto"}:
+            raise PolicyError(f"{env}: chỉ gồm untrusted, min_confidence và untrusted_auto")
         mode = conf.get("untrusted", merged[env]["untrusted"])
         value = conf.get("min_confidence", merged[env]["min_confidence"])
+        auto = conf.get("untrusted_auto", merged[env]["untrusted_auto"])
+        if auto not in AUTO_READ_TIERS:
+            raise PolicyError(f"{env}: untrusted_auto phải thuộc {list(AUTO_READ_TIERS)}")
+        if env == "prod" and auto == "R1":
+            raise PolicyError("prod chỉ cho lệnh đọc R0 tự chạy khi có nội dung untrusted")
         if mode not in GRANT_MODES:
             raise PolicyError(f"{env}: untrusted phải thuộc {list(GRANT_MODES)}")
         if env == "prod" and mode == "all":
             raise PolicyError("prod không được cho grant phủ lệnh ghi khi kế hoạch chịu ảnh hưởng từ nội dung untrusted")
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
             raise PolicyError(f"{env}: min_confidence phải nằm trong 0..1")
-        merged[env] = {"untrusted": mode, "min_confidence": float(value)}
+        merged[env] = {"untrusted": mode, "min_confidence": float(value), "untrusted_auto": auto}
     return merged
 
 
@@ -402,6 +409,11 @@ def grant_policy(conn, tenant_id: str) -> dict:
         return check_grant_policy(json.loads(r["grant_policy"]) if r and r["grant_policy"] else {})
     except (PolicyError, ValueError):
         return copy.deepcopy(DEFAULT_GRANT_POLICY)
+
+
+def _auto_read_despite_taint(policy: dict, env: str, action_class: str, tier: str) -> bool:
+    limit = (policy.get(env) or {}).get("untrusted_auto", "none")
+    return action_class == "read" and limit != "none" and TIERS.index(tier) <= TIERS.index(limit)
 
 
 def grant_covers(policy: dict, env: str, action_class: str, confidence: float, forced: list[str]) -> bool:

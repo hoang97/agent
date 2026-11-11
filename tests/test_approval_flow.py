@@ -65,7 +65,7 @@ def test_grant_policy_api_validates_and_requires_admin(users):
     assert admin.patch("/api/tenant", json={"grant_policy": {"qa": {}}}).status_code == 400
     assert alice.patch("/api/tenant", json={"grant_policy": {"dev": {"untrusted": "off"}}}).status_code == 403
     saved = admin.patch("/api/tenant", json={"grant_policy": {"staging": {"untrusted": "all", "min_confidence": 0.7}}}).json()["grant_policy"]
-    assert saved["staging"] == {"untrusted": "all", "min_confidence": 0.7} and saved["dev"] == gateway.DEFAULT_GRANT_POLICY["dev"]
+    assert saved["staging"] == {"untrusted": "all", "min_confidence": 0.7, "untrusted_auto": "none"} and saved["dev"] == gateway.DEFAULT_GRANT_POLICY["dev"]
 
 
 def test_session_grant_runs_other_pending_reads_of_same_tool(users):
@@ -121,3 +121,25 @@ def test_history_carries_full_result_of_latest_approved_commands(users):
     # Trước đây chỉ 300 ký tự đầu của kết quả vào lịch sử, nên agent không bao giờ thấy các bản ghi sau.
     assert "req-0059" in last and "<untrusted>" in last and "đã cắt" not in last
     assert history["tainted"] is True
+
+
+def test_tainted_r0_read_runs_in_dev_but_asks_in_staging(users):
+    alice = users["alice"]
+    cid = _tainted_conversation(alice)
+    step = done(chat(alice, "xem pod", cid))["message"]["steps"][0]
+    assert step["tool"] == "k8s.list_pods" and step["status"] == "ok" and gateway.UNTRUSTED_REASON not in step["reasons"]
+    cid = _tainted_conversation(alice, env="staging")
+    step = done(chat(alice, "xem pod", cid, env="staging"))["message"]["steps"][0]
+    assert step["status"] == "pending" and gateway.UNTRUSTED_REASON in step["reasons"]
+
+
+def test_tainted_auto_tier_is_configurable_and_limited_in_prod(users):
+    admin, alice = users["admin"], users["alice"]
+    assert admin.patch("/api/tenant", json={"grant_policy": {"prod": {"untrusted_auto": "R1"}}}).status_code == 400
+    assert admin.patch("/api/tenant", json={"grant_policy": {"dev": {"untrusted_auto": "R2"}}}).status_code == 400
+    admin.patch("/api/tenant", json={"grant_policy": {"dev": {"untrusted_auto": "none"}}})
+    cid = _tainted_conversation(alice)
+    assert done(chat(alice, "xem pod", cid))["message"]["steps"][0]["status"] == "pending"
+    admin.patch("/api/tenant", json={"grant_policy": {"dev": {"untrusted_auto": "R1"}}})
+    cid = _tainted_conversation(alice)
+    assert done(chat(alice, "tìm log lỗi", cid))["message"]["steps"][0]["status"] == "ok"  # search_logs là R1
