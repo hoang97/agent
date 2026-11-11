@@ -248,7 +248,7 @@ def test_member_creates_personal_connection_private_to_them(users):
     r = new_k8s(alice)
     assert r.status_code == 200, r.text
     c = r.json()
-    assert c["personal"] and c["secrets_set"] == {"token": True} and fakes.K8S_TOKEN not in r.text
+    assert c["personal"] and c["secrets_set"] == {"kubeconfig": False, "token": True} and fakes.K8S_TOKEN not in r.text
     tools_ = {t["tool"]: t for t in c["tools"]}
     assert tools_["my_k8s.list_pods"]["enabled"] == 1 and tools_["my_k8s.scale"]["enabled"] == 0  # ghi mặc định tắt
     assert all(x["name"] != "my_k8s" for x in bob.get("/api/connections").json())
@@ -278,7 +278,7 @@ def test_shared_connection_requires_admin(users):
     assert new_k8s(users["alice"], scope="tenant", name="shared_k8s").status_code == 403
     assert new_k8s(users["admin"], scope="tenant", name="shared_k8s").status_code == 200
     c = next(x for x in users["alice"].get("/api/connections").json() if x["name"] == "shared_k8s")
-    assert c["can_manage"] is False and c["secrets_set"] == {"token": True}
+    assert c["can_manage"] is False and c["secrets_set"] == {"kubeconfig": False, "token": True}
     assert users["alice"].patch(f"/api/connections/{c['id']}", json={"title": "x"}).status_code == 403
     assert users["alice"]._call("DELETE", f"/api/connections/{c['id']}").status_code == 403
 
@@ -294,7 +294,7 @@ def test_private_network_needs_org_admin(client, users):
 
 @pytest.mark.parametrize("body,message", [
     ({"name": "K8S"}, "tên kết nối"), ({"name": "k8s"}, "đã có"), ({"template": "khong"}, "template"),
-    ({"secrets": {}}, "thiếu token"), ({"params": {}}, "thiếu api_url"), ({"envs": ["qa"]}, "môi trường"),
+    ({"secrets": {}}, "cần token"), ({"params": {}}, "cần api_url"), ({"envs": ["qa"]}, "môi trường"),
     ({"params": {"api_url": "https://k8s.test", "bogus": 1}}, "không có trong template"),
 ])
 def test_connection_validation(users, body, message):

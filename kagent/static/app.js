@@ -322,6 +322,8 @@ function connectionForm(templates, existing, onDone) {
       let input;
       if (f.type === "boolean") input = h("input", { type: "checkbox", checked: current !== undefined ? current : f.default === true });
       else if (f.type === "text") input = h("textarea", { rows: 3, value: current || "" });
+      else if (f.type === "secret_text") input = h("textarea", { rows: 6, class: "code", spellcheck: "false", autocomplete: "off",
+        placeholder: existing && existing.secrets_set[f.name] ? "đã lưu, để trống để giữ nguyên" : "" });
       else {
         const isSecret = f.type === "secret";
         const set = existing && existing.secrets_set[f.name];
@@ -341,13 +343,13 @@ function connectionForm(templates, existing, onDone) {
     const params = {}, secrets = {};
     for (const [key, { f, input }] of Object.entries(inputs)) {
       if (f.type === "boolean") params[key] = input.checked;
-      else if (f.type === "secret") { if (input.value) secrets[key] = input.value; }
+      else if (f.type === "secret" || f.type === "secret_text") { if (input.value.trim()) secrets[key] = input.value; }
       else if (input.value.trim() !== "") params[key] = f.type === "integer" ? Number(input.value) : input.value;
     }
     const body = { title: title.value, envs, params, secrets, ...(scope.value === "tenant" ? { roles } : {}), ...(state.me.is_org_admin ? { allow_private: allowPrivate.checked } : {}) };
     const saved = existing ? await api("PATCH", `/api/connections/${existing.id}`, body)
       : await api("POST", "/api/connections", { ...body, template: tplSelect.value, name: name.value.trim(), scope: scope.value });
-    for (const { input } of Object.values(inputs)) if (input.type === "password") input.value = "";
+    for (const { input, f } of Object.values(inputs)) if (input.type === "password" || (f && f.type === "secret_text")) input.value = "";
     toast(existing ? "Đã lưu kết nối" : `Đã tạo kết nối ${saved.name}. Công cụ đọc đã bật; công cụ ghi đang tắt, bật ở trang Công cụ & Chính sách.`);
     onDone();
   });

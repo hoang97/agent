@@ -27,11 +27,11 @@ REVERSIBLE = ("yes", "partial", "no", "n/a")
 BLAST_RADIUS = ("object", "workload", "namespace", "cluster")
 SENSITIVITY = ("public", "internal", "personal", "confidential", "secret")
 DRY_RUN = ("none", "server")
-FIELD_TYPES = ("string", "url", "secret", "text", "boolean", "integer", "list")
+FIELD_TYPES = ("string", "url", "secret", "secret_text", "text", "boolean", "integer", "list")
 ROLE_CHOICES = ("member", "tenant_admin", "approver:dev", "approver:staging", "approver:prod")
 HINTS = ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")
 UNCLASSIFIED = {"action_class": "destructive", "reversible": "no", "blast_radius": "workload", "data_sensitivity": "internal"}
-FILE_KEYS = {"template", "title", "description", "ping", "fields", "tools"}
+FILE_KEYS = {"template", "title", "description", "ping", "validate", "fields", "tools"}
 TOOL_KEYS = {"name", "description", "handler", "check", "action_class", "reversible", "blast_radius", "data_sensitivity", "dry_run",
              "untrusted_output", "risk_tier", "rollback_hint", "annotations", "input_schema"}
 FIELD_KEYS = {"name", "type", "required", "default", "description"}
@@ -55,7 +55,7 @@ class Field:
 
     @property
     def secret(self) -> bool:
-        return self.type == "secret"
+        return self.type in ("secret", "secret_text")
 
 
 @dataclass
@@ -95,6 +95,7 @@ class Template:
     ping: Callable
     fields: list[Field]
     tools: dict[str, ToolSpec]
+    validate: Callable | None = None  # kiểm tra chéo giữa các tham số khi tạo hoặc sửa kết nối
 
 
 def minimum_tier(action_class: str, reversible: str, blast_radius: str, data_sensitivity: str) -> str:
@@ -230,6 +231,7 @@ def load_templates(directory: Path = TEMPLATE_DIR) -> dict[str, Template]:
         if len({f.name for f in fields}) != len(fields):
             local.append(f"{path.name}: tên tham số kết nối bị trùng")
         ping = _resolve(doc.get("ping"), f"{path.name}:ping", local)
+        validate = _resolve(doc["validate"], f"{path.name}:validate", local) if "validate" in doc else None
         tools: dict[str, ToolSpec] = {}
         for entry in doc["tools"]:
             tool_errors: list[str] = []
@@ -242,7 +244,7 @@ def load_templates(directory: Path = TEMPLATE_DIR) -> dict[str, Template]:
             tools[spec.name] = spec
         errors += local
         if not local:
-            templates[name] = Template(name, str(doc.get("title") or name), str(doc.get("description") or ""), ping, fields, tools)
+            templates[name] = Template(name, str(doc.get("title") or name), str(doc.get("description") or ""), ping, fields, tools, validate)
     if errors:
         raise CatalogError(errors)
     return templates

@@ -64,7 +64,7 @@ def _clean(template: Template, params: dict, secrets: dict, old_params: dict, ol
             if f.required and not value:
                 raise _err(f"thiếu {f.name}")
             if value:
-                if len(value) > 20000:
+                if len(value) > (100_000 if f.type == "secret_text" else 20000):
                     raise _err(f"{f.name} quá dài")
                 hidden[f.name] = value
             continue
@@ -94,6 +94,11 @@ def _clean(template: Template, params: dict, secrets: dict, old_params: dict, ol
                 except net.NetError as exc:
                     raise _err(f"{f.name}: {exc}") from exc
         clean[f.name] = value
+    if template.validate:
+        try:
+            template.validate({**clean, **hidden, "_allow_private": allow_private})
+        except (ConnectorError, net.NetError) as exc:
+            raise _err(str(exc)) from exc
     if "host" in clean:  # kết nối CSDL: kiểm tra địa chỉ ngay khi tạo
         try:
             net.check_host(clean["host"], int(clean.get("port") or 0) or 5432, allow_private)

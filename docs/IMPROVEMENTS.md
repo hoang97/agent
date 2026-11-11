@@ -119,3 +119,10 @@ Dựng MVP theo `docs/PLAN.md`.
 - **Phát hiện khi thử kết nối thật của người dùng:** kết nối "Kibana devtest" báo `HTTP 302 : ` vì URL là Kibana, còn connector gọi API của Elasticsearch nên bị chuyển sang `/login`. Kết nối PostgreSQL báo `ConnectionTimeout` mà không rõ lý do: host `postgres-cluster-rw.postgres-cluster` là tên dịch vụ Kubernetes, còn DNS của mạng văn phòng lại phân giải nó ra một IP công khai.
 - **Kibana:** connector Elasticsearch nhận ra Kibana (header `kbn-name` hoặc chuyển hướng tới `/login`) rồi gửi lệnh qua Console proxy `/api/console/proxy`. Với Elasticsearch thường, mỗi lệnh vẫn chỉ gửi một lần.
 - **Lỗi dễ hiểu hơn:** lỗi 3xx nói rõ bị chuyển hướng tới đâu. Lỗi kết nối CSDL nêu `host:port` và lỗi của driver. Tên máy có dạng `service.namespace` hoặc `*.svc` thì có thêm gợi ý rằng tên đó chỉ phân giải được trong cluster.
+
+## Đợt 16 — 2026-11-11: kết nối Kubernetes bằng kubeconfig
+
+- **Theo yêu cầu của chủ dự án:** template `k8s` nhận nội dung kubeconfig (field `kubeconfig`, secret nhiều dòng) và `context` tùy chọn. `api_url` và `token` không còn bắt buộc; điền tay thì được ưu tiên hơn giá trị trong kubeconfig, ví dụ khi `server` trong kubeconfig là địa chỉ mà máy chủ kagent không tới được.
+- **Hỗ trợ:** token, chứng chỉ client (mTLS), `certificate-authority-data`, `insecure-skip-tls-verify`. Không chạy được `exec`/`auth-provider` (aws, gcloud, oidc) vì máy chủ không được chạy lệnh ngoài; kubeconfig trỏ tới file trên máy cũng bị từ chối. Cả hai trường hợp đều báo rõ cách xử lý.
+- **An toàn:** kubeconfig được mã hóa như mọi secret, không trả về giao diện. Địa chỉ `server` qua cùng lớp chống SSRF. Chứng chỉ client được ghi tạm với quyền 600 để nạp vào TLS, rồi xóa ngay.
+- **Template:** thêm khóa `validate` để kiểm tra chéo các tham số khi tạo hoặc sửa kết nối, và kiểu field `secret_text`.

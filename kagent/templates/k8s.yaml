@@ -1,10 +1,13 @@
 template: k8s
 title: Kubernetes
-description: API server Kubernetes, xác thực bằng token ServiceAccount. Nên cấp RBAC tối thiểu cho ServiceAccount.
+description: API server Kubernetes, xác thực bằng token ServiceAccount hoặc file kubeconfig. Nên cấp RBAC tối thiểu cho tài khoản dùng ở đây.
 ping: k8s:ping
+validate: k8s:validate_params
 fields:
-  - {name: api_url, type: url, required: true, description: "Địa chỉ API server, ví dụ https://k8s.example.com:6443"}
-  - {name: token, type: secret, required: true, description: Token của ServiceAccount}
+  - {name: kubeconfig, type: secret_text, description: "Nội dung kubeconfig có nhúng sẵn chứng chỉ, xuất bằng: kubectl config view --raw --minify --flatten. Dùng được token hoặc chứng chỉ client; không hỗ trợ exec/auth-provider"}
+  - {name: context, type: string, description: "Context trong kubeconfig; để trống thì dùng current-context"}
+  - {name: api_url, type: url, description: "Địa chỉ API server, ví dụ https://k8s.example.com:6443; bắt buộc nếu không có kubeconfig, điền thì thay server trong kubeconfig"}
+  - {name: token, type: secret, description: "Token của ServiceAccount; bắt buộc nếu không có kubeconfig, điền thì thay thông tin xác thực trong kubeconfig"}
   - {name: ca_cert, type: text, description: Chứng chỉ CA dạng PEM nếu cụm dùng CA riêng}
   - {name: verify_tls, type: boolean, default: true, description: Kiểm tra chứng chỉ TLS}
   - {name: namespace, type: string, default: default, description: Namespace mặc định}

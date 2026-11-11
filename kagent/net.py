@@ -81,24 +81,47 @@ class PinnedTransport(httpx.HTTPTransport):
         return super().handle_request(request)
 
 
-def tls_context(verify: bool = True, ca_pem: str | None = None) -> ssl.SSLContext:
-    """Dùng bộ CA của certifi (như httpx mặc định) để chạy giống nhau trên mọi hệ điều hành; CA riêng được nạp thêm."""
+def tls_context(verify: bool = True, ca_pem: str | None = None, client_cert: tuple[str, str] | None = None) -> ssl.SSLContext:
+    """Dùng bộ CA của certifi (như httpx mặc định) để chạy giống nhau trên mọi hệ điều hành; CA riêng được nạp thêm.
+
+    client_cert là (PEM chứng chỉ, PEM khóa riêng) cho mTLS.
+    """
     import certifi
     ctx = ssl.create_default_context(cafile=certifi.where())
-    if ca_pem:
-        ctx.load_verify_locations(cadata=ca_pem)
+    try:
+        if ca_pem:
+            ctx.load_verify_locations(cadata=ca_pem)
+        if client_cert:
+            _load_client_cert(ctx, *client_cert)
+    except (ssl.SSLError, ValueError) as exc:
+        raise NetError(f"chứng chỉ TLS không hợp lệ ({exc.__class__.__name__})") from exc
     if not verify:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     return ctx
 
 
+def _load_client_cert(ctx: ssl.SSLContext, cert_pem: str, key_pem: str) -> None:
+    import os
+    import tempfile
+    # ssl chỉ nạp chứng chỉ từ file: ghi tạm với quyền 600, nạp xong xóa ngay.
+    with tempfile.TemporaryDirectory(prefix="kagent-tls-") as d:
+        paths = []
+        for name, data in (("cert.pem", cert_pem), ("key.pem", key_pem)):
+            path = os.path.join(d, name)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(data)
+            paths.append(path)
+        ctx.load_cert_chain(*paths)
+
+
 def client(base_url: str | None, *, allow_private: bool, verify: bool = True, ca_pem: str | None = None,
-           headers: dict | None = None, timeout: float = 20.0, auth=None) -> httpx.Client:
+           headers: dict | None = None, timeout: float = 20.0, auth=None, client_cert: tuple[str, str] | None = None) -> httpx.Client:
     if transport_override is not None:
         def guard(request: httpx.Request) -> None:
             check_host(request.url.host, request.url.port or default_port(request.url.scheme), allow_private)
         return httpx.Client(base_url=base_url or "", headers=headers, timeout=timeout, transport=transport_override(),
                             follow_redirects=False, event_hooks={"request": [guard]}, auth=auth)
-    transport = PinnedTransport(allow_private=allow_private, verify=tls_context(verify, ca_pem))
+    transport = PinnedTransport(allow_private=allow_private, verify=tls_context(verify, ca_pem, client_cert))
     return httpx.Client(base_url=base_url or "", headers=headers, timeout=timeout, transport=transport, follow_redirects=False, auth=auth)

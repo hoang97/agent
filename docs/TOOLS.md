@@ -10,9 +10,9 @@ Agent chỉ dùng công cụ thật. Mỗi công cụ được tạo từ một 
 
 | Template | Công cụ (mức rủi ro) | Tham số chính |
 | --- | --- | --- |
-| `k8s` Kubernetes | list_pods R0, list_deployments R0, pod_logs R1, scale R2, rollout_restart R3, delete_pod R3, exec R4 | api_url, token ServiceAccount, ca_cert, namespace, allowed_namespaces, max_replicas |
+| `k8s` Kubernetes | list_pods R0, list_deployments R0, pod_logs R1, scale R2, rollout_restart R3, delete_pod R3, exec R4 | kubeconfig (+ context) hoặc api_url + token ServiceAccount, ca_cert, namespace, allowed_namespaces, max_replicas. Kubeconfig phải nhúng sẵn chứng chỉ (`kubectl config view --raw --minify --flatten`); dùng token hoặc chứng chỉ client, không hỗ trợ exec/auth-provider; api_url, token điền tay được ưu tiên hơn kubeconfig |
 | `grafana` | search_dashboards, list_datasources, prometheus_query, list_alerts (R0), create_silence R3 | url, token service account, default_datasource_uid |
-| `elasticsearch` (Kibana) | search_logs R1, list_indices R0, delete_index R3 | url, api_key hoặc username/password, index_pattern |
+| `elasticsearch` (Kibana) | search_logs R1, list_indices R0, delete_index R3 | url Elasticsearch hoặc Kibana (đi qua Console proxy), api_key hoặc username/password, index_pattern |
 | `web` | fetch_page R0 | allowed_domains, max_chars |
 | `http_api` | get R1, post R3 | base_url, auth_header, auth_value, allowed_paths |
 | `postgres`, `mysql` | query R1 (chỉ đọc, 15 giây, 200 dòng), execute R3 (có chạy thử rồi rollback) | host, port, database, user, password |
@@ -56,7 +56,8 @@ Khi tạo kết nối, công cụ đọc được bật ngay; công cụ ghi, x�
    title: Tên hiển thị
    description: Mô tả ngắn
    ping: module:ham_kiem_tra        # dùng cho nút "Kiểm tra"
-   fields:                           # type: string | url | secret | text | boolean | integer | list
+   validate: module:ham_kiem_tham_so # tùy chọn: kiểm tra chéo các tham số khi tạo/sửa kết nối, báo lỗi bằng ConnectorError
+   fields:                           # type: string | url | secret | secret_text (secret nhiều dòng) | text | boolean | integer | list
      - {name: url, type: url, required: true, description: Địa chỉ dịch vụ}
      - {name: token, type: secret, required: true}
    tools:
