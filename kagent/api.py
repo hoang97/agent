@@ -271,15 +271,49 @@ def llm_key_status(_: Principal = Depends(require_org_admin), conn=Depends(get_c
     return vault.status(conn)
 
 
-@app.post("/api/settings/llm-key")
-def llm_key_save(body: LLMKey, principal: Principal = Depends(require_org_admin), conn=Depends(get_conn)):
-    key = body.key.strip()
+def _clean_key(value: str) -> str:
+    key = value.strip()
     if not 20 <= len(key) <= 300 or any(c.isspace() or not c.isprintable() for c in key):
         raise HTTPException(400, "key không đúng định dạng")
+    return key
+
+
+def _check_endpoint(body) -> None:
     if body.auth_type not in ("api_key", "token"):
         raise HTTPException(400, "loại xác thực không hợp lệ")
     if body.provider not in ("anthropic", "openai"):
         raise HTTPException(400, "nhà cung cấp không hợp lệ")
+
+
+class LLMModelsQuery(BaseModel):
+    key: str = ""  # để trống thì dùng credential đang dùng
+    base_url: str | None = None
+    auth_type: str = "api_key"
+    provider: str = "anthropic"
+
+
+@app.post("/api/settings/llm-models")
+def llm_models(body: LLMModelsQuery, _: Principal = Depends(require_org_admin)):
+    _check_endpoint(body)
+    try:
+        base_url = llm.check_base_url(body.base_url)
+        if body.key.strip():
+            cred = vault.Credential(_clean_key(body.key), base_url, body.auth_type, body.provider)
+        else:
+            current = vault.resolve()[0]
+            # Chỉ dùng lại key đã lưu cho đúng endpoint đã lưu: đổi Base URL mà không nhập key sẽ gửi key đó tới máy chủ khác.
+            if current is None or current.base_url != base_url or current.provider != body.provider:
+                raise HTTPException(400, "hãy nhập key, hoặc giữ nguyên nhà cung cấp và Base URL đã lưu")
+            cred = current
+        return {"models": llm.list_models(cred)}
+    except llm.LLMError as exc:
+        raise HTTPException(400, f"không lấy được danh sách model: {exc}") from exc
+
+
+@app.post("/api/settings/llm-key")
+def llm_key_save(body: LLMKey, principal: Principal = Depends(require_org_admin), conn=Depends(get_conn)):
+    key = _clean_key(body.key)
+    _check_endpoint(body)
     strong, fast = _clean_model(body.model_strong), _clean_model(body.model_fast)
     if body.provider == "openai" and not strong:
         raise HTTPException(400, "OpenAI cần tên model")

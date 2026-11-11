@@ -659,6 +659,42 @@ def validate_key(cred: vault.Credential) -> None:
         raise LLMError("endpoint trả về dữ liệu không hợp lệ") from exc
 
 
+MAX_MODELS = 500
+
+
+def _list_error(exc: Exception) -> LLMError:
+    status = getattr(exc, "status_code", None)
+    if status in (401, 403):
+        return LLMError("endpoint từ chối credential này")
+    if status in (404, 405):
+        return LLMError("endpoint không hỗ trợ liệt kê model; hãy nhập tên model bằng tay")
+    if status == 429:
+        return LLMError("endpoint đang giới hạn tốc độ, thử lại sau")
+    if status:
+        return LLMError(f"endpoint trả lỗi {status}")
+    if isinstance(exc, (anthropic.APIConnectionError, openai.APIConnectionError)):
+        return LLMError("máy chủ không kết nối được tới endpoint")
+    return LLMError("endpoint trả về dữ liệu không hợp lệ")
+
+
+def list_models(cred: vault.Credential) -> list[dict]:
+    """Danh sách model mà credential dùng được, qua Models API của nhà cung cấp."""
+    out: dict[str, str] = {}
+    try:
+        if cred.provider == "openai":
+            pages = _openai_client(cred, timeout=30, max_retries=1).models.list()
+        else:
+            pages = _client(cred, timeout=30, max_retries=1).models.list(limit=1000)
+        for m in pages:  # SDK tự lật trang
+            if isinstance(m.id, str) and m.id:
+                out[m.id] = getattr(m, "display_name", None) or m.id
+            if len(out) >= MAX_MODELS:
+                break
+    except (anthropic.AnthropicError, openai.OpenAIError) as exc:
+        raise _list_error(exc) from exc
+    return [{"id": k, "name": out[k]} for k in sorted(out)]
+
+
 _override = None
 _cached: tuple[vault.Credential, _StructuredProvider] | None = None
 

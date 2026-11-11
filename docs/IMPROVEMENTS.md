@@ -107,3 +107,9 @@ Dựng MVP theo `docs/PLAN.md`.
 - **Không chấm:** lượt bị dừng, lượt còn lệnh chờ duyệt, và episode đã có kết quả (từ công cụ hoặc người dùng). Phản hồi người dùng gửi cùng lúc không bị ghi đè.
 - **An toàn:** episode có nội dung untrusted mà judge chấm thành công thì không cộng điểm hữu ích cho KU đã dùng, vì nội dung đó có thể lái lời chấm.
 - **README:** ghi rõ cần Python 3.10 trở lên; Python 3.9 không cài được.
+
+## Đợt 14 — 2026-11-11: Docker Compose và lấy danh sách model
+
+- **Docker Compose:** thêm `Dockerfile`, `docker-compose.yml`, `.dockerignore`. Image gốc kéo qua registry nội bộ, pip cài qua Nexus, vì ở mạng nội bộ đường Internet trực tiếp tới PyPI và mirror Debian quá chậm (pip timeout, `apt-get update` treo). Dùng bản `python:3.12-bookworm` đầy đủ vì có sẵn `git`, khỏi cần apt.
+- **Lấy danh sách model:** tab Cài đặt có nút "Lấy danh sách model", gọi `POST /api/settings/llm-models` (org admin) rồi gợi ý tên model cho hai ô model. Dùng Models API của Anthropic (tự lật trang) hoặc OpenAI. Endpoint không hỗ trợ liệt kê thì báo để nhập tay.
+- **An toàn:** ô key để trống thì dùng key đang lưu, nhưng chỉ khi nhà cung cấp và Base URL trùng cấu hình đã lưu; nếu không, đổi Base URL là gửi được key đã lưu tới máy chủ khác. Base URL vẫn qua kiểm tra HTTPS và địa chỉ công khai. Phản hồi không chứa key.

@@ -499,8 +499,10 @@ VIEWS.settings = async (main) => {
   const describe = { ui: "Đang dùng key nhập trên giao diện", env: "Đang dùng key từ biến môi trường của máy chủ", none: "Chưa có key: agent chạy chế độ heuristic" }[s.source];
   const key = h("input", { type: "password", autocomplete: "off", placeholder: "Key hoặc token", "aria-label": "Key hoặc token", class: "wide" });
   const baseUrl = h("input", { type: "url", placeholder: "Base URL https://... (để trống nếu gọi thẳng nhà cung cấp)", "aria-label": "Base URL", class: "wide", value: s.base_url || "" });
-  const modelStrong = h("input", { "aria-label": "Model chính", class: "wide", value: s.model_strong || "" });
-  const modelFast = h("input", { "aria-label": "Model nhanh", class: "wide", placeholder: "Model nhanh (để trống thì dùng model chính)", value: s.model_fast || "" });
+  const modelList = h("datalist", { id: "llm-model-list" });
+  const modelStrong = h("input", { "aria-label": "Model chính", class: "wide", list: "llm-model-list", value: s.model_strong || "" });
+  const modelFast = h("input", { "aria-label": "Model nhanh", class: "wide", list: "llm-model-list", placeholder: "Model nhanh (để trống thì dùng model chính)", value: s.model_fast || "" });
+  const modelInfo = h("div", { class: "small" });
   const provider = h("select", { "aria-label": "Nhà cung cấp" }, h("option", { value: "anthropic", selected: s.provider !== "openai" }, "Anthropic hoặc relay Anthropic"), h("option", { value: "openai", selected: s.provider === "openai" }, "OpenAI hoặc tương thích OpenAI"));
   const authType = h("select", { "aria-label": "Loại xác thực" }, h("option", { value: "api_key", selected: s.auth_type !== "token" }, "API key (ANTHROPIC_API_KEY)"), h("option", { value: "token", selected: s.auth_type === "token" }, "Auth token (ANTHROPIC_AUTH_TOKEN)"));
   const save = guard(async (ev) => {
@@ -513,6 +515,12 @@ VIEWS.settings = async (main) => {
     await refreshMe();
   });
   const remove = guard(async () => { await api("DELETE", "/api/settings/llm-key"); toast("Đã xóa key"); await refreshMe(); });
+  const fetchModels = guard(async () => {
+    const r = await api("POST", "/api/settings/llm-models", { key: key.value, base_url: baseUrl.value || null, auth_type: authType.value, provider: provider.value });
+    modelList.replaceChildren(...r.models.map((m) => h("option", { value: m.id }, m.name !== m.id ? m.name : null)));
+    modelInfo.textContent = r.models.length ? `Có ${r.models.length} model; bấm vào ô model để chọn.` : "Endpoint không trả về model nào.";
+    toast(`Đã lấy ${r.models.length} model`);
+  });
   const syncProvider = () => {
     const isOpenAI = provider.value === "openai";
     authType.classList.toggle("hidden", isOpenAI);
@@ -525,8 +533,8 @@ VIEWS.settings = async (main) => {
       s.provider && h("div", { class: "small" }, `Nhà cung cấp: ${s.provider === "openai" ? "OpenAI" : "Anthropic"}${s.model_strong ? ` · Model: ${s.model_strong}${s.model_fast ? `, ${s.model_fast}` : ""}` : ""}`),
       s.base_url && h("div", { class: "small" }, "Endpoint: " + s.base_url),
       s.updated_at && h("div", { class: "small" }, `Cập nhật ${fmtTime(s.updated_at)} bởi ${s.updated_by}`),
-      h("form", { onsubmit: save }, h("div", { class: "row" }, provider, authType, baseUrl), h("div", { class: "row" }, modelStrong, modelFast), h("div", { class: "row" }, key, h("button", { type: "submit" }, "Kiểm tra và lưu"), s.source === "ui" && h("button", { type: "button", class: "danger", onclick: remove }, "Xóa key"))),
-      h("p", { class: "small" }, "Key dùng chung cho cả tổ chức, được kiểm tra trước khi lưu, mã hóa khi lưu và không hiển thị lại. Với relay và OpenAI, bước kiểm tra gửi một tin nhắn rất ngắn; nội dung nhiệm vụ đi qua máy chủ của dịch vụ đó. Giá trị nhập ở đây được ưu tiên hơn biến môi trường.")));
+      h("form", { onsubmit: save }, h("div", { class: "row" }, provider, authType, baseUrl), h("div", { class: "row" }, modelStrong, modelFast, h("button", { type: "button", onclick: fetchModels }, "Lấy danh sách model"), modelList), modelInfo, h("div", { class: "row" }, key, h("button", { type: "submit" }, "Kiểm tra và lưu"), s.source === "ui" && h("button", { type: "button", class: "danger", onclick: remove }, "Xóa key"))),
+      h("p", { class: "small" }, "Key dùng chung cho cả tổ chức, được kiểm tra trước khi lưu, mã hóa khi lưu và không hiển thị lại. Với relay và OpenAI, bước kiểm tra gửi một tin nhắn rất ngắn; nội dung nhiệm vụ đi qua máy chủ của dịch vụ đó. Giá trị nhập ở đây được ưu tiên hơn biến môi trường. Lấy danh sách model dùng key vừa nhập, hoặc key đang lưu nếu ô key để trống và giữ nguyên nhà cung cấp, Base URL.")));
 };
 
 VIEWS.account = async (main) => {
