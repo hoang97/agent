@@ -16,6 +16,21 @@ class ConnectorError(Exception):
     pass
 
 
+_K8S_SUFFIX = re.compile(r"\.(svc|svc\.cluster\.local|cluster\.local)$")
+
+
+def host_hint(host: str) -> str:
+    """Gợi ý khi tên máy có dạng dịch vụ Kubernetes (service.namespace), vốn chỉ phân giải được trong cluster."""
+    host = (host or "").lower().rstrip(".")
+    labels = host.split(".")
+    # Tên miền cấp cao nhất thật không chứa '-' hay số; 'x.y-z' gần như chắc là service.namespace.
+    k8s_like = bool(_K8S_SUFFIX.search(host)) or (len(labels) == 2 and not labels[-1].isalpha())
+    if not k8s_like:
+        return ""
+    return (f"; '{host}' có vẻ là tên dịch vụ trong Kubernetes, chỉ phân giải được từ bên trong cluster. "
+            "Dùng địa chỉ mà máy chủ kagent truy cập được (IP, NodePort, LoadBalancer, Ingress)")
+
+
 def as_list(value) -> list[str]:
     if not value:
         return []
@@ -72,13 +87,23 @@ def call(client: httpx.Client, method: str, path: str, *, params=None, json_body
     except net.NetError:
         raise
     except httpx.TimeoutException as exc:
-        raise ConnectorError("hết thời gian chờ phản hồi") from exc
+        raise ConnectorError("hết thời gian chờ phản hồi" + host_hint(client.base_url.host)) from exc
     except httpx.HTTPError as exc:
-        raise ConnectorError(f"lỗi kết nối ({exc.__class__.__name__})") from exc
+        raise ConnectorError(f"lỗi kết nối ({exc.__class__.__name__})" + host_hint(client.base_url.host)) from exc
     text = data.decode("utf-8", "replace")
     if with_status:
         return status, resp_headers, text
+    return parse(status, resp_headers, text, ok=ok, as_text=as_text)
+
+
+def parse(status: int, headers, text: str, *, ok=(200, 201, 202), as_text: bool = False):
+    """Đổi phản hồi đã đọc thành dữ liệu, hoặc ConnectorError dễ hiểu."""
     if status not in ok:
+        if 300 <= status < 400:
+            # Không tự theo chuyển hướng (chống SSRF), nên nói rõ bị chuyển đi đâu.
+            target = headers.get("location", "")
+            raise ConnectorError(f"HTTP {status}: bị chuyển hướng tới {clip(target, 200) or '(không rõ)'}; "
+                                 "kiểm tra lại URL, hoặc địa chỉ này cần đăng nhập qua trình duyệt")
         hint = {401: "thông tin xác thực sai hoặc hết hạn", 403: "tài khoản của kết nối không có quyền", 404: "không tìm thấy"}.get(status, "")
         raise ConnectorError(f"HTTP {status} {hint}: {clip(text, 300)}".replace("  ", " "))
     if as_text:

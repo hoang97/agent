@@ -113,3 +113,9 @@ Dựng MVP theo `docs/PLAN.md`.
 - **Docker Compose:** thêm `Dockerfile`, `docker-compose.yml`, `.dockerignore`. Image gốc kéo qua registry nội bộ, pip cài qua Nexus, vì ở mạng nội bộ đường Internet trực tiếp tới PyPI và mirror Debian quá chậm (pip timeout, `apt-get update` treo). Dùng bản `python:3.12-bookworm` đầy đủ vì có sẵn `git`, khỏi cần apt.
 - **Lấy danh sách model:** tab Cài đặt có nút "Lấy danh sách model", gọi `POST /api/settings/llm-models` (org admin) rồi gợi ý tên model cho hai ô model. Dùng Models API của Anthropic (tự lật trang) hoặc OpenAI. Endpoint không hỗ trợ liệt kê thì báo để nhập tay.
 - **An toàn:** ô key để trống thì dùng key đang lưu, nhưng chỉ khi nhà cung cấp và Base URL trùng cấu hình đã lưu; nếu không, đổi Base URL là gửi được key đã lưu tới máy chủ khác. Base URL vẫn qua kiểm tra HTTPS và địa chỉ công khai. Phản hồi không chứa key.
+
+## Đợt 15 — 2026-11-11: Kibana và thông báo lỗi kết nối
+
+- **Phát hiện khi thử kết nối thật của người dùng:** kết nối "Kibana devtest" báo `HTTP 302 : ` vì URL là Kibana, còn connector gọi API của Elasticsearch nên bị chuyển sang `/login`. Kết nối PostgreSQL báo `ConnectionTimeout` mà không rõ lý do: host `postgres-cluster-rw.postgres-cluster` là tên dịch vụ Kubernetes, còn DNS của mạng văn phòng lại phân giải nó ra một IP công khai.
+- **Kibana:** connector Elasticsearch nhận ra Kibana (header `kbn-name` hoặc chuyển hướng tới `/login`) rồi gửi lệnh qua Console proxy `/api/console/proxy`. Với Elasticsearch thường, mỗi lệnh vẫn chỉ gửi một lần.
+- **Lỗi dễ hiểu hơn:** lỗi 3xx nói rõ bị chuyển hướng tới đâu. Lỗi kết nối CSDL nêu `host:port` và lỗi của driver. Tên máy có dạng `service.namespace` hoặc `*.svc` thì có thêm gợi ý rằng tên đó chỉ phân giải được trong cluster.

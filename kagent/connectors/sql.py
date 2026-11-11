@@ -6,7 +6,7 @@ import decimal
 import uuid
 
 from .. import net
-from .base import ConnectorError, need
+from .base import ConnectorError, host_hint, need
 
 MAX_ROWS = 200
 TIMEOUT_MS = 15000
@@ -55,7 +55,10 @@ def _run(p, kind: str, sql: str, read_only: bool, commit: bool):
     except net.NetError:
         raise
     except Exception as exc:  # lỗi kết nối của driver
-        raise ConnectorError(f"không kết nối được CSDL: {exc.__class__.__name__}") from exc
+        detail = str(exc).strip().splitlines()[0][:200] if str(exc).strip() else ""
+        where = f"{p['host']}:{_port(p, kind)}"
+        raise ConnectorError(f"không kết nối được CSDL {where}: {exc.__class__.__name__}"
+                             + (f" ({detail})" if detail else "") + host_hint(p["host"])) from exc
     try:
         cur = conn.cursor()
         cur.execute(sql)

@@ -16,7 +16,7 @@ K8S_TOKEN = "k8s-test-token"
 GRAFANA_TOKEN = "grafana-test-token"
 ES_KEY = "es-test-key"
 PUBLIC_IP = "93.184.216.34"
-HOSTS = {"k8s.test": PUBLIC_IP, "grafana.test": PUBLIC_IP, "es.test": PUBLIC_IP, "example.test": PUBLIC_IP, "db.test": PUBLIC_IP,
+HOSTS = {"k8s.test": PUBLIC_IP, "grafana.test": PUBLIC_IP, "es.test": PUBLIC_IP, "kibana.test": PUBLIC_IP, "example.test": PUBLIC_IP, "db.test": PUBLIC_IP,
          "internal.test": "10.0.0.5", "metadata.test": "169.254.169.254", "loop.test": "127.0.0.1"}
 
 
@@ -55,6 +55,8 @@ class Infra:
             return self.grafana(request)
         if host == "es.test":
             return self.es(request)
+        if host == "kibana.test":
+            return self.kibana(request)
         if host == "example.test":
             if request.url.path == "/moved":
                 return httpx.Response(302, headers={"location": "http://internal.test/admin"})
@@ -118,6 +120,18 @@ class Infra:
             self.silences.append(json.loads(r.content))
             return self._json({"silenceID": f"s{len(self.silences)}"}, 202)
         return self._json({"message": "not found"}, 404)
+
+    # --- Kibana: chỉ Console proxy chuyển lệnh xuống Elasticsearch, đường dẫn khác bị đẩy sang trang đăng nhập ---
+    def kibana(self, r: httpx.Request) -> httpx.Response:
+        kbn = {"kbn-name": "kibana-test"}
+        if r.url.path != "/api/console/proxy":
+            return httpx.Response(302, headers={**kbn, "location": f"https://kibana.test/login?next={r.url.path}"})
+        if r.method != "POST" or r.headers.get("kbn-xsrf") != "true":
+            return httpx.Response(400, headers=kbn, json={"message": "missing kbn-xsrf"})
+        target = httpx.URL("https://es.test" + r.url.params["path"])
+        forwarded = httpx.Request(r.url.params["method"], target, headers={"authorization": r.headers.get("authorization", "")}, content=r.content)
+        upstream = self.es(forwarded)
+        return httpx.Response(upstream.status_code, headers=kbn, content=upstream.content)
 
     # --- Elasticsearch ---
     def es(self, r: httpx.Request) -> httpx.Response:

@@ -122,6 +122,47 @@ def test_elasticsearch(infra):
         elasticsearch.delete_index(p, {"index": "logs-*"})
 
 
+def test_elasticsearch_through_kibana_console_proxy(infra):
+    p = params(url="https://kibana.test", api_key=fakes.ES_KEY)
+    assert elasticsearch.ping(p)["version"] == "8.15.0"
+    assert elasticsearch.search_logs(p, {"query": "error"})["total"] == 2
+    assert [i["index"] for i in elasticsearch.list_indices(p, {})["indices"]] == ["logs-app", "logs-old"]
+    assert elasticsearch.delete_index(p, {"index": "logs-old"}) == {"deleted_index": "logs-old"}
+    proxied = [r for r in infra.requests if r.url.path == "/api/console/proxy"]
+    assert {r.url.params["method"] for r in proxied} == {"GET", "POST", "DELETE"}
+    assert any(r.url.params["path"].startswith("/_cat/indices?format=json") for r in proxied)
+
+
+def test_elasticsearch_direct_sends_each_request_once(infra):
+    p = params(url="https://es.test:9200", api_key=fakes.ES_KEY)
+    elasticsearch.delete_index(p, {"index": "logs-old"})
+    assert [r.method for r in infra.requests if r.url.path == "/logs-old"] == ["DELETE"]
+
+
+def test_redirect_error_says_where(infra):
+    p = params(url="https://example.test", api_key=fakes.ES_KEY)
+    with pytest.raises(ConnectorError, match="chuyển hướng tới http://internal.test/admin"):
+        with base.http(p, "url") as c:
+            base.call(c, "GET", "/moved")
+
+
+@pytest.mark.parametrize("host, hinted", [("postgres-cluster-rw.postgres-cluster", True), ("db.payments.svc", True),
+                                          ("pg.default.svc.cluster.local", True), ("db.example.com", False), ("10.0.0.5", False), ("db.test", False)])
+def test_host_hint_for_kubernetes_service_names(host, hinted):
+    assert bool(base.host_hint(host)) is hinted
+
+
+def test_sql_connect_error_names_host_and_hints(monkeypatch):
+    def refuse(*a, **k):
+        raise TimeoutError("connection timeout expired")
+
+    monkeypatch.setattr(sql, "_open", refuse)
+    with pytest.raises(ConnectorError) as err:
+        sql.pg_query(params(host="postgres-cluster-rw.postgres-cluster", database="backend", user="u"), {"sql": "select 1"})
+    msg = str(err.value)
+    assert "postgres-cluster-rw.postgres-cluster:5432" in msg and "connection timeout expired" in msg and "Kubernetes" in msg
+
+
 def test_web_fetch_strips_scripts_and_blocks_redirect_to_internal(infra):
     page = web.fetch_page(params(), {"url": "https://example.test/"})
     assert page["title"] == "Trang thử" and "Nội dung trang." in page["text"] and "x()" not in page["text"]

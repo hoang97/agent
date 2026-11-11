@@ -1,9 +1,9 @@
 template: elasticsearch
 title: Elasticsearch / Kibana
-description: Tìm log trong Elasticsearch (nơi Kibana đọc dữ liệu), xác thực bằng API key hoặc tài khoản.
+description: Tìm log trong Elasticsearch (nơi Kibana đọc dữ liệu), xác thực bằng API key hoặc tài khoản. URL Kibana cũng dùng được, lệnh đi qua Console proxy của Kibana.
 ping: elasticsearch:ping
 fields:
-  - {name: url, type: url, required: true, description: "Địa chỉ Elasticsearch, ví dụ https://es.example.com:9200"}
+  - {name: url, type: url, required: true, description: "Địa chỉ Elasticsearch (https://es.example.com:9200) hoặc Kibana (https://kibana.example.com:5601)"}
   - {name: api_key, type: secret, description: API key dạng base64 (ưu tiên dùng thay tài khoản)}
   - {name: username, type: string, description: Tên tài khoản nếu không dùng API key}
   - {name: password, type: secret, description: Mật khẩu của tài khoản}
