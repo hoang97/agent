@@ -520,6 +520,71 @@ VIEWS.policy = async (main) => {
 const PURPOSE = { agent: "Agent trả lời", route: "Router", check_plan: "Kiểm tra độc lập", reflect: "Reflector", curate: "Curator", judge: "Chấm kết quả", other: "Khác" };
 const num = (v) => (v === null || v === undefined ? "—" : Number(v).toLocaleString("vi-VN"));
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svg(tag, attrs, ...kids) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) if (v !== null && v !== undefined) el.setAttribute(k, v);
+  kids.flat(Infinity).forEach((k) => k !== null && k !== undefined && k !== false && el.append(k));
+  return el;
+}
+const compact = (n) => (n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "k" : String(n));
+const MAX_SERIES = 6;
+
+// Cột chồng theo ngày, mỗi LLM một màu cố định. Màu gán theo thứ tự LLM xuất hiện lần đầu (không theo thứ hạng),
+// nên một LLM giữ nguyên màu khi thứ hạng thay đổi; quá 6 LLM thì phần còn lại gộp vào "Khác".
+function llmUsageChart(t) {
+  if (!t.by_llm || !t.by_llm.length) return h("div", { class: "card muted" }, "Chưa có lần gọi LLM nào trong 14 ngày qua.");
+  const kept = [...t.by_llm].sort((a, b) => b.total - a.total).slice(0, MAX_SERIES).map((r) => r.label);
+  const series = t.by_llm.filter((r) => kept.includes(r.label)).sort((a, b) => a.first_at.localeCompare(b.first_at)).map((r, i) => ({ label: r.label, cls: `s${i + 1}` }));
+  // Màu gán qua class: CSP của app (default-src 'self') chặn thuộc tính style viết thẳng trong phần tử.
+  if (t.by_llm.length > MAX_SERIES) series.push({ label: "Khác", cls: "so" });
+  const slot = (label) => (kept.includes(label) ? label : "Khác");
+  const byDay = Object.fromEntries(t.llm_days.map((d) => [d, {}]));
+  for (const r of t.llm_daily) if (byDay[r.day]) byDay[r.day][slot(r.label)] = (byDay[r.day][slot(r.label)] || 0) + r.total;
+  const totals = t.llm_days.map((d) => Object.values(byDay[d]).reduce((a, b) => a + b, 0));
+  const W = 720, H = 220, L = 44, R = 8, T = 8, B = 24;
+  const max = Math.max(...totals, 1);
+  const step = Math.pow(10, Math.floor(Math.log10(max)));
+  const top = Math.ceil(max / step) * step;
+  const y = (v) => T + (H - T - B) * (1 - v / top);
+  const slotW = (W - L - R) / t.llm_days.length, barW = Math.max(6, Math.min(28, slotW * 0.6));
+  const ticks = [0, top / 2, top];
+  const tip = h("div", { class: "chart-tip hidden" });
+  const wrap = h("div", { class: "chart" });
+  const show = (i, ev) => {
+    const d = t.llm_days[i];
+    const rows = series.filter((s) => byDay[d][s.label]).map((s) => h("div", { class: "row-tip" }, h("span", {}, h("span", { class: `sw ${s.cls}` }), s.label), h("span", {}, num(byDay[d][s.label]))));
+    tip.replaceChildren(h("div", { class: "row-tip" }, h("b", {}, d.split("-").reverse().join("/")), h("b", {}, num(totals[i]) + " token")), ...(rows.length ? rows : [h("div", { class: "small" }, "Không có lần gọi nào")]));
+    tip.classList.remove("hidden");
+    const box = wrap.getBoundingClientRect();
+    const x = ev.clientX - box.left;
+    tip.style.left = Math.min(Math.max(0, x + 12), box.width - tip.offsetWidth) + "px";
+    tip.style.top = "0px";
+  };
+  const chart = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Token theo LLM trong 14 ngày" },
+    ticks.map((v) => [svg("line", { class: "grid-line", x1: L, x2: W - R, y1: y(v), y2: y(v) }),
+      svg("text", { class: "axis-label", x: L - 6, y: y(v) + 4, "text-anchor": "end" }, compact(v))]),
+    t.llm_days.map((d, i) => {
+      const cx = L + slotW * i + slotW / 2;
+      let acc = 0;
+      const segs = series.filter((s) => byDay[d][s.label]).map((s) => {
+        const v = byDay[d][s.label];
+        const seg = svg("rect", { class: `bar-seg ${s.cls}`, x: cx - barW / 2, y: y(acc + v), width: barW, height: Math.max(1, y(acc) - y(acc + v)), rx: 3 });
+        acc += v;
+        return seg;
+      });
+      const label = i % 2 === (t.llm_days.length - 1) % 2 ? svg("text", { class: "axis-label", x: cx, y: H - 6, "text-anchor": "middle" }, d.slice(8) + "/" + d.slice(5, 7)) : null;
+      const hit = svg("rect", { class: "hit", x: L + slotW * i, y: T, width: slotW, height: H - T - B });
+      hit.addEventListener("mousemove", (ev) => show(i, ev));
+      hit.addEventListener("mouseleave", () => tip.classList.add("hidden"));
+      return [hit, segs, label];  // vùng rê chuột nằm dưới cột để nền sáng lên mà không làm mờ cột
+    }));
+  wrap.append(chart, tip);
+  return h("div", { class: "card" },
+    h("div", { class: "chart-legend" }, series.map((s) => h("span", {}, h("span", { class: `sw ${s.cls}` }), s.label))),
+    wrap);
+}
+
 function tokenSection(t) {
   if (!t) return null;
   const all = t.by_purpose.reduce((a, r) => a + r.input + r.cache_read + r.cache_write + r.output, 0);
@@ -530,6 +595,11 @@ function tokenSection(t) {
       h("div", { class: "tile" }, h("b", {}, t.cache_hit_pct === null ? "—" : t.cache_hit_pct + "%"), h("span", { class: "small" }, "Input đọc từ cache"))),
     table(["Mục đích", "Lần gọi", "Input", "Cache đọc", "Cache ghi", "Output"], t.by_purpose.map((r) =>
       h("tr", {}, h("td", {}, PURPOSE[r.purpose] || r.purpose), h("td", {}, num(r.calls)), h("td", {}, num(r.input)), h("td", {}, num(r.cache_read)), h("td", {}, num(r.cache_write)), h("td", {}, num(r.output))))),
+    h("h2", { class: "row" }, "Token theo LLM, 14 ngày qua"),
+    h("p", { class: "small" }, "Tổng token xử lý mỗi ngày (input, cache đọc/ghi, output), chia theo cấu hình LLM và model. Rê chuột lên cột để xem chi tiết."),
+    llmUsageChart(t),
+    table(["LLM", "Lần gọi", "Input", "Cache đọc", "Cache ghi", "Output", "Tổng"], (t.by_llm || []).map((r) =>
+      h("tr", {}, h("td", {}, r.label), h("td", {}, num(r.calls)), h("td", {}, num(r.input)), h("td", {}, num(r.cache_read)), h("td", {}, num(r.cache_write)), h("td", {}, num(r.output)), h("td", {}, num(r.total))))),
     h("h2", { class: "row" }, "Công cụ trả kết quả lớn nhất"),
     h("p", { class: "small" }, "Kết quả công cụ đi thẳng vào context của agent; công cụ trả nhiều ký tự là chỗ nên lọc trước."),
     table(["Công cụ", "Lần gọi", "Tổng ký tự", "Lớn nhất"], t.tools.map((r) => h("tr", {}, h("td", {}, h("code", {}, r.tool)), h("td", {}, num(r.calls)), h("td", {}, num(r.result_chars)), h("td", {}, num(r.max_chars))))),
@@ -562,51 +632,84 @@ async function refreshMe() {
 
 VIEWS.settings = async (main) => {
   const s = await api("GET", "/api/settings/llm-key");
-  const describe = { ui: "Đang dùng key nhập trên giao diện", env: "Đang dùng key từ biến môi trường của máy chủ", none: "Chưa có key: agent chạy chế độ heuristic" }[s.source];
+  const describe = { ui: `Đang dùng cấu hình "${s.profile}"`, env: "Đang dùng key từ biến môi trường của máy chủ", none: "Chưa chọn LLM: agent chạy chế độ heuristic" }[s.source];
+  let editing = null; // cấu hình đang sửa; null = thêm mới
+  const name = h("input", { "aria-label": "Tên cấu hình", class: "wide", placeholder: "Tên cấu hình (để trống thì tự đặt theo nhà cung cấp và model)", maxlength: 60 });
   const key = h("input", { type: "password", autocomplete: "off", placeholder: "Key hoặc token", "aria-label": "Key hoặc token", class: "wide" });
-  const baseUrl = h("input", { type: "url", placeholder: "Base URL https://... (để trống nếu gọi thẳng nhà cung cấp)", "aria-label": "Base URL", class: "wide", value: s.base_url || "" });
-  const allowPrivate = h("input", { type: "checkbox", checked: !!s.allow_private, "aria-label": "Cho phép địa chỉ mạng nội bộ" });
+  const baseUrl = h("input", { type: "url", placeholder: "Base URL https://... (để trống nếu gọi thẳng nhà cung cấp)", "aria-label": "Base URL", class: "wide" });
+  const allowPrivate = h("input", { type: "checkbox", "aria-label": "Cho phép địa chỉ mạng nội bộ" });
   const httpWarn = h("div", { class: "small warn-text hidden" }, "Base URL dùng http: key và nội dung chat đi qua mạng nội bộ dưới dạng không mã hóa.");
   const syncHttp = () => httpWarn.classList.toggle("hidden", !/^http:\/\//i.test(baseUrl.value.trim()));
   baseUrl.addEventListener("input", syncHttp);
   const modelList = h("datalist", { id: "llm-model-list" });
-  const modelStrong = h("input", { "aria-label": "Model chính", class: "wide", list: "llm-model-list", value: s.model_strong || "" });
-  const modelFast = h("input", { "aria-label": "Model nhanh", class: "wide", list: "llm-model-list", placeholder: "Model nhanh (để trống thì dùng model chính)", value: s.model_fast || "" });
+  const modelStrong = h("input", { "aria-label": "Model chính", class: "wide", list: "llm-model-list" });
+  const modelFast = h("input", { "aria-label": "Model nhanh", class: "wide", list: "llm-model-list", placeholder: "Model nhanh (để trống thì dùng model chính)" });
   const modelInfo = h("div", { class: "small" });
-  const provider = h("select", { "aria-label": "Nhà cung cấp" }, h("option", { value: "anthropic", selected: s.provider !== "openai" }, "Anthropic hoặc relay Anthropic"), h("option", { value: "openai", selected: s.provider === "openai" }, "OpenAI hoặc tương thích OpenAI"));
-  const authType = h("select", { "aria-label": "Loại xác thực" }, h("option", { value: "api_key", selected: s.auth_type !== "token" }, "API key (ANTHROPIC_API_KEY)"), h("option", { value: "token", selected: s.auth_type === "token" }, "Auth token (ANTHROPIC_AUTH_TOKEN)"));
-  const save = guard(async (ev) => {
-    ev.preventDefault();
-    if (!key.value.trim()) throw new Error("Hãy nhập key");
-    if (provider.value === "openai" && !modelStrong.value.trim()) throw new Error("OpenAI cần tên model chính");
-    await api("POST", "/api/settings/llm-key", { key: key.value, base_url: baseUrl.value || null, auth_type: authType.value, provider: provider.value, model_strong: modelStrong.value || null, model_fast: modelFast.value || null, allow_private: allowPrivate.checked });
-    key.value = "";
-    toast("Đã kiểm tra và lưu key");
-    await refreshMe();
-  });
-  const remove = guard(async () => { await api("DELETE", "/api/settings/llm-key"); toast("Đã xóa key"); await refreshMe(); });
-  const fetchModels = guard(async () => {
-    const r = await api("POST", "/api/settings/llm-models", { key: key.value, base_url: baseUrl.value || null, auth_type: authType.value, provider: provider.value, allow_private: allowPrivate.checked });
-    modelList.replaceChildren(...r.models.map((m) => h("option", { value: m.id }, m.name !== m.id ? m.name : null)));
-    modelInfo.textContent = r.models.length ? `Có ${r.models.length} model; bấm vào ô model để chọn.` : "Endpoint không trả về model nào.";
-    toast(`Đã lấy ${r.models.length} model`);
-  });
+  const provider = h("select", { "aria-label": "Nhà cung cấp" }, h("option", { value: "anthropic" }, "Anthropic hoặc relay Anthropic"), h("option", { value: "openai" }, "OpenAI hoặc tương thích OpenAI"));
+  const authType = h("select", { "aria-label": "Loại xác thực" }, h("option", { value: "api_key" }, "API key (ANTHROPIC_API_KEY)"), h("option", { value: "token" }, "Auth token (ANTHROPIC_AUTH_TOKEN)"));
+  const formTitle = h("h3", {}, "Thêm cấu hình LLM");
+  const cancelEdit = h("button", { type: "button", class: "ghost hidden", onclick: () => fill(null) }, "Hủy sửa");
   const syncProvider = () => {
     const isOpenAI = provider.value === "openai";
     authType.classList.toggle("hidden", isOpenAI);
     modelStrong.placeholder = isOpenAI ? "Model chính (bắt buộc)" : "Model chính (để trống để dùng mặc định Claude)";
   };
   provider.addEventListener("change", syncProvider);
-  syncProvider();
-  syncHttp();
-  main.append(h("h2", {}, "Khóa LLM"),
-    h("div", { class: "card" }, h("div", {}, describe, s.last4 && ` (kết thúc bằng ${s.last4})`),
-      s.provider && h("div", { class: "small" }, `Nhà cung cấp: ${s.provider === "openai" ? "OpenAI" : "Anthropic"}${s.model_strong ? ` · Model: ${s.model_strong}${s.model_fast ? `, ${s.model_fast}` : ""}` : ""}`),
-      s.base_url && h("div", { class: "small" }, "Endpoint: " + s.base_url),
-      s.updated_at && h("div", { class: "small" }, `Cập nhật ${fmtTime(s.updated_at)} bởi ${s.updated_by}`),
-      h("form", { onsubmit: save }, h("div", { class: "row" }, provider, authType, baseUrl),
-        h("div", { class: "row" }, h("label", { class: "small" }, allowPrivate, " Cho phép địa chỉ mạng nội bộ (LLM tự host như vLLM, Ollama, LiteLLM; nhận cả http)")), httpWarn, h("div", { class: "row" }, modelStrong, modelFast, h("button", { type: "button", onclick: fetchModels }, "Lấy danh sách model"), modelList), modelInfo, h("div", { class: "row" }, key, h("button", { type: "submit" }, "Kiểm tra và lưu"), s.source === "ui" && h("button", { type: "button", class: "danger", onclick: remove }, "Xóa key"))),
-      h("p", { class: "small" }, "Key dùng chung cho cả tổ chức, được kiểm tra trước khi lưu, mã hóa khi lưu và không hiển thị lại. Với relay và OpenAI, bước kiểm tra gửi một tin nhắn rất ngắn; nội dung nhiệm vụ đi qua máy chủ của dịch vụ đó. Giá trị nhập ở đây được ưu tiên hơn biến môi trường. Lấy danh sách model dùng key vừa nhập, hoặc key đang lưu nếu ô key để trống và giữ nguyên nhà cung cấp, Base URL.")));
+  // Đổ cấu hình đã lưu vào form để sửa; key không bao giờ được trả về nên để trống nghĩa là giữ key cũ.
+  function fill(p) {
+    editing = p;
+    name.value = p ? p.name : "";
+    provider.value = p ? p.provider : "anthropic";
+    authType.value = p && p.auth_type === "token" ? "token" : "api_key";
+    baseUrl.value = p ? p.base_url || "" : "";
+    allowPrivate.checked = !!(p && p.allow_private);
+    modelStrong.value = p ? p.model_strong || "" : "";
+    modelFast.value = p ? p.model_fast || "" : "";
+    key.value = "";
+    key.placeholder = p ? `Để trống để giữ key cũ (…${p.last4})` : "Key hoặc token";
+    formTitle.textContent = p ? `Sửa cấu hình "${p.name}"` : "Thêm cấu hình LLM";
+    cancelEdit.classList.toggle("hidden", !p);
+    syncProvider();
+    syncHttp();
+  }
+  const endpoint = () => ({ base_url: baseUrl.value || null, auth_type: authType.value, provider: provider.value, allow_private: allowPrivate.checked });
+  const save = guard(async (ev) => {
+    ev.preventDefault();
+    if (!editing && !key.value.trim()) throw new Error("Hãy nhập key");
+    if (provider.value === "openai" && !modelStrong.value.trim()) throw new Error("OpenAI cần tên model chính");
+    await api("POST", "/api/settings/llm-key", { ...endpoint(), key: key.value, name: name.value.trim() || null, profile_id: editing ? editing.id : null,
+      model_strong: modelStrong.value || null, model_fast: modelFast.value || null, activate: editing ? editing.active : true });
+    toast(editing ? "Đã kiểm tra và lưu cấu hình" : "Đã kiểm tra, lưu và chọn cấu hình mới");
+    await refreshMe();
+  });
+  const fetchModels = guard(async () => {
+    const r = await api("POST", "/api/settings/llm-models", { ...endpoint(), key: key.value, profile_id: editing ? editing.id : null });
+    modelList.replaceChildren(...r.models.map((m) => h("option", { value: m.id }, m.name !== m.id ? m.name : null)));
+    modelInfo.textContent = r.models.length ? `Có ${r.models.length} model; bấm vào ô model để chọn.` : "Endpoint không trả về model nào.";
+    toast(`Đã lấy ${r.models.length} model`);
+  });
+  const use = (p) => guard(async () => { await api("POST", `/api/settings/llm-profiles/${p.id}/activate`); toast(`Đang dùng "${p.name}"`); await refreshMe(); });
+  const drop = (p) => guard(async () => { await api("DELETE", `/api/settings/llm-profiles/${p.id}`); toast(`Đã xóa "${p.name}"`); await refreshMe(); });
+  const row = (p) => h("div", { class: "tool-item" },
+    h("div", { class: "tool-head" }, h("b", {}, p.name), p.active && h("span", { class: "badge ok" }, "đang dùng"), !p.readable && h("span", { class: "badge bad" }, "không giải mã được"),
+      h("span", { class: "spacer" }),
+      !p.active && p.readable && h("button", { type: "button", class: "small-btn", onclick: use(p) }, "Dùng"),
+      p.readable && h("button", { type: "button", class: "ghost small-btn", onclick: () => { fill(p); name.focus(); } }, "Sửa"),
+      h("button", { type: "button", class: "danger small-btn", onclick: drop(p) }, "Xóa")),
+    h("div", { class: "small" }, `${p.provider === "openai" ? "OpenAI / tương thích" : "Anthropic"}${p.model_strong ? ` · ${p.model_strong}${p.model_fast ? `, ${p.model_fast}` : ""}` : ""} · key …${p.last4}`),
+    p.base_url && h("div", { class: "small" }, "Endpoint: " + p.base_url + (p.allow_private ? " (mạng nội bộ)" : "")),
+    h("div", { class: "small muted" }, `Cập nhật ${fmtTime(p.updated_at)} bởi ${p.updated_by}`));
+  fill(null);
+  main.append(h("h2", {}, "LLM"),
+    h("div", { class: "card" }, h("div", {}, describe, s.last4 && ` (key kết thúc bằng ${s.last4})`),
+      s.profiles.length ? s.profiles.map(row) : h("div", { class: "small muted" }, "Chưa lưu cấu hình nào."),
+      h("p", { class: "small" }, "Chọn \"Dùng\" để chuyển agent sang cấu hình khác; mọi lượt chat và học nền sau đó dùng cấu hình này. Trang Đo lường tách token theo từng cấu hình.")),
+    h("div", { class: "card" }, formTitle,
+      h("form", { onsubmit: save }, h("div", { class: "row" }, name), h("div", { class: "row" }, provider, authType, baseUrl),
+        h("div", { class: "row" }, h("label", { class: "small" }, allowPrivate, " Cho phép địa chỉ mạng nội bộ (LLM tự host như vLLM, Ollama, LiteLLM; nhận cả http)")), httpWarn,
+        h("div", { class: "row" }, modelStrong, modelFast, h("button", { type: "button", onclick: fetchModels }, "Lấy danh sách model"), modelList), modelInfo,
+        h("div", { class: "row" }, key, h("button", { type: "submit" }, "Kiểm tra và lưu"), cancelEdit)),
+      h("p", { class: "small" }, "Key dùng chung cho cả tổ chức, được kiểm tra trước khi lưu, mã hóa khi lưu và không hiển thị lại. Với relay và OpenAI, bước kiểm tra gửi một tin nhắn rất ngắn; nội dung nhiệm vụ đi qua máy chủ của dịch vụ đó. Cấu hình chọn ở đây được ưu tiên hơn biến môi trường. Khi sửa, để trống ô key để giữ key cũ, với điều kiện giữ nguyên nhà cung cấp và Base URL.")));
 };
 
 VIEWS.account = async (main) => {

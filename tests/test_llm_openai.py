@@ -161,6 +161,11 @@ def test_legacy_stored_credential_still_decrypts(users, auto_provider):
     with db.session() as conn:
         old = json.dumps({"key": KEY, "base_url": "https://r.test", "auth_type": "token"})
         conn.execute("INSERT INTO app_secret(name,ciphertext,last4,updated_at,updated_by) VALUES (?,?,?,?,?)",
-                     (vault.NAME, vault._fernet().encrypt(old.encode()).decode(), "WXYZ", db.iso(), "x"))
+                     (vault.LEGACY_NAME, vault._fernet().encrypt(old.encode()).decode(), "WXYZ", db.iso(), "x"))
     cred = vault.resolve()[0]
     assert cred.key == KEY and cred.provider == "anthropic" and cred.auth_type == "token"
+    # Bản ghi cũ được chuyển thành cấu hình "Mặc định" đang dùng, rồi xóa khỏi app_secret.
+    with db.session() as conn:
+        profiles = vault.profiles(conn)
+        assert [(p["name"], p["active"]) for p in profiles] == [("Mặc định", True)] and cred.profile == "Mặc định"
+        assert conn.execute("SELECT 1 FROM app_secret WHERE name=?", (vault.LEGACY_NAME,)).fetchone() is None

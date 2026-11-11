@@ -128,6 +128,13 @@ CREATE TABLE IF NOT EXISTS skill (
   success_rate_30d REAL NOT NULL DEFAULT 0, PRIMARY KEY (tenant_id, name)
 );
 
+CREATE TABLE IF NOT EXISTS llm_profile (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, provider TEXT NOT NULL, base_url TEXT, model_strong TEXT, model_fast TEXT,
+  ciphertext TEXT NOT NULL, last4 TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT
+);
+
+CREATE TABLE IF NOT EXISTS app_setting (key TEXT PRIMARY KEY, value TEXT);
+
 CREATE TABLE IF NOT EXISTS tool_result (
   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT, episode_id TEXT, tool TEXT NOT NULL,
   untrusted INTEGER NOT NULL DEFAULT 0, chars INTEGER NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL
@@ -250,6 +257,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
     if "self_approve" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
         # Mặc định người yêu cầu tự duyệt lệnh của mình; admin có thể tắt cho tenant cần duyệt chặt.
         conn.execute("ALTER TABLE tenant ADD COLUMN self_approve INTEGER NOT NULL DEFAULT 1")
+    if "llm" not in {r["name"] for r in conn.execute("PRAGMA table_info(llm_call)")}:
+        conn.execute("ALTER TABLE llm_call ADD COLUMN llm TEXT")  # tên cấu hình LLM đã dùng
     if "grant_policy" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
         conn.execute("ALTER TABLE tenant ADD COLUMN grant_policy TEXT NOT NULL DEFAULT '{}'")
     registry = {r["name"] for r in conn.execute("PRAGMA table_info(tool_registry)")}

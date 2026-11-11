@@ -2,7 +2,7 @@
 import json
 from types import SimpleNamespace as NS
 
-from kagent import db, llm
+from kagent import db, llm, vault
 from test_llm import msg, provider, text, use
 
 
@@ -54,9 +54,12 @@ def test_purpose_tags_structured_calls():
 
 def test_openai_cached_tokens_are_split_out():
     resp = NS(usage=NS(prompt_tokens=1000, completion_tokens=50, prompt_tokens_details=NS(cached_tokens=800)), model="gpt-x")
+    p = llm.OpenAIProvider(client=object(), credential=vault.Credential("k", provider="openai", model_strong="gpt-x", profile="LLM nội bộ"))
     with llm.collect_usage() as got:
-        assert llm.OpenAIProvider._tokens(resp) == 1050
-    assert got == [{"purpose": "other", "model": "gpt-x", "input_tokens": 200, "output_tokens": 50, "cache_read": 800, "cache_write": 0}]
+        assert p._tokens(resp) == 1050
+        assert p._tokens(NS(usage=resp.usage)) == 1050  # phản hồi stream không có tên model: lấy model đã gọi
+    assert got[0] == {"purpose": "other", "model": "gpt-x", "input_tokens": 200, "output_tokens": 50, "cache_read": 800, "cache_write": 0, "llm": "LLM nội bộ"}
+    assert got[1]["model"] == "gpt-x"
 
 
 def test_metrics_endpoint_reports_tokens_cache_and_tool_sizes(users):
@@ -110,3 +113,16 @@ def test_reflector_view_clips_large_step_results():
     step = view["trace"][0]
     assert isinstance(step["result"], str) and len(step["result"]) < 2000 and "đã cắt" in step["result"] and "confidence_parts" not in step
     assert ep["trace"][0]["result"]["hits"]  # không sửa episode gốc
+
+
+def test_metrics_split_usage_by_llm_and_day(users):
+    alice = users["alice"]
+    with db.session() as conn:
+        llm.save_usage(conn, alice.tenant, None, [
+            {"purpose": "agent", "model": "claude-opus-5", "llm": "relay", "input_tokens": 10, "output_tokens": 5, "cache_read": 100, "cache_write": 0},
+            {"purpose": "route", "model": "claude-sonnet-5", "llm": "relay", "input_tokens": 3, "output_tokens": 1, "cache_read": 0, "cache_write": 0},
+            {"purpose": "agent", "model": "qwen", "llm": "LLM nội bộ", "input_tokens": 50, "output_tokens": 20, "cache_read": 0, "cache_write": 0}])
+    t = alice.get("/api/metrics").json()["tokens"]
+    assert {r["label"]: r["total"] for r in t["by_llm"]} == {"relay · claude-opus-5": 115, "relay · claude-sonnet-5": 4, "LLM nội bộ · qwen": 70}
+    assert len(t["llm_days"]) == 14 and t["llm_days"][-1] == db.iso().split("T")[0]
+    assert sum(r["total"] for r in t["llm_daily"]) == 189 and {r["day"] for r in t["llm_daily"]} == {t["llm_days"][-1]}

@@ -194,3 +194,10 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend 
 
 - **Vấn đề:** trang Biên dịch L2 hiện "[object HTMLDivElement],…" thay cho danh sách lần biên dịch. Các view gọi `main.append(...)` (API DOM gốc) với mảng phần tử, mà API này đổi mảng thành chuỗi; cùng lỗi ở trang Duyệt lệnh. Cũng vì vậy `isAdmin() && h(...)` hiện chữ "false" với người không phải admin, và trang Đo lường có thể hiện "null".
 - **Thay đổi:** `h()` và vùng nội dung của mọi trang dùng chung một quy tắc thêm phần tử con: làm phẳng mảng, bỏ `null`/`undefined`/`false`. Đã duyệt qua mọi trang trên trình duyệt, không còn chuỗi lỗi nào.
+
+## Đợt 24 — 2026-11-11: nhiều cấu hình LLM, biểu đồ token theo LLM
+
+- **Lưu nhiều cấu hình LLM:** bảng `llm_profile` (tên, nhà cung cấp, Base URL, model; key mã hóa) và cấu hình đang dùng ở `app_setting`. Trang Cài đặt liệt kê cấu hình đã lưu với nút Dùng / Sửa / Xóa; sửa được mà để trống key để giữ key cũ, chỉ khi giữ nguyên nhà cung cấp và Base URL. Key duy nhất của phiên bản trước tự chuyển thành cấu hình "Mặc định". Xóa cấu hình đang dùng thì không tự chọn cấu hình khác.
+- **Biểu đồ token theo LLM:** trang Đo lường có cột chồng theo ngày (14 ngày), mỗi "cấu hình · model" một màu cố định theo thứ tự xuất hiện lần đầu (không theo thứ hạng), quá 6 LLM gộp vào "Khác"; có chú thích, tooltip theo ngày và bảng số liệu. Palette đã chạy validator CVD/độ tương phản cho nền sáng và tối; ở nền sáng ba màu dưới 3:1 nên bảng số liệu luôn đi kèm.
+- `llm_call` ghi thêm tên cấu hình; model lấy theo tier khi phản hồi stream của dịch vụ tương thích không có tên model (trước đây ghi rỗng, hiện là "(không rõ)").
+- **Lỗi thấy khi xem trên trình duyệt:** CSP `default-src 'self'` chặn thuộc tính `style` viết thẳng, nên màu được gán bằng class.

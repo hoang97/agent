@@ -44,7 +44,7 @@ def test_save_never_returns_key_and_activates_claude(users, auto_provider):
 def test_key_is_encrypted_at_rest(users, auto_provider):
     users["admin"].post(URL, tenant=False, json={"key": KEY})
     with db.session() as conn:
-        stored = conn.execute("SELECT * FROM app_secret").fetchone()
+        stored = conn.execute("SELECT * FROM llm_profile").fetchone()
     assert KEY not in stored["ciphertext"]
     assert KEY.encode() not in settings.db_path.read_bytes()
 
@@ -229,3 +229,60 @@ def test_save_and_list_models_for_local_openai_compatible(users, monkeypatch):
     assert vault.resolve()[0].allow_private is True
     # Key ngắn chỉ được nhận cho dịch vụ tương thích OpenAI trong mạng nội bộ.
     assert admin.post(URL, tenant=False, json={"key": "short"}).status_code == 400
+
+
+# ---------- nhiều cấu hình LLM ----------
+
+KEY2 = "sk-ant-second-0123456789abcdefQRST"
+
+
+def test_save_several_profiles_and_switch(users, auto_provider):
+    admin = users["admin"]
+    first = admin.post(URL, tenant=False, json={"key": KEY, "name": "Claude trực tiếp"}).json()
+    second = admin.post(URL, tenant=False, json={"key": KEY2, "name": "Claude dự phòng"}).json()
+    assert [p["name"] for p in second["profiles"]] == ["Claude dự phòng", "Claude trực tiếp"]
+    assert second["profile"] == "Claude dự phòng" and llm.get_provider().client.api_key == KEY2
+    assert KEY not in str(second) and KEY2 not in str(second)
+    old = next(p for p in second["profiles"] if p["name"] == "Claude trực tiếp")
+    switched = admin.post(f"/api/settings/llm-profiles/{old['id']}/activate", tenant=False).json()
+    assert switched["profile"] == "Claude trực tiếp" and llm.get_provider().client.api_key == KEY
+    assert llm.get_provider().label == "Claude trực tiếp"
+    assert first["profile_id"] == old["id"]
+
+
+def test_edit_profile_keeps_key_only_for_same_endpoint(users, auto_provider, public_dns):
+    admin = users["admin"]
+    saved = admin.post(URL, tenant=False, json={"key": KEY, "name": "relay", "base_url": RELAY, "auth_type": "token"}).json()
+    pid = saved["profile_id"]
+    renamed = admin.post(URL, tenant=False, json={"profile_id": pid, "name": "relay chính", "base_url": RELAY, "auth_type": "token", "model_strong": "claude-opus-5"})
+    assert renamed.status_code == 200, renamed.text
+    assert [p["name"] for p in renamed.json()["profiles"]] == ["relay chính"] and vault.resolve()[0].key == KEY
+    # Đổi Base URL mà để trống key thì không được gửi key cũ tới máy chủ khác.
+    moved = admin.post(URL, tenant=False, json={"profile_id": pid, "base_url": "https://other.example.test", "auth_type": "token"})
+    assert moved.status_code == 400 and "giữ nguyên nhà cung cấp và Base URL" in moved.text
+
+
+def test_profile_name_unique_and_delete_active_falls_back(users, auto_provider):
+    admin = users["admin"]
+    admin.post(URL, tenant=False, json={"key": KEY, "name": "A"})
+    assert admin.post(URL, tenant=False, json={"key": KEY2, "name": "A"}).status_code == 400
+    pid = admin.get(URL, tenant=False).json()["profile_id"]
+    after = admin._call("DELETE", f"/api/settings/llm-profiles/{pid}", tenant=False).json()
+    assert after["source"] == "none" and after["profiles"] == [] and provider_name(admin) == "heuristic"
+    assert admin._call("DELETE", f"/api/settings/llm-profiles/{pid}", tenant=False).status_code == 404
+
+
+def test_profile_endpoints_require_org_admin(users):
+    alice = users["alice"]
+    assert alice.post("/api/settings/llm-profiles/x/activate", tenant=False).status_code == 403
+    assert alice._call("DELETE", "/api/settings/llm-profiles/x", tenant=False).status_code == 403
+
+
+def test_list_models_with_saved_profile_key(users, auto_provider, monkeypatch):
+    admin = users["admin"]
+    pid = admin.post(URL, tenant=False, json={"key": KEY, "name": "A"}).json()["profile_id"]
+    admin.post(URL, tenant=False, json={"key": KEY2, "name": "B"})  # B đang dùng
+    seen = []
+    monkeypatch.setattr(llm, "list_models", lambda cred: seen.append(cred.key) or [])
+    assert admin.post("/api/settings/llm-models", tenant=False, json={"profile_id": pid}).status_code == 200
+    assert seen == [KEY]

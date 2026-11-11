@@ -251,7 +251,10 @@ def require_org_admin(principal: Principal = Depends(current_user)) -> Principal
 
 class LLMKey(BaseModel):
     # Kiểm tra độ dài trong handler: lỗi 422 của pydantic sẽ trả lại nguyên giá trị đầu vào.
-    key: str
+    key: str = ""  # để trống khi sửa cấu hình đã lưu thì giữ key cũ
+    name: str | None = Field(default=None, max_length=100)
+    profile_id: str | None = None  # sửa cấu hình này thay vì tạo mới
+    activate: bool = True
     base_url: str | None = None
     auth_type: str = "api_key"
     provider: str = "anthropic"
@@ -291,15 +294,24 @@ def _check_endpoint(body) -> None:
 
 
 class LLMModelsQuery(BaseModel):
-    key: str = ""  # để trống thì dùng credential đang dùng
+    key: str = ""  # để trống thì dùng key của cấu hình profile_id, hoặc cấu hình đang dùng
+    profile_id: str | None = None
     base_url: str | None = None
     auth_type: str = "api_key"
     provider: str = "anthropic"
     allow_private: bool = False
 
 
+def _stored_key_for(conn, body, base_url: str | None) -> vault.Credential:
+    """Key đã lưu chỉ được dùng lại cho đúng endpoint đã lưu: đổi Base URL mà không nhập key sẽ gửi key đó tới máy chủ khác."""
+    current = vault.get_profile(conn, body.profile_id) if body.profile_id else vault.resolve()[0]
+    if current is None or current.base_url != base_url or current.provider != body.provider:
+        raise HTTPException(400, "hãy nhập key, hoặc giữ nguyên nhà cung cấp và Base URL của cấu hình đã lưu")
+    return current
+
+
 @app.post("/api/settings/llm-models")
-def llm_models(body: LLMModelsQuery, _: Principal = Depends(require_org_admin)):
+def llm_models(body: LLMModelsQuery, _: Principal = Depends(require_org_admin), conn=Depends(get_conn)):
     _check_endpoint(body)
     try:
         base_url = llm.check_base_url(body.base_url, body.allow_private)
@@ -307,11 +319,7 @@ def llm_models(body: LLMModelsQuery, _: Principal = Depends(require_org_admin)):
             cred = vault.Credential(_clean_key(body.key, body.allow_private and body.provider == "openai"), base_url, body.auth_type, body.provider,
                                     allow_private=body.allow_private)
         else:
-            current = vault.resolve()[0]
-            # Chỉ dùng lại key đã lưu cho đúng endpoint đã lưu: đổi Base URL mà không nhập key sẽ gửi key đó tới máy chủ khác.
-            if current is None or current.base_url != base_url or current.provider != body.provider:
-                raise HTTPException(400, "hãy nhập key, hoặc giữ nguyên nhà cung cấp và Base URL đã lưu")
-            cred = current
+            cred = _stored_key_for(conn, body, base_url)
         return {"models": llm.list_models(cred)}
     except llm.LLMError as exc:
         raise HTTPException(400, f"không lấy được danh sách model: {exc}") from exc
@@ -319,18 +327,42 @@ def llm_models(body: LLMModelsQuery, _: Principal = Depends(require_org_admin)):
 
 @app.post("/api/settings/llm-key")
 def llm_key_save(body: LLMKey, principal: Principal = Depends(require_org_admin), conn=Depends(get_conn)):
-    key = _clean_key(body.key, body.allow_private and body.provider == "openai")
     _check_endpoint(body)
     strong, fast = _clean_model(body.model_strong), _clean_model(body.model_fast)
     if body.provider == "openai" and not strong:
         raise HTTPException(400, "OpenAI cần tên model")
     try:
-        cred = vault.Credential(key, llm.check_base_url(body.base_url, body.allow_private), body.auth_type, body.provider, strong, fast,
-                                body.allow_private)
+        base_url = llm.check_base_url(body.base_url, body.allow_private)
+        if body.key.strip() or not body.profile_id:
+            key = _clean_key(body.key, body.allow_private and body.provider == "openai")
+        else:
+            key = _stored_key_for(conn, body, base_url).key
+        cred = vault.Credential(key, base_url, body.auth_type, body.provider, strong, fast, body.allow_private)
         llm.validate_key(cred)
     except llm.LLMError as exc:
         raise HTTPException(400, f"không lưu key: {exc}") from exc
-    vault.save(conn, cred, principal.username)
+    try:
+        vault.save_profile(conn, cred, principal.username, name=body.name, profile_id=body.profile_id, activate=body.activate)
+    except vault.VaultError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return vault.status(conn)
+
+
+@app.post("/api/settings/llm-profiles/{profile_id}/activate")
+def llm_profile_activate(profile_id: str, principal: Principal = Depends(require_org_admin), conn=Depends(get_conn)):
+    try:
+        vault.activate(conn, profile_id, principal.username)
+    except vault.VaultError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return vault.status(conn)
+
+
+@app.delete("/api/settings/llm-profiles/{profile_id}")
+def llm_profile_delete(profile_id: str, principal: Principal = Depends(require_org_admin), conn=Depends(get_conn)):
+    try:
+        vault.delete_profile(conn, profile_id, principal.username)
+    except vault.VaultError as exc:
+        raise HTTPException(404, str(exc)) from exc
     return vault.status(conn)
 
 
@@ -1149,7 +1181,23 @@ def token_metrics(conn, tid: str, days: int = 7) -> dict:
         "WHERE e.tenant_id=? AND e.started_at>=? GROUP BY e.id ORDER BY sum(c.input_tokens+c.cache_read+c.cache_write+c.output_tokens) DESC LIMIT 10",
         (tid, since)).fetchall())
     return {"days": days, "by_purpose": by_purpose, "cache_hit_pct": round(100 * cached / total_in, 1) if total_in else None,
-            "tools": sorted(tools.values(), key=lambda t: -t["result_chars"])[:15], "top_turns": top_turns}
+            "tools": sorted(tools.values(), key=lambda t: -t["result_chars"])[:15], "top_turns": top_turns, **llm_usage(conn, tid)}
+
+
+def llm_usage(conn, tid: str, days: int = 14) -> dict:
+    """Token theo từng LLM (cấu hình · model): tổng và theo ngày, để vẽ biểu đồ."""
+    since = db.iso(db.now() - timedelta(days=days - 1)).split("T")[0]
+    label = "CASE WHEN llm IS NULL OR llm='' THEN coalesce(nullif(model,''),'(không rõ)') ELSE llm || ' · ' || coalesce(nullif(model,''),'?') END"
+    total = "input_tokens+cache_read+cache_write+output_tokens"
+    by_llm = db.rows(conn.execute(
+        f"SELECT {label} label, count(*) calls, sum(input_tokens) input, sum(cache_read) cache_read, sum(cache_write) cache_write, "
+        f"sum(output_tokens) output, sum({total}) total, min(at) first_at FROM llm_call WHERE tenant_id=? AND substr(at,1,10)>=? "
+        f"GROUP BY label ORDER BY total DESC", (tid, since)).fetchall())
+    daily = db.rows(conn.execute(
+        f"SELECT substr(at,1,10) day, {label} label, sum({total}) total, count(*) calls FROM llm_call WHERE tenant_id=? AND substr(at,1,10)>=? "
+        f"GROUP BY day, label ORDER BY day", (tid, since)).fetchall())
+    day_list = [db.iso(db.now() - timedelta(days=d)).split("T")[0] for d in range(days - 1, -1, -1)]
+    return {"llm_days": day_list, "by_llm": by_llm, "llm_daily": daily}
 
 
 def _base_metrics(e, n, status, decided, decisions, weekly) -> dict:
