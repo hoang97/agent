@@ -1,0 +1,26 @@
+# Chạy: KAGENT_SECRET_KEY lấy từ file .env cạnh file này (đã gitignore), rồi `docker compose up -d --build`.
+services:
+  kagent:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${KAGENT_BASE_IMAGE:-10.60.129.132:8890/python:3.12-bookworm}
+        PIP_INDEX_URL: ${KAGENT_PIP_INDEX_URL:-http://10.60.129.132:8081/repository/PyPI/simple}
+        PIP_TRUSTED_HOST: ${KAGENT_PIP_TRUSTED_HOST:-10.60.129.132}
+    image: kagent:local
+    restart: unless-stopped
+    ports:
+      - "${KAGENT_BIND:-127.0.0.1}:${KAGENT_PORT:-8000}:8000"  # KAGENT_BIND=0.0.0.0 để máy khác trong LAN truy cập
+    environment:
+      # Khóa chủ để ngoài volume dữ liệu, để bản sao dữ liệu không kèm khóa giải mã LLM key.
+      KAGENT_SECRET_KEY: ${KAGENT_SECRET_KEY:?đặt KAGENT_SECRET_KEY trong .env}
+      KAGENT_COOKIE_SECURE: ${KAGENT_COOKIE_SECURE:-0}  # 1 khi đứng sau HTTPS
+      KAGENT_ADMIN_PASSWORD: ${KAGENT_ADMIN_PASSWORD:-}
+      KAGENT_DEMO_PASSWORD: ${KAGENT_DEMO_PASSWORD:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      KAGENT_LLM: ${KAGENT_LLM:-auto}
+    volumes:
+      - kagent-data:/data
+
+volumes:
+  kagent-data:

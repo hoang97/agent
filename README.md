@@ -21,6 +21,19 @@ KAGENT_ADMIN_PASSWORD=<mật-khẩu> KAGENT_DEMO_PASSWORD=<mật-khẩu> .venv/b
 Tài khoản mẫu: `admin` (quản trị), `alice` (member), `bob` và `carol` (approver). Không đặt biến mật khẩu thì ứng dụng
 sinh mật khẩu ngẫu nhiên vào `data/initial-credentials.txt`. API docs ở `/api/docs`.
 
+## Chạy bằng Docker Compose
+
+```bash
+printf 'KAGENT_SECRET_KEY=%s\n' "$(openssl rand -base64 32 | tr '+/' '-_')" > .env   # chỉ lần đầu
+docker compose up -d --build
+docker compose exec kagent cat /data/initial-credentials.txt
+```
+
+Mở `http://127.0.0.1:8000`. Dữ liệu nằm trong volume `kagent-data`. Mặc định image gốc kéo từ registry `10.60.129.132:8890`
+và pip cài qua Nexus `10.60.129.132:8081`; ngoài mạng nội bộ thì đặt trong `.env`:
+`KAGENT_BASE_IMAGE=python:3.12-bookworm`, `KAGENT_PIP_INDEX_URL=https://pypi.org/simple`, `KAGENT_PIP_TRUSTED_HOST=pypi.org`.
+Các biến khác: `KAGENT_BIND=0.0.0.0` để mở cho LAN, `KAGENT_PORT`, `ANTHROPIC_API_KEY`, `KAGENT_ADMIN_PASSWORD`, `KAGENT_DEMO_PASSWORD`.
+
 ## Bật LLM
 
 Org admin chọn nhà cung cấp (Anthropic, relay Anthropic, OpenAI hoặc dịch vụ tương thích OpenAI) và nhập key ở tab **Cài đặt**.
