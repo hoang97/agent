@@ -979,7 +979,7 @@ def _compile_error(exc: compiler.CompileError) -> HTTPException:
 def compile_now(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     t.require_admin()
     try:
-        return compiler.compile_tenant(conn, t.tenant_id, t.principal.username)
+        return _run_view(compiler.compile_tenant(conn, t.tenant_id, t.principal.username))
     except compiler.CompileError as exc:
         raise _compile_error(exc) from exc
 
@@ -988,9 +988,13 @@ def compile_now(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
 def compile_runs(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     rows = db.rows(conn.execute("SELECT * FROM compile_run WHERE tenant_id=? AND status NOT IN ('stale','noop') ORDER BY created_at DESC, rowid DESC LIMIT 50",
                                 (t.tenant_id,)).fetchall(), "changed")
-    for r in rows:
-        r["summary"] = json.loads(r["summary"].split("\n", 1)[0]) if r.get("summary") else None  # dòng sau là dấu vân tay nội bộ
-    return rows
+    return [_run_view(r) for r in rows]
+
+
+def _run_view(r: dict) -> dict:
+    if r and isinstance(r.get("summary"), str):
+        r["summary"] = json.loads(r["summary"].split("\n", 1)[0])  # dòng sau là dấu vân tay nội bộ
+    return r
 
 
 class RetireRule(BaseModel):
@@ -1002,7 +1006,7 @@ def compile_retire_rule(body: RetireRule, t: Tenant = Depends(current_tenant), c
     t.require_admin()
     _visible_ku(conn, t, body.ku_id)
     try:
-        return compiler.retire_rule(conn, t.tenant_id, body.ku_id, t.principal.username)
+        return _run_view(compiler.retire_rule(conn, t.tenant_id, body.ku_id, t.principal.username))
     except compiler.CompileError as exc:
         raise _compile_error(exc) from exc
 
@@ -1015,7 +1019,7 @@ class Decide(BaseModel):
 def compile_decide(run_id: str, body: Decide, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     t.require_admin()
     try:
-        return compiler.decide(conn, t.tenant_id, run_id, body.approve, t.principal.username)
+        return _run_view(compiler.decide(conn, t.tenant_id, run_id, body.approve, t.principal.username))
     except compiler.CompileError as exc:
         raise _compile_error(exc) from exc
 
@@ -1306,7 +1310,8 @@ def policy_get(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     overlay = json.loads(r["policy"])
     return {"overlay": overlay, "effective": gateway.merge_policy(overlay), "baseline": gateway.BASELINE,
             "auto_promote": bool(r["auto_promote"]), "change_freeze": bool(r["change_freeze"]), "self_approve": bool(r["self_approve"]),
-            "grant_policy": gateway.grant_policy(conn, t.tenant_id), "grant_ttl_minutes": settings.grant_ttl_minutes}
+            "grant_policy": gateway.grant_policy(conn, t.tenant_id), "grant_ttl_minutes": settings.grant_ttl_minutes,
+            "rule_autopublish": compiler.autopublish_policy(conn, t.tenant_id)}
 
 
 class PolicyBody(BaseModel):
@@ -1329,6 +1334,7 @@ class TenantSettings(BaseModel):
     change_freeze: bool | None = None
     self_approve: bool | None = None
     grant_policy: dict | None = None
+    rule_autopublish: dict | None = None
 
 
 @app.patch("/api/tenant")
@@ -1341,6 +1347,13 @@ def tenant_patch(body: TenantSettings, t: Tenant = Depends(current_tenant), conn
     if body.self_approve is not None:
         conn.execute("UPDATE tenant SET self_approve=? WHERE id=?", (int(body.self_approve), t.tenant_id))
         log.info("tenant %s: %s đặt self_approve=%s", t.tenant_id, t.principal.username, body.self_approve)
+    if body.rule_autopublish is not None:
+        try:
+            merged = compiler.check_autopublish(body.rule_autopublish)
+        except ValueError as exc:
+            raise HTTPException(400, f"cấu hình tự publish quy ước không hợp lệ: {exc}") from exc
+        conn.execute("UPDATE tenant SET rule_autopublish=? WHERE id=?", (json.dumps(merged), t.tenant_id))
+        log.info("tenant %s: %s đặt rule_autopublish=%s", t.tenant_id, t.principal.username, merged)
     if body.grant_policy is not None:
         try:
             merged = gateway.check_grant_policy(body.grant_policy)

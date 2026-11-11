@@ -406,6 +406,17 @@ VIEWS.approvals = async (main) => {
 };
 
 // Đề xuất chờ duyệt: chỉ quy ước core và Skill; hiện danh sách quy ước thêm/bỏ bằng lời thay cho git diff.
+// Quy ước đã tự publish gần đây: để người duyệt xem lại và gỡ nếu chưa ổn.
+function autoPublishedSection(runs) {
+  const since = Date.now() - 14 * 86400000;
+  const items = runs.filter((r) => r.status === "published" && r.summary && r.summary.rules_auto && new Date(r.created_at).getTime() >= since)
+    .flatMap((r) => r.summary.rules_auto.map((x) => ({ ...x, at: r.created_at })));
+  if (!items.length) return null;
+  const retire = (ku) => guard(async () => { await api("POST", "/api/compile/retire-rule", { ku_id: ku }); toast("Đã gỡ quy ước khỏi core"); renderShell(); });
+  return h("div", {}, h("h2", {}, `Đã tự publish 14 ngày qua (${items.length})`), h("div", { class: "card" }, h("ol", {}, items.map((x) => h("li", { class: "rule-item" }, h("div", {}, x.content),
+    h("div", { class: "small muted" }, `tự publish lúc ${fmtTime(x.at)}`, isAdmin() && h("button", { type: "button", class: "ghost small-btn", onclick: retire(x.ku) }, "Gỡ khỏi core")))))));
+}
+
 function pendingSection(r) {
   if (!r) return h("div", {}, h("h2", {}, "Chờ duyệt"), h("div", { class: "card muted" }, "Không có thay đổi nào chờ duyệt. Playbook và hồ sơ thực thể được publish tự động."));
   const sm = r.summary || { rules_added: [], rules_removed: [], rules_kept: 0, skills: [] };
@@ -413,11 +424,12 @@ function pendingSection(r) {
   const retire = (ku) => guard(async () => { await api("POST", "/api/compile/retire-rule", { ku_id: ku }); toast("Đã bỏ quy ước, đề xuất được cập nhật"); renderShell(); });
   const trust = { user: "người dùng nói", verified_tool: "từ kết quả công cụ", internal_doc: "tài liệu nội bộ", external_untrusted: "nội dung ngoài" };
   const ruleItem = (x, removable) => h("li", { class: "rule-item" }, h("div", {}, x.content),
-    h("div", { class: "small muted" }, [trust[x.source_trust] || x.source_trust, x.episodes ? `${x.episodes} lượt chat` : null].filter(Boolean).join(" · "),
+    h("div", { class: "small muted" }, [trust[x.source_trust] || x.source_trust, x.episodes ? `${x.episodes} lượt chat` : null, x.why_review ? `chờ duyệt vì: ${x.why_review}` : null].filter(Boolean).join(" · "),
       removable && isAdmin() && h("button", { type: "button", class: "ghost small-btn", onclick: retire(x.ku), title: "Quy ước này hết hiệu lực và không được nạp vào agent" }, "Bỏ quy ước này")));
   return h("div", {}, h("h2", {}, "Chờ duyệt"), h("div", { class: "card" },
     h("p", { class: "small" }, `Quy ước trong khối core được nạp vào mọi lượt chat của tenant nên cần người duyệt. Đề xuất tạo lúc ${fmtTime(r.created_at)}; chỉ giữ đề xuất mới nhất.`),
     sm.rules_added.length > 0 && h("div", {}, h("b", {}, `Thêm ${sm.rules_added.length} quy ước`), h("ol", {}, sm.rules_added.map((x) => ruleItem(x, true)))),
+    (sm.rules_changed || []).length > 0 && h("div", {}, h("b", {}, `Sửa nội dung ${sm.rules_changed.length} quy ước`), h("ol", {}, sm.rules_changed.map((x) => ruleItem(x, true)))),
     sm.rules_removed.length > 0 && h("div", {}, h("b", {}, `Bỏ ${sm.rules_removed.length} quy ước`), h("ol", {}, sm.rules_removed.map((x) => ruleItem(x, false)))),
     sm.rules_kept > 0 && h("div", { class: "small muted" }, `Giữ nguyên ${sm.rules_kept} quy ước đang dùng.`),
     sm.skills.length > 0 && h("div", {}, h("b", {}, "Skill thay đổi: "), sm.skills.join(", ")),
@@ -437,10 +449,11 @@ VIEWS.compile = async (main) => {
   const addGolden = guard(async () => { await api("POST", "/api/golden", { query: query.value, expect_domain: domain.value, expect_terms: terms.value.split(",").map((s) => s.trim()).filter(Boolean) }); renderShell(); });
   main.append(h("h2", {}, "Tri thức biên dịch (L2)"), isAdmin() && h("div", { class: "row" }, h("button", { onclick: compile }, "Biên dịch ngay"), h("button", { class: "danger", onclick: rollback }, "Hoàn tác publish gần nhất")),
     h("div", { class: "split", style: null }, h("div", { class: "card filelist" }, h("h3", {}, "File"), files.length ? files.map((f) => h("button", { onclick: show(f) }, f)) : "Chưa có file."), h("div", { class: "card" }, h("h3", {}, "Nội dung"), viewer)),
-    pendingSection(runs.find((r) => r.status === "pending_review")),
+    pendingSection(runs.find((r) => r.status === "pending_review")), autoPublishedSection(runs),
     h("h2", {}, "Lịch sử publish"), runs.filter((r) => r.status !== "pending_review").length ? h("div", { class: "card scroll" }, h("table", {}, h("tbody", {},
       runs.filter((r) => r.status !== "pending_review").map((r) => h("tr", {}, h("td", {}, fmtTime(r.created_at)), h("td", {}, badge(r.status)),
-        h("td", {}, r.decided_by === "auto" ? "tự publish" : r.decided_by || r.actor), h("td", { class: "small" }, r.changed.join(", ") || r.reason || "")))))) : h("div", { class: "card muted" }, "Chưa biên dịch lần nào."),
+        h("td", {}, r.decided_by === "auto" ? "tự publish" : r.decided_by || r.actor),
+        h("td", { class: "small" }, r.changed.join(", ") || r.reason || "", r.summary && r.summary.rules_auto ? ` · ${r.summary.rules_auto.length} quy ước tự publish` : "")))))) : h("div", { class: "card muted" }, "Chưa biên dịch lần nào."),
     h("h2", {}, `Golden task (${golden.length})`), h("div", { class: "card" }, golden.map((g) => h("div", {}, g.query, " ", h("span", { class: "badge" }, g.expect_domain), " ", h("span", { class: "small" }, g.expect_terms.join(", ")))), isAdmin() && h("div", { class: "row" }, query, domain, terms, h("button", { class: "ghost", onclick: addGolden }, "Thêm"))));
 };
 
@@ -684,6 +697,24 @@ function personalSection() {
 
 const GRANT_MODE = { off: "không phủ", read: "chỉ lệnh đọc", all: "mọi lệnh" };
 
+function ruleAutopublishCard(p) {
+  const c = p.rule_autopublish;
+  const mode = h("select", { "aria-label": "Chế độ tự publish quy ước", disabled: !isAdmin() },
+    [["off", "Tắt: mọi quy ước chờ duyệt"], ["a", "Chỉ khi tenant_admin nói thẳng"], ["ab", "Tenant_admin nói thẳng, hoặc đã kiểm chứng qua sử dụng"]]
+      .map(([v, l]) => h("option", { value: v, selected: c.mode === v }, l)));
+  const num = (v, label) => h("input", { type: "number", min: 0, value: String(v), "aria-label": label, disabled: !isAdmin(), class: "narrow" });
+  const eps = num(c.min_episodes, "Số lượt chat xác nhận"), helpful = num(c.min_helpful, "Số lần hữu ích"), days = num(c.min_days, "Số ngày đã hiệu lực");
+  const save = guard(async () => {
+    await api("PATCH", "/api/tenant", { rule_autopublish: { mode: mode.value, min_episodes: Number(eps.value), min_helpful: Number(helpful.value), min_days: Number(days.value) } });
+    toast("Đã lưu"); renderShell();
+  });
+  return h("div", { class: "card" },
+    h("p", { class: "small" }, "Quy ước tự vào khối core khi: nguồn không phải nội dung ngoài, không mâu thuẫn hay trùng ý với quy ước đang dùng, không nói về cơ chế của agent, khối core còn trong ngân sách, điểm golden task không giảm; và hoặc do tenant_admin nói thẳng, hoặc đã kiểm chứng qua sử dụng theo các ngưỡng dưới đây. Quy ước tự publish bị tính có hại trong 14 ngày đầu sẽ tự rút khỏi core và chờ duyệt. Quy ước hết hiệu lực luôn được gỡ tự động."),
+    h("div", { class: "row" }, mode),
+    h("div", { class: "row small" }, "Kiểm chứng qua sử dụng: ít nhất", eps, "lượt chat xác nhận,", helpful, "lần hữu ích, 0 lần có hại, đã hiệu lực", days, "ngày"),
+    isAdmin() && h("div", { class: "row" }, h("button", { onclick: save }, "Lưu")));
+}
+
 function grantPolicyCard(p) {
   const envs = ["dev", "staging", "prod"];
   const controls = {};
@@ -729,6 +760,7 @@ VIEWS.policy = async (main) => {
       h("button", { class: "ghost", onclick: setFlag("self_approve", !p.self_approve) }, p.self_approve ? "Bắt buộc người khác duyệt lệnh" : "Cho người dùng tự duyệt lệnh")),
     h("div", { class: "small" }, p.self_approve ? "Người dùng tự xác nhận lệnh cần duyệt của chính mình. Thay đổi công cụ dùng chung vẫn cần admin." : "Lệnh cần duyệt phải do người có quyền duyệt khác xác nhận; R3 ở prod cần 2 người.")),
     h("h2", {}, `Cho phép trong ${p.grant_ttl_minutes} phút`), grantPolicyCard(p),
+    h("h2", {}, "Tự publish quy ước core"), ruleAutopublishCard(p),
     h("h2", {}, "Thử quyết định"), h("div", { class: "card" }, h("div", { class: "row" }, simTool, simEnv, simConf, h("button", { class: "ghost", onclick: sim }, "Thử")), simOut),
     isAdmin() && h("h2", {}, "Overlay của tenant (chỉ được siết)"), isAdmin() && h("div", { class: "card" }, editor, h("div", { class: "row" }, h("button", { onclick: save }, "Lưu"))),
     h("h2", {}, "Công cụ học được"), learnedToolsSection(false),

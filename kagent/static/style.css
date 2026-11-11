@@ -230,3 +230,4 @@ input.wide { flex: 1; min-width: 220px; }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; border-top-color: var(--line); background: var(--accent); transform: scale(.5); } }
 .rule-item { margin: 6px 0 10px; }
 .rule-item .small-btn { margin-left: 8px; }
+input.narrow { width: 70px; }

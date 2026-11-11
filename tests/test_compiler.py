@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from kagent import compiler, db, knowledge
 
 
@@ -104,7 +106,9 @@ def test_playbook_publishes_while_rules_wait_for_review(users):
     assert "Bài học về index" in a.get("/api/knowledge/file?path=playbooks/k8s_ops.md").json()["content"]  # đã publish ngay
     assert a.get("/api/knowledge/file?path=core/rules.md").status_code == 404  # quy ước chưa vào cho tới khi duyệt
     p = _pending(a)[0]
-    assert p["summary"]["rules_added"][0] == {"ku": rule["id"], "title": "R", "content": "Luôn nêu nguồn số liệu", "source_trust": "user", "episodes": 0}
+    added = p["summary"]["rules_added"][0]
+    assert {k: added[k] for k in ("ku", "title", "content", "source_trust", "episodes")} == {"ku": rule["id"], "title": "R", "content": "Luôn nêu nguồn số liệu", "source_trust": "user", "episodes": 0}
+    assert added["why_review"].startswith("chưa đủ")  # do Curator ghi, không phải tenant_admin nói thẳng
 
 
 def test_only_one_pending_proposal_and_no_duplicates(users):
@@ -147,3 +151,85 @@ def test_retire_rule_updates_proposal(users):
     assert [x["ku"] for x in added] == [keep["id"]]
     assert a.get(f"/api/ku/{drop['id']}").json()["status"] == "deprecated"
     assert users["alice"].post("/api/compile/retire-rule", json={"ku_id": keep["id"]}).status_code == 403
+
+
+# ---------- tự publish quy ước core ----------
+
+def _core(a):
+    r = a.get("/api/knowledge/file?path=core/rules.md")
+    return r.json()["content"] if r.status_code == 200 else ""
+
+
+def _proven(conn, tenant, content, days=8, helpful=3, eps=("e1", "e2", "e3"), trust="verified_tool"):
+    ku = knowledge.add(conn, tenant, kind="rule", title=content[:30], content=content, source_eps=list(eps), source_trust=trust, status="active")
+    conn.execute("UPDATE knowledge_unit SET helpful_cnt=?, recorded_at=? WHERE id=?", (helpful, db.later(days=-days), ku["id"]))
+    return ku
+
+
+def test_rule_said_by_tenant_admin_autopublishes(users):
+    a = users["admin"]
+    ku = a.post("/api/ku", json={"kind": "rule", "title": "Báo cáo", "content": "Báo cáo sự cố luôn mở đầu bằng tóm tắt ba dòng"}).json()
+    a.post(f"/api/ku/{ku['id']}/review", json={"approve": True})
+    r = a.post("/api/compile").json()
+    assert r["status"] == "published" and "tóm tắt ba dòng" in _core(a) and _pending(a) == []
+    assert r["summary"]["rules_auto"][0]["ku"] == ku["id"]
+
+
+def test_rule_proven_by_use_autopublishes_after_waiting_period(users):
+    a = users["admin"]
+    with db.session() as conn:
+        ready = _proven(conn, a.tenant, "Đếm lỗi bằng aggregation trên toàn bộ bản ghi")
+        young = _proven(conn, a.tenant, "Luôn ghi rõ khung thời gian khi báo số liệu", days=2)
+    a.post("/api/compile")
+    assert "aggregation" in _core(a) and "khung thời gian" not in _core(a)
+    waiting = _pending(a)[0]["summary"]["rules_added"]
+    assert [x["ku"] for x in waiting] == [young["id"]] and "chưa đủ 7 ngày" in waiting[0]["why_review"]
+    assert ready["id"]
+
+
+@pytest.mark.parametrize("content, trust, reason", [
+    ("Index log theo quy ước k8s-env-service-ngày", "external_untrusted", "nội dung ngoài"),
+    ("Khi lệnh bị giữ chờ duyệt thì liệt kê approval_id", "verified_tool", "cơ chế của agent"),
+])
+def test_rules_that_never_autopublish(users, content, trust, reason):
+    a = users["admin"]
+    with db.session() as conn:
+        _proven(conn, a.tenant, content, trust=trust)
+    a.post("/api/compile")
+    assert _core(a) == "" and reason in _pending(a)[0]["summary"]["rules_added"][0]["why_review"]
+
+
+def test_counter_change_alone_needs_no_review(users):
+    a = users["admin"]
+    with db.session() as conn:
+        ku = _proven(conn, a.tenant, "Đếm lỗi bằng aggregation trên toàn bộ bản ghi")
+    a.post("/api/compile")
+    with db.session() as conn:
+        conn.execute("UPDATE knowledge_unit SET helpful_cnt=9 WHERE id=?", (ku["id"],))
+    r = a.post("/api/compile").json()
+    assert r["status"] == "published" and "✓9" in _core(a) and _pending(a) == []
+
+
+def test_harmful_autopublished_rule_is_withdrawn_to_review(users):
+    a = users["admin"]
+    with db.session() as conn:
+        ku = _proven(conn, a.tenant, "Đếm lỗi bằng aggregation trên toàn bộ bản ghi")
+    a.post("/api/compile")
+    with db.session() as conn:
+        conn.execute("UPDATE knowledge_unit SET harmful_cnt=1 WHERE id=?", (ku["id"],))
+    a.post("/api/compile")
+    assert "aggregation" not in _core(a)
+    assert "bị tính có hại" in _pending(a)[0]["summary"]["rules_added"][0]["why_review"]
+
+
+def test_mode_off_and_policy_validation(users):
+    a = users["admin"]
+    assert a.get("/api/policy").json()["rule_autopublish"] == {"mode": "ab", "min_episodes": 3, "min_helpful": 3, "min_days": 7}
+    assert a.patch("/api/tenant", json={"rule_autopublish": {"mode": "x"}}).status_code == 400
+    assert a.patch("/api/tenant", json={"rule_autopublish": {"min_days": -1}}).status_code == 400
+    assert users["alice"].patch("/api/tenant", json={"rule_autopublish": {"mode": "off"}}).status_code == 403
+    a.patch("/api/tenant", json={"rule_autopublish": {"mode": "off"}})
+    with db.session() as conn:
+        _proven(conn, a.tenant, "Đếm lỗi bằng aggregation trên toàn bộ bản ghi")
+    a.post("/api/compile")
+    assert _core(a) == "" and "tắt tự publish" in _pending(a)[0]["summary"]["rules_added"][0]["why_review"]

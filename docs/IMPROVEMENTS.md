@@ -240,3 +240,14 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend 
 - **Tách phần tự publish:** playbook và hồ sơ thực thể publish ngay; chỉ khối core (nạp vào mọi lượt) và Skill chờ duyệt, theo đúng tài liệu kiến trúc.
 - **Một đề xuất duy nhất:** đề xuất mới thay đề xuất cũ (cũ chuyển stale, xóa nhánh); nội dung cần duyệt không đổi thì giữ đề xuất cũ. Duyệt khi main đã đi tiếp thì áp riêng các file cần duyệt lên main hiện tại thay vì báo "đề xuất đã cũ".
 - **Dễ đọc:** màn Biên dịch L2 hiện "Thêm N quy ước / Bỏ N quy ước / Giữ N" bằng lời, kèm nguồn (người dùng nói, từ kết quả công cụ, nội dung ngoài) và số lượt chat; nút "Bỏ quy ước này" cho từng quy ước (KU hết hiệu lực, đề xuất tự cập nhật); diff gốc thu gọn. Lịch sử publish thành bảng, ẩn bản stale và noop.
+
+## Đợt 31 — 2026-11-11: tự publish quy ước core theo điều kiện
+
+**Theo quyết định của chủ dự án (2026-11-11), khác tài liệu kiến trúc** (tài liệu yêu cầu mọi thay đổi khối core qua người duyệt). Mặc định bật "A + B", cấu hình theo tenant ở trang Chính sách (tắt / chỉ A / A + B, các ngưỡng của B).
+
+- **Điều kiện chặn** (vi phạm thì chờ duyệt, lý do hiện trong đề xuất): nguồn là nội dung ngoài; mâu thuẫn với tri thức đang hiệu lực; trùng ý với quy ước khác đang hiệu lực; nói về cơ chế của agent/hệ thống (danh sách từ khóa); vượt ngân sách khối core; điểm golden task giảm.
+- **Đường A:** nguồn là lời người dùng (khớp nguyên văn) và người nói, hoặc người thêm thủ công, là tenant_admin.
+- **Đường B:** nguồn đã kiểm chứng, ≥ 3 lượt chat xác nhận, ≥ 3 lần hữu ích, 0 lần có hại, đã hiệu lực ≥ 7 ngày. Không yêu cầu nhiều người dùng khác nhau (theo yêu cầu).
+- **Gỡ:** quy ước hết hiệu lực ở L1 tự được gỡ khỏi core; quy ước tự publish bị tính có hại trong 14 ngày đầu tự rút khỏi core và chờ duyệt. Chỉ bộ đếm ✓/✗ đổi thì không tạo đề xuất.
+- **Giao diện:** mỗi quy ước chờ duyệt ghi "chờ duyệt vì …"; trang Biên dịch L2 có mục "Đã tự publish 14 ngày qua" với nút gỡ; quy ước bị Curator sửa nội dung hiện riêng.
+- Khác đề xuất ban đầu: kiểm tra "nói về cơ chế agent" chỉ dùng từ khóa, chưa gọi LLM.

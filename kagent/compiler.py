@@ -9,6 +9,7 @@ import json
 import re
 import subprocess
 import threading
+from datetime import timedelta
 from pathlib import Path
 
 from . import db
@@ -201,7 +202,7 @@ def _write(tenant_id: str, files: dict[str, str]) -> None:
         target.write_text(content, encoding="utf-8", newline="\n")
 
 
-_RULE_LINE = re.compile(r"^- \[ku:([0-9a-f]{8})[^\]]*\] (.*)$", re.M)
+_RULE_LINE = re.compile(r"^- \[ku:([0-9a-f]{8})[^\]]*\] (.*)$", re.M)  # nhóm 2 là nội dung
 
 
 def _needs_review(path: str) -> bool:
@@ -215,15 +216,157 @@ def _summary(conn, tenant_id: str, current: dict[str, str], proposed: dict[str, 
         return {m.group(1): m.group(2) for m in _RULE_LINE.finditer(text or "")}
     old, new = rules(current.get("core/rules.md")), rules(proposed.get("core/rules.md"))
 
-    def info(short: str, content: str) -> dict:
-        r = conn.execute("SELECT id, title, source_trust, source_eps, recorded_at FROM knowledge_unit WHERE tenant_id=? AND id LIKE ?",
-                         (tenant_id, short + "%")).fetchone()
-        return {"ku": r["id"] if r else short, "title": r["title"] if r else "", "content": content,
-                "source_trust": r["source_trust"] if r else None, "episodes": len(json.loads(r["source_eps"])) if r else 0}
+    policy = autopublish_policy(conn, tenant_id)
+
+    def info(short: str, content: str, pending: bool = False) -> dict:
+        r = conn.execute("SELECT * FROM knowledge_unit WHERE tenant_id=? AND id LIKE ?", (tenant_id, short + "%")).fetchone()
+        ku = db.row(r, "entities", "source_eps") if r else None
+        out = {"ku": ku["id"] if ku else short, "title": ku["title"] if ku else "", "content": content,
+               "source_trust": ku["source_trust"] if ku else None, "episodes": len(ku["source_eps"]) if ku else 0}
+        if pending and ku:
+            out["why_review"] = rule_eligible(conn, tenant_id, ku, policy)[1]  # vì sao không tự publish
+        return out
     skills = sorted({p.split("/")[1] for p in set(current) | set(proposed) if p.startswith("skills/") and current.get(p) != proposed.get(p)})
-    return {"rules_added": [info(k, v) for k, v in new.items() if k not in old],
+    return {"rules_added": [info(k, v, True) for k, v in new.items() if k not in old],
+            "rules_changed": [info(k, v, True) for k, v in new.items() if k in old and old[k] != v],
             "rules_removed": [info(k, v) for k, v in old.items() if k not in new],
-            "rules_kept": len(set(old) & set(new)), "skills": skills}
+            "rules_kept": sum(1 for k in new if k in old and old[k] == new[k]), "skills": skills}
+
+
+# ---------- tự publish quy ước core ----------
+
+AUTOPUBLISH_MODES = ("off", "a", "ab")
+DEFAULT_AUTOPUBLISH = {"mode": "ab", "min_episodes": 3, "min_helpful": 3, "min_days": 7}
+WATCH_DAYS = 14  # quy ước tự publish bị tính có hại trong khoảng này thì rút khỏi core, quay về chờ duyệt
+# Quy ước nói về cơ chế của chính agent/hệ thống không bao giờ tự vào core: hệ thống đã biết, và dễ lệch với chỉ dẫn gốc.
+_INTERNAL = re.compile(r"gateway|approval|phê duyệt|duyệt lệnh|chờ duyệt|pending|data\.(query|script|propose_tool)|propose_tool|_filter|result_id|"
+                       r"công cụ học được|learned\.|tool call|tool_call|system prompt|reflector|curator", re.I)
+
+
+def check_autopublish(policy) -> dict:
+    if not isinstance(policy, dict) or set(policy) - set(DEFAULT_AUTOPUBLISH):
+        raise ValueError(f"chỉ gồm {sorted(DEFAULT_AUTOPUBLISH)}")
+    merged = {**DEFAULT_AUTOPUBLISH, **policy}
+    if merged["mode"] not in AUTOPUBLISH_MODES:
+        raise ValueError(f"mode phải thuộc {list(AUTOPUBLISH_MODES)}")
+    for k, low, high in (("min_episodes", 1, 100), ("min_helpful", 0, 1000), ("min_days", 0, 365)):
+        if isinstance(merged[k], bool) or not isinstance(merged[k], int) or not low <= merged[k] <= high:
+            raise ValueError(f"{k} phải là số nguyên {low}-{high}")
+    return merged
+
+
+def autopublish_policy(conn, tenant_id: str) -> dict:
+    r = conn.execute("SELECT rule_autopublish FROM tenant WHERE id=?", (tenant_id,)).fetchone()
+    try:
+        return check_autopublish(json.loads(r["rule_autopublish"]) if r and r["rule_autopublish"] else {})
+    except (ValueError, TypeError):
+        return dict(DEFAULT_AUTOPUBLISH)
+
+
+def _is_tenant_admin(conn, tenant_id: str, user_id: str | None = None, username: str | None = None) -> bool:
+    if username:
+        u = conn.execute("SELECT id FROM app_user WHERE username=?", (username,)).fetchone()
+        user_id = u["id"] if u else None
+    if not user_id:
+        return False
+    if conn.execute("SELECT 1 FROM app_user WHERE id=? AND is_org_admin=1", (user_id,)).fetchone():
+        return True
+    return conn.execute("SELECT 1 FROM membership WHERE tenant_id=? AND user_id=? AND role='tenant_admin'", (tenant_id, user_id)).fetchone() is not None
+
+
+def _events(conn, tenant_id: str, ku_id: str, op: str) -> list:
+    return conn.execute("SELECT actor, at FROM ku_event WHERE tenant_id=? AND ku_id=? AND op=? ORDER BY id", (tenant_id, ku_id, op)).fetchall()
+
+
+def withdrawn(conn, tenant_id: str, ku: dict) -> bool:
+    """Tự publish gần đây (trong WATCH_DAYS) rồi bị tính có hại: rút khỏi core, chờ người duyệt."""
+    pub = _events(conn, tenant_id, ku["id"], "AUTOPUBLISH")
+    return bool(pub) and ku["harmful_cnt"] > 0 and pub[-1]["at"] >= db.iso(db.now() - timedelta(days=WATCH_DAYS))
+
+
+def rule_eligible(conn, tenant_id: str, ku: dict, policy: dict) -> tuple[bool, str]:
+    """Quy ước có được tự vào core không, kèm lý do (hiện cho người duyệt)."""
+    if policy["mode"] == "off":
+        return False, "tenant tắt tự publish quy ước"
+    if ku["source_trust"] == "external_untrusted":
+        return False, "nguồn là nội dung ngoài"
+    if withdrawn(conn, tenant_id, ku):
+        return False, "đã tự publish nhưng bị tính có hại"
+    if _INTERNAL.search(f"{ku['title']} {ku['content']}"):
+        return False, "nói về cơ chế của agent/hệ thống"
+    if conn.execute("SELECT 1 FROM ku_edge e JOIN knowledge_unit k ON k.id=e.dst WHERE e.tenant_id=? AND e.src=? AND e.rel='contradicts' AND k.status='active'",
+                    (tenant_id, ku["id"])).fetchone():
+        return False, "mâu thuẫn với tri thức đang hiệu lực"
+    from .retrieval import near
+    dup = [n for n in near(conn, tenant_id, f"{ku['title']} {ku['content']}", "rule", settings.confirm_threshold, scope=ku["scope"])
+           if n["id"] != ku["id"] and n["status"] == "active"]
+    if dup:
+        return False, "trùng ý với quy ước khác đang hiệu lực"
+    # Đường A: người có quyền tenant_admin nói thẳng (trong chat, hoặc thêm thủ công).
+    if ku["source_trust"] == "user":
+        speakers = [r["user_id"] for r in conn.execute(
+            f"SELECT user_id FROM episode WHERE tenant_id=? AND id IN ({','.join('?' * len(ku['source_eps']))})", (tenant_id, *ku["source_eps"])).fetchall()] \
+            if ku["source_eps"] else []
+        added_by = [r["actor"] for r in _events(conn, tenant_id, ku["id"], "ADD")]
+        if any(_is_tenant_admin(conn, tenant_id, user_id=u) for u in speakers) or any(_is_tenant_admin(conn, tenant_id, username=a) for a in added_by):
+            return True, "tenant_admin nói thẳng"
+        if policy["mode"] == "a":
+            return False, "người nói không phải tenant_admin"
+    if policy["mode"] != "ab":
+        return False, "chỉ bật đường người có quyền nói thẳng"
+    # Đường B: đã kiểm chứng qua sử dụng.
+    promoted = _events(conn, tenant_id, ku["id"], "PROMOTE")
+    since = promoted[-1]["at"] if promoted else ku["recorded_at"]
+    missing = []
+    if len(set(ku["source_eps"])) < policy["min_episodes"]:
+        missing.append(f"{len(set(ku['source_eps']))}/{policy['min_episodes']} lượt xác nhận")
+    if ku["helpful_cnt"] < policy["min_helpful"]:
+        missing.append(f"{ku['helpful_cnt']}/{policy['min_helpful']} lần hữu ích")
+    if ku["harmful_cnt"] > 0:
+        missing.append(f"{ku['harmful_cnt']} lần có hại")
+    if since > db.iso(db.now() - timedelta(days=policy["min_days"])):
+        missing.append(f"hiệu lực chưa đủ {policy['min_days']} ngày")
+    return (False, "chưa đủ: " + ", ".join(missing)) if missing else (True, "đã kiểm chứng qua sử dụng")
+
+
+def _auto_core(conn, tenant_id: str, published: str | None, proposed: str | None) -> tuple[str | None, list[dict]]:
+    """Khối core sẽ tự publish: bỏ quy ước không còn hiệu lực, thêm quy ước đủ điều kiện; phần còn lại chờ duyệt.
+
+    Trả về (nội dung core, các KU vừa được tự thêm). Quy ước đang có mà nội dung bị sửa thì giữ bản cũ cho tới khi đủ điều kiện hoặc được duyệt.
+    """
+    policy = autopublish_policy(conn, tenant_id)
+    old = {m.group(1): m.group(0) for m in _RULE_LINE.finditer(published or "")}
+    old_text = {m.group(1): m.group(2) for m in _RULE_LINE.finditer(published or "")}
+    new = [(m.group(1), m.group(0), m.group(2)) for m in _RULE_LINE.finditer(proposed or "")]
+    lines, added, used = [], [], 0
+    for short, line, text in new:
+        ku = conn.execute("SELECT * FROM knowledge_unit WHERE tenant_id=? AND id LIKE ?", (tenant_id, short + "%")).fetchone()
+        ku = db.row(ku, "entities", "source_eps") if ku else None
+        if ku is None:
+            continue
+        if short in old and withdrawn(conn, tenant_id, ku):
+            continue  # rút khỏi core
+        if short in old and old_text[short] == text:
+            keep = line  # nội dung không đổi: chỉ bộ đếm ✓/✗ cập nhật, không cần duyệt
+        else:
+            ok, _ = rule_eligible(conn, tenant_id, ku, policy)
+            keep = line if ok else old.get(short)
+            if ok:
+                added.append(ku)
+        if keep is None:
+            continue
+        if used + len(keep) > settings.budget_core * 4:
+            if keep != old.get(short):
+                added = [a for a in added if a["id"] != ku["id"]]  # vượt ngân sách core: để người duyệt chọn
+                keep = old.get(short)
+            if keep is None:
+                continue
+        lines.append(keep)
+        used += len(keep)
+    # Quy ước đã publish mà không còn trong bản mới (hết hiệu lực ở L1) thì tự gỡ.
+    if not lines:
+        return None, added
+    return "# Quy ước (luôn nạp)\n\n" + "\n".join(lines) + "\n", added
 
 
 def _commit_main(tenant_id: str, files: dict[str, str], current: dict[str, str], changed: list[str], actor: str, message: str) -> str:
@@ -262,17 +405,23 @@ def compile_tenant(conn, tenant_id: str, actor: str = "compiler") -> dict:
             return _record(conn, tenant_id, run_id, "blocked", actor, changed=changed, score_before=before, score_after=after,
                            reason="điểm golden task giảm")
 
-        auto_changed = [p for p in changed if not _needs_review(p)]
-        review_changed = [p for p in changed if _needs_review(p)]
+        # Bản publish ngay: playbook, hồ sơ thực thể theo bản mới; core gồm quy ước đủ điều kiện tự publish; Skill giữ bản đang publish.
+        auto_files = {p: c for p, c in new_files.items() if not _needs_review(p)} | {p: c for p, c in current.items() if p.startswith("skills/")}
+        core, auto_rules = _auto_core(conn, tenant_id, current.get("core/rules.md"), new_files.get("core/rules.md"))
+        if core:
+            auto_files["core/rules.md"] = core
+        auto_changed = _changed(current, auto_files)
         result = None
         if auto_changed:
-            # Bản publish ngay: phần không cần duyệt theo bản mới, phần cần duyệt giữ nguyên bản đang publish.
-            auto_files = {p: c for p, c in new_files.items() if not _needs_review(p)} | {p: c for p, c in current.items() if _needs_review(p)}
-            auto_files.pop("CHANGELOG.md", None)
             sha = _commit_main(tenant_id, auto_files, current, auto_changed, actor, f"compile {run_id[:8]}: tự publish {len(auto_changed)} file")
             result = _record(conn, tenant_id, run_id, "published", actor, changed=auto_changed, commit_sha=sha, decided_at=db.iso(), decided_by="auto",
-                             score_before=before, score_after=after)
+                             score_before=before, score_after=after,
+                             summary=json.dumps({"rules_auto": [{"ku": k["id"], "content": k["content"]} for k in auto_rules]}, ensure_ascii=False) if auto_rules else None)
+            for k in auto_rules:
+                conn.execute("INSERT INTO ku_event(tenant_id,ku_id,op,actor,reason,at) VALUES (?,?,?,?,?,?)",
+                             (tenant_id, k["id"], "AUTOPUBLISH", "compiler", "tự publish vào khối core", db.iso()))
             current = read_published(tenant_id)
+        review_changed = _changed(current, new_files)
         if not review_changed:
             _supersede_pending(conn, tenant_id)
             return result
@@ -283,6 +432,9 @@ def compile_tenant(conn, tenant_id: str, actor: str = "compiler") -> dict:
         # Nội dung cần duyệt không đổi thì giữ đề xuất cũ (kể cả khi main đã đi tiếp: _merge áp riêng file cần duyệt).
         if pending is not None and (pending["summary"] or "").endswith(fingerprint):
             _supersede_pending(conn, tenant_id, keep=pending["id"])
+            # Lý do chờ duyệt đổi theo thời gian (số ngày, số lần hữu ích): làm mới tóm tắt.
+            conn.execute("UPDATE compile_run SET summary=? WHERE id=?", (json.dumps(summary, ensure_ascii=False) + "\n" + fingerprint, pending["id"]))
+            pending = conn.execute("SELECT * FROM compile_run WHERE id=?", (pending["id"],)).fetchone()
             return result or db.row(pending, "changed")  # đề xuất đang chờ vẫn đúng: không tạo thêm bản trùng
 
         review_id = db.new_id() if result else run_id
