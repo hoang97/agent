@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from . import agent as agent_mod
 from . import compiler, connections, db, gateway, knowledge, learned, learning, llm, tools, vault
 from .config import settings
+from .retrieval import retrieve
 from .scheduler import Scheduler
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -725,6 +726,41 @@ class NewKU(BaseModel):
     applies_when: str | None = Field(default=None, max_length=500)
     entities: list[str] = []
     domain: str = "general"
+
+
+GRAPH_LIMIT = 200
+
+
+@app.get("/api/knowledge/graph")
+def knowledge_graph(q: str = "", entity: str = "", include_candidates: bool = False, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    """L3 để tra cứu: KU nối với thực thể và với nhau. q dùng đúng truy xuất lai của agent; entity lọc quanh một thực thể."""
+    statuses = ("active", "candidate") if include_candidates else ("active",)
+    def visible(a: str = "") -> str:
+        return f"{a}tenant_id=? AND {a}status IN ({','.join('?' * len(statuses))}) AND ({a}scope NOT LIKE 'user:%' OR {a}scope=?)"
+    args = [t.tenant_id, *statuses, f"user:{t.user_id}"]
+    hits: dict[str, float] = {}
+    if q.strip():
+        for ku in retrieve(conn, t.tenant_id, q.strip(), user_id=t.user_id, k=30):
+            hits[ku["id"]] = ku["score"]
+        ids = list(hits)
+        rows = conn.execute(f"SELECT * FROM knowledge_unit WHERE {visible()} AND id IN ({','.join('?' * len(ids))})", (*args, *ids)).fetchall() if ids else []
+    elif entity.strip():
+        rows = conn.execute(f"SELECT k.* FROM knowledge_unit k, json_each(k.entities) e WHERE {visible('k.')} "
+                            "AND e.value=? LIMIT ?", (*args, entity.strip(), GRAPH_LIMIT)).fetchall()
+    else:
+        rows = conn.execute(f"SELECT * FROM knowledge_unit WHERE {visible()} ORDER BY helpful_cnt DESC, recorded_at DESC LIMIT ?", (*args, GRAPH_LIMIT)).fetchall()
+    kus = db.rows(rows, "entities", "source_eps")
+    ids = [k["id"] for k in kus]
+    edges = db.rows(conn.execute(f"SELECT src, dst, rel FROM ku_edge WHERE tenant_id=? AND src IN ({','.join('?' * len(ids))}) AND dst IN ({','.join('?' * len(ids))})",
+                                 (t.tenant_id, *ids, *ids)).fetchall()) if ids else []
+    counts = db.rows(conn.execute(f"SELECT e.value entity, count(*) n FROM knowledge_unit k, json_each(k.entities) e WHERE "
+                                  f"{visible('k.')} "
+                                  "GROUP BY e.value ORDER BY n DESC LIMIT 60", args).fetchall())
+    nodes = [{k2: k[k2] for k2 in ("id", "kind", "status", "title", "content", "applies_when", "entities", "source_trust", "helpful_cnt", "harmful_cnt", "domain")}
+             | ({"score": hits[k["id"]]} if k["id"] in hits else {}) for k in kus]
+    if hits:
+        nodes.sort(key=lambda n: -n.get("score", 0))
+    return {"nodes": nodes, "edges": edges, "entities": counts}
 
 
 @app.post("/api/ku")

@@ -231,3 +231,21 @@ input.wide { flex: 1; min-width: 220px; }
 .rule-item { margin: 6px 0 10px; }
 .rule-item .small-btn { margin-left: 8px; }
 input.narrow { width: 70px; }
+.subtabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 0 0 14px; flex-wrap: wrap; }
+.subtab { background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0; color: var(--muted); padding: 8px 12px; cursor: pointer; }
+.subtab.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+.kg-split { display: grid; grid-template-columns: minmax(0, 2fr) minmax(220px, 1fr); gap: 12px; align-items: start; }
+@media (max-width: 900px) { .kg-split { grid-template-columns: 1fr; } }
+.kg-graph svg { width: 100%; height: auto; display: block; }
+.kg-link { stroke: var(--line); stroke-width: 1; }
+.kg-link.refines { stroke: var(--muted); stroke-dasharray: 4 3; }
+.kg-link.contradicts { stroke: var(--bad); stroke-width: 1.5; }
+.kg-ku { stroke: var(--panel); stroke-width: 1.5; cursor: pointer; }
+.kg-ku.cand { fill: var(--panel); stroke-width: 2; }
+.kg-ku.cand.s1 { stroke: var(--series-1); } .kg-ku.cand.s2 { stroke: var(--series-2); } .kg-ku.cand.s3 { stroke: var(--series-3); }
+.kg-ku.cand.s4 { stroke: var(--series-4); } .kg-ku.cand.s5 { stroke: var(--series-5); }
+.kg-ent rect { fill: var(--muted); cursor: pointer; } .kg-ent text { fill: var(--text); font-size: 11px; cursor: pointer; }
+.ent-sw { background: var(--muted); border-radius: 2px; }
+.sw-badge { color: #fff; }
+.kg-item { cursor: pointer; } .kg-item:hover { background: var(--hover); }
+.kg-detail { position: sticky; top: 0; }

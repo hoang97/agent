@@ -251,3 +251,11 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend 
 - **Gỡ:** quy ước hết hiệu lực ở L1 tự được gỡ khỏi core; quy ước tự publish bị tính có hại trong 14 ngày đầu tự rút khỏi core và chờ duyệt. Chỉ bộ đếm ✓/✗ đổi thì không tạo đề xuất.
 - **Giao diện:** mỗi quy ước chờ duyệt ghi "chờ duyệt vì …"; trang Biên dịch L2 có mục "Đã tự publish 14 ngày qua" với nút gỡ; quy ước bị Curator sửa nội dung hiện riêng.
 - Khác đề xuất ban đầu: kiểm tra "nói về cơ chế agent" chỉ dùng từ khóa, chưa gọi LLM.
+
+## Đợt 32 — 2026-11-11: sắp xếp lại sidebar, tra cứu L3
+
+- **Tri thức** gộp L1, L2, L3 thành ba tab con: "Tra cứu (L3)" (mặc định), "Đơn vị tri thức (L1)", "Biên dịch (L2)".
+- **Tra cứu (L3):** ô tra cứu dùng đúng truy xuất lai của agent (vector + BM25 + đồ thị), nên kết quả là những tri thức agent sẽ nạp cho câu hỏi đó, kèm điểm; duyệt theo thực thể; đồ thị SVG (nút tri thức tô màu theo loại, nút thực thể, cạnh gộp/mâu thuẫn) với bố cục lực tự viết vì CSP không cho tải thư viện ngoài. API `GET /api/knowledge/graph`.
+- **Công cụ** gộp "Kết nối công cụ" với danh mục công cụ và công cụ học được (tab con "Kết nối", "Danh mục & quyền").
+- **Cài đặt** gồm tab "Chính sách" (mọi người xem, admin sửa) và "LLM" (chỉ org admin). Giữ trang Duyệt lệnh.
+- Link và trạng thái cũ (`connections`, `compile`, `policy`) tự chuyển sang mục mới; tab con nằm trên URL.

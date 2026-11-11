@@ -78,30 +78,51 @@ function renderLogin() {
   user.focus();
 }
 
-const TABS = [["connections", "Kết nối công cụ"], ["episodes", "Nhật ký"], ["knowledge", "Tri thức"], ["approvals", "Duyệt lệnh"], ["compile", "Biên dịch L2"], ["policy", "Công cụ & Chính sách"], ["metrics", "Đo lường"], ["audit", "Audit"], ["settings", "Cài đặt"], ["account", "Tài khoản"]];
+const TABS = [["knowledge", "Tri thức"], ["tools", "Công cụ"], ["approvals", "Duyệt lệnh"], ["episodes", "Nhật ký"], ["metrics", "Đo lường"], ["audit", "Audit"], ["settings", "Cài đặt"], ["account", "Tài khoản"]];
+// Link và localStorage cũ còn trỏ tới các mục đã gộp.
+const OLD_TABS = { connections: ["tools", "connections"], compile: ["knowledge", "compiled"], policy: ["settings", "policy"] };
 const VIEWS = {};
 let conversationList = null;
 
 function closeSidebar() { document.querySelector(".sidebar")?.classList.remove("open"); document.querySelector(".scrim")?.classList.remove("open"); }
 // Vị trí hiện tại nằm trên URL (#/t/<tenant>/<màn>[/<hội thoại>]) để refresh, Back/Forward và link mở đúng chỗ.
 function routeHash() {
-  return `#/t/${state.tenant.id}/${state.tab}${state.tab === "chat" && state.conversationId ? "/" + state.conversationId : ""}`;
+  const extra = state.tab === "chat" ? state.conversationId : state.sub;
+  return `#/t/${state.tenant.id}/${state.tab}${extra ? "/" + extra : ""}`;
 }
 function syncUrl(replace) {
   if (!state.tenant || location.hash === routeHash()) return;
   history[replace ? "replaceState" : "pushState"](null, "", routeHash());
 }
 function applyHash() {
-  const [, t, tenantId, tab, conv] = location.hash.split("/");
+  let [, t, tenantId, tab, extra] = location.hash.split("/");
   if (t !== "t") return;
   const tenant = state.me.tenants.find((x) => x.id === tenantId);
   if (tenant) state.tenant = tenant;
-  const allowed = tab === "chat" || TABS.some(([id]) => id === tab && (id !== "settings" || state.me.is_org_admin));
-  state.tab = allowed ? tab : "chat";
-  state.conversationId = state.tab === "chat" && conv ? conv : null;
+  if (OLD_TABS[tab]) [tab, extra] = OLD_TABS[tab];
+  state.tab = tab === "chat" || TABS.some(([id]) => id === tab) ? tab : "chat";
+  state.conversationId = state.tab === "chat" && extra ? extra : null;
+  state.sub = state.tab !== "chat" && extra ? extra : null;
 }
 window.addEventListener("popstate", () => { if (state.me) { applyHash(); renderShell(); } });
-function go(tab, conversationId) { state.tab = tab; if (conversationId !== undefined) state.conversationId = conversationId; syncUrl(); renderShell(); }
+function go(tab, conversationId, sub) {
+  state.tab = tab;
+  state.sub = sub || null;
+  if (conversationId !== undefined) state.conversationId = conversationId;
+  syncUrl();
+  renderShell();
+}
+
+// Thanh tab con trong một mục (vd Tri thức: Tra cứu / Đơn vị tri thức / Biên dịch). Tab con nằm trên URL nên refresh giữ nguyên.
+async function subTabs(main, tabs) {
+  const key = tabs.some(([k]) => k === state.sub) ? state.sub : tabs[0][0];
+  const body = h("div");
+  main.append(h("div", { class: "subtabs", role: "tablist" }, tabs.map(([k, label]) =>
+    h("button", { type: "button", role: "tab", class: "subtab" + (k === key ? " active" : ""), "aria-selected": k === key ? "true" : "false",
+      onclick: () => { if (k !== key) go(state.tab, undefined, k); } }, label))), body);
+  body.append = (...kids) => appendKids(body, kids);
+  await tabs.find(([k]) => k === key)[2](body);
+}
 
 // Trạng thái từng màn (nội dung đang gõ, bộ lọc, job đang chạy) lưu trong trình duyệt theo người dùng và tenant.
 // Không bao giờ lưu key, mật khẩu hay secret. localStorage có thể bị chặn (cửa sổ ẩn danh) nên mọi truy cập đều bọc try.
@@ -164,7 +185,7 @@ function renderShell() {
     state.me.tenants.map((t) => h("option", { value: t.id, selected: t.id === state.tenant.id }, t.name)));
   const logout = guard(async () => { await api("POST", "/api/auth/logout"); state.me = null; state.conversationId = null; state.tab = "chat"; history.replaceState(null, "", location.pathname); renderLogin(); });
   conversationList = h("div", { class: "conv-list" });
-  const pages = TABS.filter(([id]) => id !== "settings" || state.me.is_org_admin);
+  const pages = TABS;
   const adminOpen = pages.some(([id]) => id === state.tab);
   const sidebar = h("aside", { class: "sidebar" },
     h("div", { class: "brand" }, h("strong", {}, "Knowledge Agent"), tenants),
@@ -223,7 +244,7 @@ VIEWS.episodes = async (main) => {
     h("tbody", {}, list.map((e) => h("tr", { class: "click", onclick: open(e.id) }, h("td", {}, fmtTime(e.started_at)), h("td", {}, e.input.task), h("td", {}, e.task_type), h("td", {}, e.env), h("td", {}, badge(e.outcome)), h("td", {}, e.user), h("td", {}, e.processed_at ? "rồi" : "chưa")))))), detail);
 };
 
-VIEWS.knowledge = async (main) => {
+async function knowledgeUnitsView(main) {
   const statusSel = persist(h("select", { "aria-label": "Trạng thái", onchange: () => load() }, [["candidate", "Ứng viên"], ["active", "Hiệu lực"], ["deprecated", "Hết hiệu lực"], ["rejected", "Bị loại"], ["", "Tất cả"]].map(([v, l]) => h("option", { value: v }, l))), "ku:status");
   const kindSel = persist(h("select", { "aria-label": "Loại", onchange: () => load() }, [["", "Mọi loại"], ...["rule", "fact", "procedure", "lesson", "insight"].map((k) => [k, k])].map(([v, l]) => h("option", { value: v }, l))), "ku:kind");
   const box = h("div");
@@ -437,7 +458,7 @@ function pendingSection(r) {
     isAdmin() && h("div", { class: "row" }, h("button", { onclick: decide(true) }, "Publish"), h("button", { class: "danger", onclick: decide(false) }, "Từ chối cả đề xuất"))));
 }
 
-VIEWS.compile = async (main) => {
+async function compiledView(main) {
   const [runs, files, golden] = await Promise.all([api("GET", "/api/compile/runs"), api("GET", "/api/knowledge/files"), api("GET", "/api/golden")]);
   const viewer = h("pre", {}, "Chọn một file.");
   const show = (path) => guard(async () => { const f = await api("GET", "/api/knowledge/file?path=" + encodeURIComponent(path)); viewer.textContent = f.content; });
@@ -588,10 +609,10 @@ function connectionForm(templates, existing, onDone) {
     fieldsBox, h("div", { class: "row" }, h("button", { type: "submit" }, existing ? "Lưu" : "Tạo kết nối"), existing && h("button", { type: "button", class: "ghost", onclick: onDone }, "Đóng")));
 }
 
-VIEWS.connections = async (main) => {
+async function connectionsView(main) {
   const [templates, list] = await Promise.all([api("GET", "/api/templates"), api("GET", "/api/connections")]);
   const editor = h("div");
-  const reload = () => { state.tab = "connections"; renderShell(); };
+  const reload = () => renderShell();
   const action = (c, fn) => guard(async () => { await fn(); reload(); });
   function card(c) {
     const result = h("div", { class: "small" });
@@ -741,7 +762,7 @@ function grantPolicyCard(p) {
     isAdmin() && h("div", { class: "row" }, h("button", { onclick: save }, "Lưu")));
 }
 
-VIEWS.policy = async (main) => {
+async function policyView(main) {
   const [tools, p] = await Promise.all([api("GET", "/api/tools"), api("GET", "/api/policy")]);
   const cellText = (c) => (typeof c === "string" ? ({ auto: "tự động", ask: "luôn hỏi", block: "chặn" }[c]) : c.ask_below !== undefined ? `hỏi nếu < ${c.ask_below}` : `hỏi, ${c.ask} người`);
   const editor = persist(h("textarea", { class: "code", value: JSON.stringify(p.overlay, null, 2), "aria-label": "Overlay chính sách" }), "policy:overlay");
@@ -762,10 +783,113 @@ VIEWS.policy = async (main) => {
     h("h2", {}, `Cho phép trong ${p.grant_ttl_minutes} phút`), grantPolicyCard(p),
     h("h2", {}, "Tự publish quy ước core"), ruleAutopublishCard(p),
     h("h2", {}, "Thử quyết định"), h("div", { class: "card" }, h("div", { class: "row" }, simTool, simEnv, simConf, h("button", { class: "ghost", onclick: sim }, "Thử")), simOut),
-    isAdmin() && h("h2", {}, "Overlay của tenant (chỉ được siết)"), isAdmin() && h("div", { class: "card" }, editor, h("div", { class: "row" }, h("button", { onclick: save }, "Lưu"))),
-    h("h2", {}, "Công cụ học được"), learnedToolsSection(false),
-    h("h2", {}, "Danh mục công cụ"), toolCatalogSection());
-};
+    isAdmin() && h("h2", {}, "Overlay của tenant (chỉ được siết)"), isAdmin() && h("div", { class: "card" }, editor, h("div", { class: "row" }, h("button", { onclick: save }, "Lưu"))));
+}
+
+const KIND_CLASS = { rule: "s1", fact: "s2", procedure: "s3", lesson: "s4", insight: "s5" };
+const KIND_LABEL = { rule: "quy ước", fact: "sự thật", procedure: "thủ tục", lesson: "bài học", insight: "chiến lược" };
+
+// Bố cục lực đơn giản (đẩy nhau, kéo theo cạnh, hút nhẹ về tâm); đủ cho vài trăm nút, không cần thư viện.
+function forceLayout(nodes, links, W, H) {
+  const idx = new Map(nodes.map((n, i) => [n.id, i]));
+  nodes.forEach((n, i) => { const a = (i / nodes.length) * Math.PI * 2; n.x = W / 2 + Math.cos(a) * W * 0.3; n.y = H / 2 + Math.sin(a) * H * 0.3; });
+  const L = links.map((l) => [idx.get(l.source), idx.get(l.target)]).filter(([a, b]) => a !== undefined && b !== undefined);
+  for (let it = 0; it < 220; it++) {
+    const t = 1 - it / 220;
+    const fx = new Float64Array(nodes.length), fy = new Float64Array(nodes.length);
+    for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
+      const dx = nodes[i].x - nodes[j].x, dy = nodes[i].y - nodes[j].y, d2 = Math.max(dx * dx + dy * dy, 25), f = 1800 / d2;
+      fx[i] += dx * f; fy[i] += dy * f; fx[j] -= dx * f; fy[j] -= dy * f;
+    }
+    for (const [a, b] of L) {
+      const dx = nodes[b].x - nodes[a].x, dy = nodes[b].y - nodes[a].y, d = Math.sqrt(dx * dx + dy * dy) || 1, f = (d - 60) * 0.06;
+      fx[a] += (dx / d) * f; fy[a] += (dy / d) * f; fx[b] -= (dx / d) * f; fy[b] -= (dy / d) * f;
+    }
+    nodes.forEach((n, i) => {
+      fx[i] += (W / 2 - n.x) * 0.01; fy[i] += (H / 2 - n.y) * 0.01;
+      n.x = Math.min(W - 12, Math.max(12, n.x + Math.max(-20, Math.min(20, fx[i])) * t));
+      n.y = Math.min(H - 12, Math.max(12, n.y + Math.max(-20, Math.min(20, fy[i])) * t));
+    });
+  }
+}
+
+async function knowledgeGraphView(main) {
+  const q = persist(h("input", { class: "wide", placeholder: "Tra cứu như khi hỏi agent, ví dụ: đếm lỗi 500 của cmp-backend", "aria-label": "Tra cứu tri thức" }), "kg:q");
+  const withCandidates = persist(h("input", { type: "checkbox", "aria-label": "Gồm cả ứng viên" }), "kg:cand");
+  let entity = store.get("kg:entity", "");
+  const chips = h("div", { class: "tool-perms" });
+  const graphBox = h("div", { class: "card kg-graph" });
+  const detail = h("div", { class: "card kg-detail" }, h("div", { class: "small muted" }, "Chọn một nút để xem chi tiết. Nút tròn nhỏ là tri thức, nút vuông là thực thể (service, công cụ…)."));
+  const list = h("div");
+  const setEntity = (e) => { entity = e; store.set("kg:entity", e); if (e) { q.value = ""; store.set("kg:q", null); } load(); };
+
+  function showKu(k) {
+    detail.replaceChildren(h("div", { class: "row" }, h("span", { class: `badge sw-badge ${KIND_CLASS[k.kind]}` }, KIND_LABEL[k.kind] || k.kind), badge(k.status),
+      k.score !== undefined && h("span", { class: "badge info" }, `điểm ${k.score}`)),
+      h("h3", {}, k.title), h("div", {}, k.content), k.applies_when && h("div", { class: "small" }, "Áp dụng: " + k.applies_when),
+      h("div", { class: "small muted" }, `${k.source_trust} · ✓${k.helpful_cnt} ✗${k.harmful_cnt} · ${k.domain}`),
+      k.entities.length > 0 && h("div", { class: "tool-perms" }, k.entities.map((e) => h("button", { type: "button", class: "chip", onclick: () => setEntity(e) }, e))));
+  }
+
+  function draw(data) {
+    const W = 760, H = 460;
+    const shownEnt = new Map();
+    for (const k of data.nodes) for (const e of k.entities) shownEnt.set(e, (shownEnt.get(e) || 0) + 1);
+    // Thực thể chỉ có một tri thức không giúp thấy liên hệ, trừ khi đang lọc theo nó.
+    const ents = [...shownEnt].filter(([e, n]) => n >= 2 || e === entity).map(([e]) => ({ id: "e:" + e, entity: e }));
+    const entSet = new Set(ents.map((e) => e.entity));
+    const nodes = [...ents, ...data.nodes.map((k) => ({ id: k.id, ku: k }))];
+    const links = [...data.nodes.flatMap((k) => k.entities.filter((e) => entSet.has(e)).map((e) => ({ source: k.id, target: "e:" + e, rel: "entity" }))),
+      ...data.edges.map((e) => ({ source: e.src, target: e.dst, rel: e.rel }))];
+    if (!data.nodes.length) return graphBox.replaceChildren(h("div", { class: "muted" }, "Không có tri thức nào khớp."));
+    forceLayout(nodes, links, W, H);
+    const pos = new Map(nodes.map((n) => [n.id, n]));
+    const svgEl = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Đồ thị tri thức" },
+      links.map((l) => { const a = pos.get(l.source), b = pos.get(l.target); return a && b ? svg("line", { class: "kg-link " + l.rel, x1: a.x, y1: a.y, x2: b.x, y2: b.y }) : null; }),
+      nodes.map((n) => {
+        if (n.entity) {
+          const g = svg("g", { class: "kg-ent", transform: `translate(${n.x},${n.y})` }, svg("rect", { x: -6, y: -6, width: 12, height: 12, rx: 2 }),
+            svg("text", { x: 9, y: 4 }, n.entity.length > 28 ? n.entity.slice(0, 27) + "…" : n.entity), svg("title", {}, n.entity));
+          g.addEventListener("click", () => setEntity(n.entity));
+          return g;
+        }
+        const c = svg("circle", { class: `kg-ku ${KIND_CLASS[n.ku.kind]}${n.ku.status !== "active" ? " cand" : ""}`, cx: n.x, cy: n.y, r: n.ku.score !== undefined ? 5 + Math.min(5, n.ku.score * 6) : 5 },
+          svg("title", {}, n.ku.title));
+        c.addEventListener("click", () => showKu(n.ku));
+        return c;
+      }));
+    graphBox.replaceChildren(h("div", { class: "chart-legend" }, Object.entries(KIND_LABEL).map(([k, l]) => h("span", {}, h("span", { class: `sw ${KIND_CLASS[k]}` }), l)),
+      h("span", {}, h("span", { class: "sw ent-sw" }), "thực thể"), h("span", { class: "small muted" }, "nét đứt: gộp từ · đỏ: mâu thuẫn · viền rỗng: ứng viên")), svgEl);
+  }
+
+  async function load() {
+    const params = new URLSearchParams({ q: q.value.trim(), entity: entity || "", include_candidates: withCandidates.checked ? "true" : "false" });
+    const data = await api("GET", "/api/knowledge/graph?" + params);
+    chips.replaceChildren(h("span", { class: "small" }, "Thực thể:"), ...data.entities.slice(0, 24).map((e) =>
+      h("button", { type: "button", class: "chip" + (e.entity === entity ? " on" : ""), onclick: () => setEntity(e.entity === entity ? "" : e.entity) }, `${e.entity} (${e.n})`)));
+    draw(data);
+    const title = q.value.trim() ? `Agent sẽ nạp ${data.nodes.length} tri thức cho câu hỏi này (xếp theo điểm truy xuất)`
+      : entity ? `${data.nodes.length} tri thức về ${entity}` : `${data.nodes.length} tri thức${withCandidates.checked ? " (gồm ứng viên)" : " đang hiệu lực"}`;
+    list.replaceChildren(h("h3", {}, title), ...data.nodes.slice(0, 50).map((k) => h("div", { class: "card kg-item", onclick: () => showKu(k) },
+      h("div", { class: "row" }, h("span", { class: `badge sw-badge ${KIND_CLASS[k.kind]}` }, KIND_LABEL[k.kind] || k.kind), k.status !== "active" && badge(k.status),
+        k.score !== undefined && h("span", { class: "small muted" }, `điểm ${k.score}`), h("b", {}, k.title)),
+      h("div", { class: "small" }, k.content))));
+  }
+  const search = guard(async (ev) => { ev.preventDefault(); entity = ""; store.set("kg:entity", null); await load(); });
+  withCandidates.addEventListener("change", () => load());
+  main.append(h("form", { class: "row", onsubmit: search }, q, h("button", { type: "submit" }, "Tra cứu"),
+    h("label", { class: "small" }, withCandidates, " gồm ứng viên"), (q.value || entity) && h("button", { type: "button", class: "ghost", onclick: () => { q.value = ""; store.set("kg:q", null); setEntity(""); } }, "Xóa lọc")),
+    chips, h("div", { class: "kg-split" }, graphBox, detail), list);
+  await load();
+}
+
+async function toolCatalogView(main) {
+  main.append(h("h2", {}, "Công cụ học được"), learnedToolsSection(false), h("h2", {}, "Danh mục công cụ"), toolCatalogSection());
+}
+
+VIEWS.tools = (main) => subTabs(main, [["connections", "Kết nối", connectionsView], ["catalog", "Danh mục & quyền", toolCatalogView]]);
+VIEWS.knowledge = (main) => subTabs(main, [["graph", "Tra cứu (L3)", knowledgeGraphView], ["units", "Đơn vị tri thức (L1)", knowledgeUnitsView],
+  ["compiled", "Biên dịch (L2)", compiledView]]);
 
 const PURPOSE = { agent: "Agent trả lời", route: "Router", check_plan: "Kiểm tra độc lập", reflect: "Reflector", curate: "Curator", judge: "Chấm kết quả", other: "Khác" };
 const num = (v) => (v === null || v === undefined ? "—" : Number(v).toLocaleString("vi-VN"));
@@ -880,7 +1004,9 @@ async function refreshMe() {
   renderShell();
 }
 
-VIEWS.settings = async (main) => {
+VIEWS.settings = (main) => subTabs(main, [["policy", "Chính sách", policyView], ...(state.me.is_org_admin ? [["llm", "LLM", llmSettingsView]] : [])]);
+
+async function llmSettingsView(main) {
   const s = await api("GET", "/api/settings/llm-key");
   const describe = { ui: `Đang dùng cấu hình "${s.profile}"`, env: "Đang dùng key từ biến môi trường của máy chủ", none: "Chưa chọn LLM: agent chạy chế độ heuristic" }[s.source];
   let editing = null; // cấu hình đang sửa; null = thêm mới
