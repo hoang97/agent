@@ -405,22 +405,42 @@ VIEWS.approvals = async (main) => {
     others.length > 0 && h("h2", {}, "Đã xử lý"), others.length > 0 && h("div", { class: "card scroll" }, h("table", {}, h("tbody", {}, others.map((a) => h("tr", {}, h("td", {}, fmtTime(a.decided_at)), h("td", {}, a.tool), h("td", {}, a.env), h("td", {}, badge(a.status)), h("td", {}, a.deny_reason || "")))))));
 };
 
+// Đề xuất chờ duyệt: chỉ quy ước core và Skill; hiện danh sách quy ước thêm/bỏ bằng lời thay cho git diff.
+function pendingSection(r) {
+  if (!r) return h("div", {}, h("h2", {}, "Chờ duyệt"), h("div", { class: "card muted" }, "Không có thay đổi nào chờ duyệt. Playbook và hồ sơ thực thể được publish tự động."));
+  const sm = r.summary || { rules_added: [], rules_removed: [], rules_kept: 0, skills: [] };
+  const decide = (approve) => guard(async () => { await api("POST", `/api/compile/${r.id}/decide`, { approve }); toast(approve ? "Đã publish" : "Đã từ chối đề xuất"); renderShell(); });
+  const retire = (ku) => guard(async () => { await api("POST", "/api/compile/retire-rule", { ku_id: ku }); toast("Đã bỏ quy ước, đề xuất được cập nhật"); renderShell(); });
+  const trust = { user: "người dùng nói", verified_tool: "từ kết quả công cụ", internal_doc: "tài liệu nội bộ", external_untrusted: "nội dung ngoài" };
+  const ruleItem = (x, removable) => h("li", { class: "rule-item" }, h("div", {}, x.content),
+    h("div", { class: "small muted" }, [trust[x.source_trust] || x.source_trust, x.episodes ? `${x.episodes} lượt chat` : null].filter(Boolean).join(" · "),
+      removable && isAdmin() && h("button", { type: "button", class: "ghost small-btn", onclick: retire(x.ku), title: "Quy ước này hết hiệu lực và không được nạp vào agent" }, "Bỏ quy ước này")));
+  return h("div", {}, h("h2", {}, "Chờ duyệt"), h("div", { class: "card" },
+    h("p", { class: "small" }, `Quy ước trong khối core được nạp vào mọi lượt chat của tenant nên cần người duyệt. Đề xuất tạo lúc ${fmtTime(r.created_at)}; chỉ giữ đề xuất mới nhất.`),
+    sm.rules_added.length > 0 && h("div", {}, h("b", {}, `Thêm ${sm.rules_added.length} quy ước`), h("ol", {}, sm.rules_added.map((x) => ruleItem(x, true)))),
+    sm.rules_removed.length > 0 && h("div", {}, h("b", {}, `Bỏ ${sm.rules_removed.length} quy ước`), h("ol", {}, sm.rules_removed.map((x) => ruleItem(x, false)))),
+    sm.rules_kept > 0 && h("div", { class: "small muted" }, `Giữ nguyên ${sm.rules_kept} quy ước đang dùng.`),
+    sm.skills.length > 0 && h("div", {}, h("b", {}, "Skill thay đổi: "), sm.skills.join(", ")),
+    h("details", {}, h("summary", { class: "small" }, "Xem diff gốc"), h("pre", {}, r.diff || "")),
+    isAdmin() && h("div", { class: "row" }, h("button", { onclick: decide(true) }, "Publish"), h("button", { class: "danger", onclick: decide(false) }, "Từ chối cả đề xuất"))));
+}
+
 VIEWS.compile = async (main) => {
   const [runs, files, golden] = await Promise.all([api("GET", "/api/compile/runs"), api("GET", "/api/knowledge/files"), api("GET", "/api/golden")]);
   const viewer = h("pre", {}, "Chọn một file.");
   const show = (path) => guard(async () => { const f = await api("GET", "/api/knowledge/file?path=" + encodeURIComponent(path)); viewer.textContent = f.content; });
   const compile = guard(async () => { const r = await api("POST", "/api/compile"); toast("Biên dịch: " + (LABEL[r.status] || r.status)); renderShell(); });
   const rollback = guard(async () => { await api("POST", "/api/compile/rollback"); toast("Đã hoàn tác lần publish gần nhất"); renderShell(); });
-  const decide = (id, approve) => guard(async () => { await api("POST", `/api/compile/${id}/decide`, { approve }); renderShell(); });
   const query = h("input", { placeholder: "Câu hỏi golden", "aria-label": "Câu hỏi golden" });
   const domain = h("select", { "aria-label": "Loại nhiệm vụ" }, ["k8s_ops", "observability", "docs", "research", "general"].map((x) => h("option", {}, x)));
   const terms = h("input", { placeholder: "Từ khóa kỳ vọng, cách nhau dấu phẩy", "aria-label": "Từ khóa kỳ vọng" });
   const addGolden = guard(async () => { await api("POST", "/api/golden", { query: query.value, expect_domain: domain.value, expect_terms: terms.value.split(",").map((s) => s.trim()).filter(Boolean) }); renderShell(); });
   main.append(h("h2", {}, "Tri thức biên dịch (L2)"), isAdmin() && h("div", { class: "row" }, h("button", { onclick: compile }, "Biên dịch ngay"), h("button", { class: "danger", onclick: rollback }, "Hoàn tác publish gần nhất")),
     h("div", { class: "split", style: null }, h("div", { class: "card filelist" }, h("h3", {}, "File"), files.length ? files.map((f) => h("button", { onclick: show(f) }, f)) : "Chưa có file."), h("div", { class: "card" }, h("h3", {}, "Nội dung"), viewer)),
-    h("h2", {}, "Các lần biên dịch"), runs.length ? runs.map((r) => h("div", { class: "card" }, h("div", { class: "row spread" }, h("span", {}, fmtTime(r.created_at), " · ", r.actor), h("div", {}, badge(r.status), r.needs_review ? h("span", { class: "badge warn" }, "cần người duyệt") : "")),
-      h("div", { class: "small" }, `Golden: ${r.score_before ?? "—"} → ${r.score_after ?? "—"} · File đổi: ${r.changed.join(", ") || "không"}`), r.diff && h("pre", {}, r.diff),
-      r.status === "pending_review" && isAdmin() && h("div", { class: "row" }, h("button", { onclick: decide(r.id, true) }, "Publish"), h("button", { class: "danger", onclick: decide(r.id, false) }, "Từ chối")))) : h("div", { class: "card muted" }, "Chưa biên dịch lần nào."),
+    pendingSection(runs.find((r) => r.status === "pending_review")),
+    h("h2", {}, "Lịch sử publish"), runs.filter((r) => r.status !== "pending_review").length ? h("div", { class: "card scroll" }, h("table", {}, h("tbody", {},
+      runs.filter((r) => r.status !== "pending_review").map((r) => h("tr", {}, h("td", {}, fmtTime(r.created_at)), h("td", {}, badge(r.status)),
+        h("td", {}, r.decided_by === "auto" ? "tự publish" : r.decided_by || r.actor), h("td", { class: "small" }, r.changed.join(", ") || r.reason || "")))))) : h("div", { class: "card muted" }, "Chưa biên dịch lần nào."),
     h("h2", {}, `Golden task (${golden.length})`), h("div", { class: "card" }, golden.map((g) => h("div", {}, g.query, " ", h("span", { class: "badge" }, g.expect_domain), " ", h("span", { class: "small" }, g.expect_terms.join(", ")))), isAdmin() && h("div", { class: "row" }, query, domain, terms, h("button", { class: "ghost", onclick: addGolden }, "Thêm"))));
 };
 

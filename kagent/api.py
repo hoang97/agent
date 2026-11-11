@@ -986,7 +986,25 @@ def compile_now(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
 
 @app.get("/api/compile/runs")
 def compile_runs(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
-    return db.rows(conn.execute("SELECT * FROM compile_run WHERE tenant_id=? ORDER BY created_at DESC, rowid DESC LIMIT 50", (t.tenant_id,)).fetchall(), "changed")
+    rows = db.rows(conn.execute("SELECT * FROM compile_run WHERE tenant_id=? AND status NOT IN ('stale','noop') ORDER BY created_at DESC, rowid DESC LIMIT 50",
+                                (t.tenant_id,)).fetchall(), "changed")
+    for r in rows:
+        r["summary"] = json.loads(r["summary"].split("\n", 1)[0]) if r.get("summary") else None  # dòng sau là dấu vân tay nội bộ
+    return rows
+
+
+class RetireRule(BaseModel):
+    ku_id: str
+
+
+@app.post("/api/compile/retire-rule")
+def compile_retire_rule(body: RetireRule, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_admin()
+    _visible_ku(conn, t, body.ku_id)
+    try:
+        return compiler.retire_rule(conn, t.tenant_id, body.ku_id, t.principal.username)
+    except compiler.CompileError as exc:
+        raise _compile_error(exc) from exc
 
 
 class Decide(BaseModel):

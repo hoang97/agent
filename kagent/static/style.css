@@ -228,3 +228,5 @@ input.wide { flex: 1; min-width: 220px; }
   animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; border-top-color: var(--line); background: var(--accent); transform: scale(.5); } }
+.rule-item { margin: 6px 0 10px; }
+.rule-item .small-btn { margin-left: 8px; }

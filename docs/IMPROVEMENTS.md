@@ -233,3 +233,10 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend 
 
 - **Vì sao còn 46 ứng viên:** đề xuất gần nhất chỉ xét loại procedure (một lần chạy thử khi sửa lỗi ở đợt 28 dùng bộ lọc này và thay thế đề xuất đầy đủ trước đó, vì mỗi tenant giữ một đề xuất), nên 42 ứng viên loại khác chưa được xét; còn 4 procedure không trùng với mục nào nên nút gộp không chạm tới. Giao diện không cho biết phạm vi của đề xuất.
 - **Thay đổi:** tiêu đề đề xuất ghi phạm vi ("chỉ loại X" hoặc "mọi loại"); nút tổng hợp ghi phạm vi sẽ xét theo bộ lọc đang chọn; thêm "Chấp nhận N ứng viên không trùng"; ghi số ứng viên nằm ngoài phạm vi đề xuất và cách xét cả chúng.
+
+## Đợt 30 — 2026-11-11: L2 không được publish, đề xuất khó duyệt
+
+- **Vấn đề:** mọi lần biên dịch có đổi `core/rules.md` đều chờ duyệt cả gói, kèm cả playbook và hồ sơ thực thể; lịch nền tạo đề xuất mới mỗi lần học (9 đề xuất chờ duyệt dồn lại, cái sau chứa cái trước), nên từ khi có quy ước, playbook cũng không còn được publish. Đề xuất hiện dưới dạng git diff có mã KU và bộ đếm.
+- **Tách phần tự publish:** playbook và hồ sơ thực thể publish ngay; chỉ khối core (nạp vào mọi lượt) và Skill chờ duyệt, theo đúng tài liệu kiến trúc.
+- **Một đề xuất duy nhất:** đề xuất mới thay đề xuất cũ (cũ chuyển stale, xóa nhánh); nội dung cần duyệt không đổi thì giữ đề xuất cũ. Duyệt khi main đã đi tiếp thì áp riêng các file cần duyệt lên main hiện tại thay vì báo "đề xuất đã cũ".
+- **Dễ đọc:** màn Biên dịch L2 hiện "Thêm N quy ước / Bỏ N quy ước / Giữ N" bằng lời, kèm nguồn (người dùng nói, từ kết quả công cụ, nội dung ngoài) và số lượt chat; nút "Bỏ quy ước này" cho từng quy ước (KU hết hiệu lực, đề xuất tự cập nhật); diff gốc thu gọn. Lịch sử publish thành bảng, ẩn bản stale và noop.

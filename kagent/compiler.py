@@ -201,7 +201,51 @@ def _write(tenant_id: str, files: dict[str, str]) -> None:
         target.write_text(content, encoding="utf-8", newline="\n")
 
 
+_RULE_LINE = re.compile(r"^- \[ku:([0-9a-f]{8})[^\]]*\] (.*)$", re.M)
+
+
+def _needs_review(path: str) -> bool:
+    """Chỉ khối core (luôn nạp vào mọi lượt) và Skill cần người duyệt; playbook và hồ sơ thực thể tự publish."""
+    return path == "core/rules.md" or path.startswith("skills/")
+
+
+def _summary(conn, tenant_id: str, current: dict[str, str], proposed: dict[str, str]) -> dict:
+    """Thay đổi của phần cần duyệt dưới dạng danh sách quy ước thêm/bỏ và Skill, thay cho git diff có mã KU."""
+    def rules(text: str) -> dict[str, str]:
+        return {m.group(1): m.group(2) for m in _RULE_LINE.finditer(text or "")}
+    old, new = rules(current.get("core/rules.md")), rules(proposed.get("core/rules.md"))
+
+    def info(short: str, content: str) -> dict:
+        r = conn.execute("SELECT id, title, source_trust, source_eps, recorded_at FROM knowledge_unit WHERE tenant_id=? AND id LIKE ?",
+                         (tenant_id, short + "%")).fetchone()
+        return {"ku": r["id"] if r else short, "title": r["title"] if r else "", "content": content,
+                "source_trust": r["source_trust"] if r else None, "episodes": len(json.loads(r["source_eps"])) if r else 0}
+    skills = sorted({p.split("/")[1] for p in set(current) | set(proposed) if p.startswith("skills/") and current.get(p) != proposed.get(p)})
+    return {"rules_added": [info(k, v) for k, v in new.items() if k not in old],
+            "rules_removed": [info(k, v) for k, v in old.items() if k not in new],
+            "rules_kept": len(set(old) & set(new)), "skills": skills}
+
+
+def _commit_main(tenant_id: str, files: dict[str, str], current: dict[str, str], changed: list[str], actor: str, message: str) -> str:
+    _write(tenant_id, files)
+    log = current.get("CHANGELOG.md", "# Nhật ký thay đổi tri thức\n")
+    entry = f"\n## {db.iso()} — {actor}\n" + "\n".join(f"- {p}" for p in changed) + "\n"
+    (repo_path(tenant_id) / "CHANGELOG.md").write_text(log + entry, encoding="utf-8", newline="\n")
+    _git(tenant_id, "add", "-A")
+    _git(tenant_id, "commit", "-q", "-m", message)
+    return _git(tenant_id, "rev-parse", "HEAD").strip()
+
+
+def _supersede_pending(conn, tenant_id: str, keep: str | None = None) -> None:
+    """Mỗi tenant chỉ một đề xuất chờ duyệt: đề xuất cũ chuyển stale, xóa nhánh."""
+    for r in conn.execute("SELECT id, branch FROM compile_run WHERE tenant_id=? AND status='pending_review' AND id IS NOT ?", (tenant_id, keep)).fetchall():
+        conn.execute("UPDATE compile_run SET status='stale', decided_at=?, decided_by='compiler' WHERE id=?", (db.iso(), r["id"]))
+        if r["branch"]:
+            _git(tenant_id, "branch", "-q", "-D", r["branch"], check=False)
+
+
 def compile_tenant(conn, tenant_id: str, actor: str = "compiler") -> dict:
+    """Playbook và hồ sơ thực thể publish ngay; quy ước core và Skill gom thành một đề xuất chờ duyệt duy nhất."""
     with _lock:
         ensure_repo(tenant_id)
         run_id = db.new_id()
@@ -209,6 +253,7 @@ def compile_tenant(conn, tenant_id: str, actor: str = "compiler") -> dict:
         new_files, skills = generate(conn, tenant_id)
         changed = _changed(current, new_files)
         if not changed:
+            _supersede_pending(conn, tenant_id)  # tri thức đã quay về đúng bản đang publish: đề xuất cũ không còn ý nghĩa
             return _record(conn, tenant_id, run_id, "noop", actor, changed=[], reason="không có thay đổi")
 
         before = golden_score(conn, tenant_id, current)
@@ -217,33 +262,73 @@ def compile_tenant(conn, tenant_id: str, actor: str = "compiler") -> dict:
             return _record(conn, tenant_id, run_id, "blocked", actor, changed=changed, score_before=before, score_after=after,
                            reason="điểm golden task giảm")
 
-        needs_review = any(p == "core/rules.md" or p.startswith("skills/") for p in changed)
-        branch = f"proposal/{run_id[:8]}"
+        auto_changed = [p for p in changed if not _needs_review(p)]
+        review_changed = [p for p in changed if _needs_review(p)]
+        result = None
+        if auto_changed:
+            # Bản publish ngay: phần không cần duyệt theo bản mới, phần cần duyệt giữ nguyên bản đang publish.
+            auto_files = {p: c for p, c in new_files.items() if not _needs_review(p)} | {p: c for p, c in current.items() if _needs_review(p)}
+            auto_files.pop("CHANGELOG.md", None)
+            sha = _commit_main(tenant_id, auto_files, current, auto_changed, actor, f"compile {run_id[:8]}: tự publish {len(auto_changed)} file")
+            result = _record(conn, tenant_id, run_id, "published", actor, changed=auto_changed, commit_sha=sha, decided_at=db.iso(), decided_by="auto",
+                             score_before=before, score_after=after)
+            current = read_published(tenant_id)
+        if not review_changed:
+            _supersede_pending(conn, tenant_id)
+            return result
+
+        summary = _summary(conn, tenant_id, current, new_files)
+        fingerprint = json.dumps({p: new_files.get(p) for p in review_changed}, sort_keys=True, ensure_ascii=False)
+        pending = conn.execute("SELECT * FROM compile_run WHERE tenant_id=? AND status='pending_review' ORDER BY created_at DESC LIMIT 1", (tenant_id,)).fetchone()
+        # Nội dung cần duyệt không đổi thì giữ đề xuất cũ (kể cả khi main đã đi tiếp: _merge áp riêng file cần duyệt).
+        if pending is not None and (pending["summary"] or "").endswith(fingerprint):
+            _supersede_pending(conn, tenant_id, keep=pending["id"])
+            return result or db.row(pending, "changed")  # đề xuất đang chờ vẫn đúng: không tạo thêm bản trùng
+
+        review_id = db.new_id() if result else run_id
+        branch = f"proposal/{review_id[:8]}"
         _git(tenant_id, "checkout", "-q", "-b", branch, "main")
         try:
-            _write(tenant_id, new_files)
-            log = current.get("CHANGELOG.md", "# Nhật ký thay đổi tri thức\n")
-            entry = f"\n## {db.iso()} — {actor}\n" + "\n".join(f"- {p}" for p in changed) + "\n"
-            (repo_path(tenant_id) / "CHANGELOG.md").write_text(log + entry, encoding="utf-8", newline="\n")
-            _git(tenant_id, "add", "-A")
-            _git(tenant_id, "commit", "-q", "-m", f"compile {run_id[:8]}: {len(changed)} file")
+            files = {p: c for p, c in current.items() if p != "CHANGELOG.md"} | {p: new_files[p] for p in review_changed if p in new_files}
+            for p in review_changed:
+                if p not in new_files:
+                    files.pop(p, None)
+            _commit_main(tenant_id, files, current, review_changed, actor, f"compile {review_id[:8]}: đề xuất {len(review_changed)} file")
             diff = _git(tenant_id, "diff", "main", branch, "--", ".", ":(exclude)CHANGELOG.md")
         finally:
             _git(tenant_id, "checkout", "-q", "main")
+        _supersede_pending(conn, tenant_id)
+        run = _record(conn, tenant_id, review_id, "pending_review", actor, branch=branch, diff=diff, changed=review_changed, needs_review=1,
+                      score_before=before, score_after=after, reason=json.dumps(skills, ensure_ascii=False),
+                      summary=json.dumps(summary, ensure_ascii=False) + "\n" + fingerprint)
+        return run
 
-        run = _record(conn, tenant_id, run_id, "pending_review", actor, branch=branch, diff=diff, changed=changed,
-                      needs_review=int(needs_review), score_before=before, score_after=after)
-        if needs_review:
-            conn.execute("UPDATE compile_run SET reason=? WHERE id=?", (json.dumps(skills, ensure_ascii=False), run_id))
-            return db.row(conn.execute("SELECT * FROM compile_run WHERE id=?", (run_id,)).fetchone(), "changed")
-        return _merge(conn, tenant_id, run, "auto", skills)
+
+def retire_rule(conn, tenant_id: str, ku_id: str, actor: str) -> dict:
+    """Người duyệt bỏ một quy ước khỏi đề xuất: KU chuyển hết hiệu lực, rồi biên dịch lại để đề xuất mới không còn nó."""
+    from . import knowledge
+    ku = knowledge.get(conn, tenant_id, ku_id)
+    if ku is None or ku["kind"] != "rule":
+        raise CompileError("không tìm thấy quy ước", 404)
+    if ku["status"] == "active":
+        knowledge.update(conn, tenant_id, ku_id, {"status": "deprecated", "valid_to": db.iso()}, "DEPRECATE", actor, "người duyệt bỏ khỏi khối core")
+    return compile_tenant(conn, tenant_id, actor)
 
 
 def _merge(conn, tenant_id: str, run: dict, decided_by: str, skills: list[dict]) -> dict:
     proc = _git_proc(tenant_id, "merge", "-q", "--ff-only", run["branch"])
     if proc.returncode != 0:
-        conn.execute("UPDATE compile_run SET status='stale', decided_at=?, decided_by=? WHERE id=?", (db.iso(), decided_by, run["id"]))
-        raise CompileError("đề xuất đã cũ vì main đã thay đổi; hãy biên dịch lại", 409)
+        # main đã đi tiếp do playbook tự publish; đề xuất chỉ chạm các file cần duyệt nên áp riêng chúng lên main hiện tại.
+        for path in run["changed"]:
+            if _git_proc(tenant_id, "cat-file", "-e", f"{run['branch']}:{path}").returncode == 0:
+                _git(tenant_id, "checkout", run["branch"], "--", path)
+            else:
+                _git(tenant_id, "rm", "-q", "--ignore-unmatch", "--", path)
+        _git(tenant_id, "add", "-A")
+        if _git_proc(tenant_id, "diff", "--cached", "--quiet").returncode != 0:
+            _git(tenant_id, "commit", "-q", "-m", f"publish đề xuất {run['id'][:8]} (duyệt bởi {decided_by})")
+    if run.get("branch"):
+        _git(tenant_id, "branch", "-q", "-D", run["branch"], check=False)
     sha = _git(tenant_id, "rev-parse", "HEAD").strip()
     _publish_skills(conn, tenant_id, skills)
     conn.execute("UPDATE compile_run SET status='published', commit_sha=?, decided_at=?, decided_by=? WHERE id=?", (sha, db.iso(), decided_by, run["id"]))
