@@ -1,0 +1,93 @@
+template: prometheus
+title: Prometheus
+description: >-
+  Prometheus HTTP API (cũng dùng được cho Mimir, Thanos, VictoriaMetrics). Truy vấn PromQL, xem cảnh báo, luật cảnh báo và target.
+  Kết quả theo thời gian được rút gọn thành min/max/avg/last kèm vài điểm mẫu.
+ping: prometheus:ping
+fields:
+  - {name: url, type: url, required: true, description: "Địa chỉ Prometheus, ví dụ https://prometheus.example.com (Mimir: thêm /prometheus)"}
+  - {name: token, type: secret, description: Bearer token nếu có (ưu tiên hơn tài khoản)}
+  - {name: username, type: string, description: Tài khoản basic auth nếu không dùng token}
+  - {name: password, type: secret, description: Mật khẩu basic auth}
+  - {name: tenant_header, type: string, description: "Giá trị header X-Scope-OrgID cho Mimir/Cortex đa tenant"}
+  - {name: verify_tls, type: boolean, default: true}
+  - {name: ca_cert, type: text, description: Chứng chỉ CA dạng PEM nếu dùng CA riêng}
+tools:
+  - name: query
+    description: Chạy PromQL tại một thời điểm (mặc định bây giờ). Dùng sum/count/topk trong PromQL để gom số liệu thay vì lấy nhiều chuỗi.
+    handler: prometheus:query
+    action_class: read
+    data_sensitivity: internal
+    input_schema:
+      properties:
+        expr: {type: string, description: Biểu thức PromQL}
+        time: {type: string, description: "Thời điểm RFC3339 hoặc unix giây; bỏ trống là bây giờ"}
+        limit: {type: integer, description: Số chuỗi tối đa trả về (mặc định 50)}
+      required: [expr]
+
+  - name: query_range
+    description: >-
+      Chạy PromQL trong N phút gần nhất. Mỗi chuỗi trả về min/max/avg/last và max_points điểm mẫu (mặc định 30, 0 = chỉ thống kê).
+    handler: prometheus:query_range
+    action_class: read
+    data_sensitivity: internal
+    input_schema:
+      properties:
+        expr: {type: string, description: Biểu thức PromQL}
+        minutes: {type: integer, description: Khoảng thời gian tính bằng phút (mặc định 60)}
+        step_seconds: {type: integer}
+        max_points: {type: integer}
+        limit: {type: integer, description: Số chuỗi tối đa (mặc định 20)}
+      required: [expr]
+
+  - name: list_alerts
+    description: Cảnh báo Prometheus đang firing hoặc pending
+    handler: prometheus:list_alerts
+    action_class: read
+    data_sensitivity: internal
+    input_schema:
+      properties:
+        state: {type: string, enum: [firing, pending]}
+
+  - name: list_rules
+    description: Luật cảnh báo (tên, biểu thức, trạng thái); lọc theo một phần tên
+    handler: prometheus:list_rules
+    action_class: read
+    data_sensitivity: internal
+    input_schema:
+      properties:
+        name: {type: string}
+        only_firing: {type: boolean}
+
+  - name: list_targets
+    description: Tình trạng scrape target theo job, liệt kê target đang down kèm lỗi
+    handler: prometheus:list_targets
+    action_class: read
+    data_sensitivity: internal
+    input_schema:
+      properties:
+        job: {type: string}
+
+  - name: label_values
+    description: >-
+      Giá trị của một nhãn, ví dụ label=__name__ để tìm tên metric, label=job, label=namespace. contains lọc theo chuỗi con, match giới hạn theo series selector.
+    handler: prometheus:label_values
+    action_class: read
+    data_sensitivity: internal
+    input_schema:
+      properties:
+        label: {type: string}
+        contains: {type: string}
+        match: {type: string, description: "Series selector, ví dụ {job=\"api\"}"}
+        limit: {type: integer}
+      required: [label]
+
+  - name: metric_metadata
+    description: Kiểu (counter/gauge/histogram), mô tả và đơn vị của một metric
+    handler: prometheus:metric_metadata
+    action_class: read
+    data_sensitivity: internal
+    input_schema:
+      properties:
+        metric: {type: string}
+      required: [metric]

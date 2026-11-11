@@ -267,3 +267,8 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend 
 - Reflector nhận danh sách thực thể đang dùng để dùng lại đúng tên, tối đa 5 tên cụ thể mỗi mục.
 - KU đã có được chuẩn hoá lại khi khởi động, mỗi phiên bản luật chạy một lần. Trên team-finance, số tên khác nhau giảm từ 126 xuống 94.
 - Đồ thị: cuộn chuột để phóng to, kéo nền để di chuyển, kéo nút để sắp lại, nháy đúp để vừa khung. Rê chuột lên một nút thì làm mờ phần không liên quan. Khi phóng to thì hiện tên tri thức. Khung chi tiết của một thực thể gợi ý các tên gần giống để gộp.
+
+## Đợt 34 — 2026-11-11: template Prometheus và Alertmanager
+
+- `prometheus`: query, query_range, list_alerts, list_rules, list_targets, label_values, metric_metadata, đều R0 (chỉ đọc). Dùng được cho Mimir, Thanos, VictoriaMetrics; xác thực bằng Bearer token hoặc basic auth, có header X-Scope-OrgID cho bản đa tenant. Để tiết kiệm token, query_range trả min/max/avg/last của mỗi chuỗi kèm tối đa 30 điểm mẫu; list_targets gom theo job và chỉ liệt kê target đang down.
+- `alertmanager`: list_alerts (gom theo alertname và severity, lọc bằng matcher `=`, `!=`, `=~`, `!~`), list_silences (R0); create_silence và expire_silence ở mức R3, chạy thử trước để biết sẽ chặn bao nhiêu cảnh báo hoặc sẽ gỡ silence nào.

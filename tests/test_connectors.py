@@ -194,7 +194,7 @@ def test_sql_read_only_and_write(infra):
 
 def test_shipped_templates_valid():
     templates = tools.load_templates()
-    assert set(templates) == {"k8s", "grafana", "elasticsearch", "web", "http_api", "postgres", "mysql", "data"}
+    assert set(templates) == {"k8s", "grafana", "elasticsearch", "web", "http_api", "postgres", "mysql", "data", "prometheus", "alertmanager"}
     for t in templates.values():
         for s in t.tools.values():
             assert tools.TIERS.index(s.risk_tier) >= tools.TIERS.index(tools.minimum_tier(s.action_class, s.reversible, s.blast_radius, s.data_sensitivity))

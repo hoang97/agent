@@ -1,0 +1,66 @@
+template: alertmanager
+title: Alertmanager
+description: Alertmanager API v2. Xem cảnh báo đang bắn (gom theo tên và mức độ), xem silence; tạo và gỡ silence.
+ping: alertmanager:ping
+fields:
+  - {name: url, type: url, required: true, description: "Địa chỉ Alertmanager, ví dụ https://alertmanager.example.com"}
+  - {name: token, type: secret, description: Bearer token nếu có (ưu tiên hơn tài khoản)}
+  - {name: username, type: string, description: Tài khoản basic auth nếu không dùng token}
+  - {name: password, type: secret, description: Mật khẩu basic auth}
+  - {name: tenant_header, type: string, description: "Giá trị header X-Scope-OrgID cho Mimir/Cortex Alertmanager đa tenant"}
+  - {name: verify_tls, type: boolean, default: true}
+  - {name: ca_cert, type: text, description: Chứng chỉ CA dạng PEM nếu dùng CA riêng}
+tools:
+  - name: list_alerts
+    description: >-
+      Cảnh báo đang hoạt động, kèm số lượng theo alertname và severity. matchers lọc theo nhãn, ví dụ severity=critical,namespace=~pay.*
+    handler: alertmanager:list_alerts
+    action_class: read
+    data_sensitivity: internal
+    input_schema:
+      properties:
+        matchers: {type: string}
+        receiver: {type: string}
+        include_silenced: {type: boolean, description: Gồm cả cảnh báo đã bị silence hoặc inhibit}
+        limit: {type: integer}
+
+  - name: list_silences
+    description: Danh sách silence theo trạng thái (active mặc định, pending, expired, all)
+    handler: alertmanager:list_silences
+    action_class: read
+    data_sensitivity: internal
+    input_schema:
+      properties:
+        state: {type: string, enum: [active, pending, expired, all]}
+
+  - name: create_silence
+    description: Tắt cảnh báo khớp nhãn trong một khoảng thời gian (5 phút đến 7 ngày)
+    handler: alertmanager:create_silence
+    check: alertmanager:create_silence_check
+    action_class: write
+    reversible: "yes"
+    blast_radius: namespace
+    data_sensitivity: internal
+    dry_run: server
+    rollback_hint: Gỡ silence bằng expire_silence với silence_id trả về
+    input_schema:
+      properties:
+        matchers: {type: string, description: "nhan=gia_tri (hoặc !=, =~, !~), cách nhau dấu phẩy, ví dụ alertname=HighCPU"}
+        duration_minutes: {type: integer}
+        comment: {type: string}
+      required: [matchers]
+
+  - name: expire_silence
+    description: Gỡ (cho hết hạn ngay) một silence, cảnh báo bị chặn sẽ bắn lại
+    handler: alertmanager:expire_silence
+    check: alertmanager:expire_silence_check
+    action_class: write
+    reversible: partial
+    blast_radius: namespace
+    data_sensitivity: internal
+    dry_run: server
+    rollback_hint: Tạo lại silence với cùng matchers
+    input_schema:
+      properties:
+        silence_id: {type: string}
+      required: [silence_id]

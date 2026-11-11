@@ -112,3 +112,14 @@ def parse(status: int, headers, text: str, *, ok=(200, 201, 202), as_text: bool 
         return json.loads(text) if text.strip() else {}
     except json.JSONDecodeError as exc:
         raise ConnectorError("phản hồi không phải JSON") from exc
+
+
+def monitoring_client(params: dict) -> httpx.Client:
+    """Prometheus, Alertmanager và các bản tương thích (Mimir, Thanos, VictoriaMetrics): Bearer token hoặc basic auth, X-Scope-OrgID nếu đa tenant."""
+    headers = {"Accept": "application/json"}
+    if params.get("token"):
+        headers["Authorization"] = f"Bearer {params['token']}"
+    if params.get("tenant_header"):
+        headers["X-Scope-OrgID"] = str(params["tenant_header"])
+    auth = (params["username"], params.get("password") or "") if params.get("username") and not params.get("token") else None
+    return http(params, "url", headers=headers, auth=auth)

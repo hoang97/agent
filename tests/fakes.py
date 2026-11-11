@@ -15,8 +15,10 @@ import httpx
 K8S_TOKEN = "k8s-test-token"
 GRAFANA_TOKEN = "grafana-test-token"
 ES_KEY = "es-test-key"
+PROM_TOKEN = "prom-test-token"
 PUBLIC_IP = "93.184.216.34"
 HOSTS = {"k8s.test": PUBLIC_IP, "grafana.test": PUBLIC_IP, "es.test": PUBLIC_IP, "kibana.test": PUBLIC_IP, "example.test": PUBLIC_IP, "db.test": PUBLIC_IP,
+         "prom.test": PUBLIC_IP, "am.test": PUBLIC_IP,
          "internal.test": "10.0.0.5", "metadata.test": "169.254.169.254", "loop.test": "127.0.0.1"}
 
 
@@ -38,6 +40,8 @@ class Infra:
         self.silences: list[dict] = []
         self.indices = {"logs-app": 120, "logs-old": 40}
         self.requests: list[httpx.Request] = []
+        self.am_filters: list[list[str]] = []
+        self.expired: list[str] = []
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -57,6 +61,10 @@ class Infra:
             return self.es(request)
         if host == "kibana.test":
             return self.kibana(request)
+        if host == "prom.test":
+            return self.prometheus(request)
+        if host == "am.test":
+            return self.alertmanager(request)
         if host == "example.test":
             if request.url.path == "/moved":
                 return httpx.Response(302, headers={"location": "http://internal.test/admin"})
@@ -119,6 +127,70 @@ class Infra:
         if path == "/api/alertmanager/grafana/api/v2/silences" and r.method == "POST":
             self.silences.append(json.loads(r.content))
             return self._json({"silenceID": f"s{len(self.silences)}"}, 202)
+        return self._json({"message": "not found"}, 404)
+
+    # --- Prometheus ---
+    def prometheus(self, r: httpx.Request) -> httpx.Response:
+        if r.headers.get("authorization") != f"Bearer {PROM_TOKEN}":
+            return self._json({"status": "error", "error": "unauthorized"}, 401)
+        ok = lambda data: self._json({"status": "success", "data": data})
+        path, q = r.url.path, r.url.params
+        if path == "/api/v1/status/buildinfo":
+            return ok({"version": "2.53.0"})
+        if path == "/api/v1/query":
+            if q.get("query") == "bad(":
+                return self._json({"status": "error", "errorType": "bad_data", "error": "parse error"}, 400)
+            return ok({"resultType": "vector", "result": [{"metric": {"job": "api", "instance": f"i{i}"}, "value": [1, str(i)]} for i in range(3)]})
+        if path == "/api/v1/query_range":
+            values = [[1000 + 15 * i, str(i)] for i in range(100)]
+            return ok({"resultType": "matrix", "result": [{"metric": {"job": "api"}, "values": values}]})
+        if path == "/api/v1/alerts":
+            return ok({"alerts": [{"labels": {"alertname": "HighCPU", "severity": "warning"}, "state": "firing", "activeAt": "2026-11-11T00:00:00Z",
+                                   "value": "0.93", "annotations": {"summary": "CPU cao"}},
+                                  {"labels": {"alertname": "DiskFull"}, "state": "pending", "annotations": {}}]})
+        if path == "/api/v1/rules":
+            return ok({"groups": [{"name": "node", "rules": [{"name": "HighCPU", "query": "cpu > 0.9", "state": "firing", "duration": 300, "health": "ok",
+                                                              "labels": {"severity": "warning"}, "annotations": {"summary": "CPU cao"}, "alerts": [{}]},
+                                                             {"name": "DiskFull", "query": "disk > 0.95", "state": "inactive", "alerts": []}]}]})
+        if path == "/api/v1/targets":
+            return ok({"activeTargets": [{"labels": {"job": "api", "instance": "a:9100"}, "health": "up"},
+                                         {"labels": {"job": "api", "instance": "b:9100"}, "health": "down", "lastError": "connection refused"},
+                                         {"labels": {"job": "node", "instance": "n:9100"}, "health": "up"}]})
+        if path == "/api/v1/label/__name__/values":
+            return ok(["http_requests_total", "node_cpu_seconds_total", "up"])
+        if path == "/api/v1/metadata":
+            return ok({"up": [{"type": "gauge", "help": "target up", "unit": ""}]})
+        return self._json({"status": "error", "error": "not found"}, 404)
+
+    # --- Alertmanager ---
+    def alertmanager(self, r: httpx.Request) -> httpx.Response:
+        if r.headers.get("authorization") != "Basic " + __import__("base64").b64encode(b"am:pw").decode():
+            return self._json({"message": "unauthorized"}, 401)
+        path = r.url.path
+        if path == "/api/v2/status":
+            return self._json({"versionInfo": {"version": "0.27.0"}, "cluster": {"status": "ready"}})
+        if path == "/api/v2/alerts":
+            self.am_filters.append(r.url.params.get_list("filter"))
+            return self._json([{"labels": {"alertname": "HighCPU", "severity": "warning", "namespace": "payments"}, "status": {"state": "active", "silencedBy": []},
+                                "startsAt": "2026-11-11T00:00:00Z", "annotations": {"summary": "CPU cao"}, "fingerprint": "f1"},
+                               {"labels": {"alertname": "HighCPU", "severity": "warning", "namespace": "web"}, "status": {"state": "active"}, "fingerprint": "f2"},
+                               {"labels": {"alertname": "Down", "severity": "critical", "namespace": "web"}, "status": {"state": "active"}, "fingerprint": "f3"}])
+        if path == "/api/v2/silences" and r.method == "POST":
+            self.silences.append(json.loads(r.content))
+            return self._json({"silenceID": f"am{len(self.silences)}"})
+        if path == "/api/v2/silences":
+            return self._json([{"id": "am-old", "status": {"state": "expired"}, "matchers": [{"name": "alertname", "value": "X", "isRegex": False, "isEqual": True}]},
+                               {"id": "am-live", "status": {"state": "active"}, "matchers": [{"name": "namespace", "value": "pay.*", "isRegex": True, "isEqual": True}],
+                                "createdBy": "ops", "comment": "bảo trì"}])
+        if path.startswith("/api/v2/silence/"):
+            sid = path.rsplit("/", 1)[1]
+            state = {"am-live": "active", "am-old": "expired"}.get(sid)
+            if state is None:
+                return self._json({"message": "silence not found"}, 404)
+            if r.method == "DELETE":
+                self.expired.append(sid)
+                return httpx.Response(200)
+            return self._json({"id": sid, "status": {"state": state}, "matchers": [{"name": "namespace", "value": "pay.*", "isRegex": True, "isEqual": True}]})
         return self._json({"message": "not found"}, 404)
 
     # --- Kibana: chỉ Console proxy chuyển lệnh xuống Elasticsearch, đường dẫn khác bị đẩy sang trang đăng nhập ---

@@ -12,6 +12,8 @@ Agent chỉ dùng công cụ thật. Mỗi công cụ được tạo từ một 
 | --- | --- | --- |
 | `k8s` Kubernetes | list_pods R0, list_deployments R0, pod_logs R1, scale R2, rollout_restart R3, delete_pod R3, exec R4 | kubeconfig (+ context) hoặc api_url + token ServiceAccount, ca_cert, namespace, allowed_namespaces, max_replicas. Kubeconfig phải nhúng sẵn chứng chỉ (`kubectl config view --raw --minify --flatten`); dùng token hoặc chứng chỉ client, không hỗ trợ exec/auth-provider; api_url, token điền tay được ưu tiên hơn kubeconfig |
 | `grafana` | search_dashboards, list_datasources, prometheus_query, list_alerts (R0), create_silence R3 | url, token service account, default_datasource_uid |
+| `prometheus` (cả Mimir, Thanos, VictoriaMetrics) | query, query_range, list_alerts, list_rules, list_targets, label_values, metric_metadata (R0). query_range trả min/max/avg/last và vài điểm mẫu thay vì toàn bộ chuỗi | url, token hoặc username/password, tenant_header (X-Scope-OrgID) |
+| `alertmanager` | list_alerts (gom theo alertname, severity), list_silences (R0), create_silence R3, expire_silence R3 (cả hai có chạy thử) | url, token hoặc username/password, tenant_header |
 | `elasticsearch` (Kibana) | search_logs R1, list_indices R0, delete_index R3 | url Elasticsearch hoặc Kibana (đi qua Console proxy), api_key hoặc username/password, index_pattern |
 | `web` | fetch_page R0 | allowed_domains, max_chars |
 | `data` (nội bộ, tự có ở mọi tenant) | query R0 (lọc kết quả đã lưu theo result_id), script R4 (Python trong sandbox, luôn cần duyệt) | — |
