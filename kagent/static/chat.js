@@ -182,7 +182,11 @@ function chatView(main) {
 
   const input = h("textarea", { rows: 1, placeholder: "Nhắn cho agent…", "aria-label": "Tin nhắn" });
   const env = h("select", { "aria-label": "Môi trường", title: "Môi trường chạy công cụ" }, ["dev", "staging", "prod"].map((e) => h("option", { selected: e === state.env }, e)));
-  env.addEventListener("change", () => { state.env = env.value; });
+  env.addEventListener("change", () => { state.env = env.value; store.set("env", env.value); });
+  // Nội dung đang gõ dở được giữ qua refresh, riêng cho từng hội thoại.
+  const draftKey = () => "draft:" + (state.conversationId || "new");
+  input.value = store.get(draftKey(), "");
+  input.addEventListener("input", () => store.set(draftKey(), input.value));
   const sendBtn = h("button", { type: "button", class: "send", "aria-label": "Gửi", title: "Gửi", disabled: true }, icon("send"));
 
   const resize = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 200) + "px"; };
@@ -327,6 +331,7 @@ function chatView(main) {
     const text = input.value.trim();
     if (!text) return;
     input.value = "";
+    store.set(draftKey(), null);
     resize();
     await send(text);
   }
@@ -379,6 +384,7 @@ function chatView(main) {
         activeRun.id = ev.run_id;
         const isNew = state.conversationId !== ev.conversation_id;
         state.conversationId = ev.conversation_id;
+        syncUrl(true);
         if (isNew) refreshConversations();
       } else if (ev.type === "delta") { live.text += ev.text; queuePaint(); }
       else if (ev.type === "tool_start") { live.running.push(ev.tool); paintActivity(); }
@@ -435,6 +441,26 @@ function chatView(main) {
     }
   }
 
+  // Trang được tải lại khi agent đang trả lời: lượt đó vẫn chạy trên server, nên chờ rồi hiện câu trả lời khi xong.
+  function waitForRunningTurn(known) {
+    const conv = state.conversationId;
+    const note = h("div", { class: "msg assistant" }, h("div", { class: "typing", "aria-label": "Agent đang trả lời" }, h("i"), h("i"), h("i")),
+      h("div", { class: "small muted" }, "Agent vẫn đang trả lời lượt trước (trang vừa được tải lại); câu trả lời sẽ hiện khi xong."));
+    thread.append(note);
+    scroll();
+    const tick = async () => {
+      if (!document.contains(note) || state.conversationId !== conv) return;
+      let data;
+      try { data = await api("GET", `/api/conversations/${conv}`); } catch { return setTimeout(tick, 4000); }
+      if (data.running) return setTimeout(tick, 3000);
+      note.remove();
+      data.messages.slice(known).forEach(addMessage);
+      if (data.messages.some((m) => m.approvals.some((a) => a.status === "pending"))) pollApprovals();
+      scroll();
+    };
+    setTimeout(tick, 3000);
+  }
+
   let polling = false;
   function pollApprovals() {
     if (polling) return;
@@ -473,13 +499,17 @@ function chatView(main) {
         const data = await api("GET", `/api/conversations/${state.conversationId}`);
         data.messages.forEach(addMessage);
         if (data.messages.some((m) => m.approvals.some((a) => a.status === "pending"))) pollApprovals();
+        if (data.running) waitForRunningTurn(data.messages.length);
         requestAnimationFrame(scroll);
       } catch (e) {
         state.conversationId = null;
+        syncUrl(true);
         toast(e.message, true);
       }
     }
     if (!thread.children.length) thread.append(emptyState());
+    resize();
+    syncSend();
     input.focus();
   })();
 }

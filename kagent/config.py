@@ -25,7 +25,8 @@ class Settings:
         self.scheduler_enabled = env("KAGENT_SCHEDULER", "1") == "1"
         self.scheduler_interval = int(env("KAGENT_SCHEDULER_INTERVAL", "60"))
         self.learn_batch_n = int(env("KAGENT_LEARN_N", "5"))
-        self.session_hours = 12
+        self.session_hours = 12  # phiên hết hạn sau ngần này giờ không hoạt động; đang dùng thì tự gia hạn
+        self.session_max_days = 30  # tuổi tối đa của một phiên kể cả khi vẫn hoạt động
         self.approval_ttl_minutes = 30
         self.grant_ttl_minutes = 60
         # Embedding băm chỉ phản ánh trùng từ vựng nên ngưỡng thấp hơn mức 0,85 của tài liệu kiến trúc.

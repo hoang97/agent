@@ -16,7 +16,7 @@ import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
@@ -162,14 +162,27 @@ class Tenant:
         raise HTTPException(403, "vai trò này chỉ được xem")
 
 
-def current_user(request: Request, conn=Depends(get_conn)) -> Principal:
+def _set_session_cookie(response: Response, token: str, seconds: int) -> None:
+    response.set_cookie(COOKIE, token, httponly=True, samesite="strict", secure=settings.cookie_secure, max_age=max(0, seconds), path="/")
+
+
+def current_user(request: Request, response: Response, conn=Depends(get_conn)) -> Principal:
     token = request.cookies.get(COOKIE)
     if not token:
         raise HTTPException(401, "chưa đăng nhập")
-    r = conn.execute("SELECT u.id, u.username, u.is_org_admin FROM session s JOIN app_user u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?",
-                     (_token_hash(token), db.iso())).fetchone()
+    r = conn.execute("SELECT u.id, u.username, u.is_org_admin, s.expires_at, s.created_at FROM session s JOIN app_user u ON u.id=s.user_id "
+                     "WHERE s.token_hash=? AND s.expires_at>?", (_token_hash(token), db.iso())).fetchone()
     if r is None:
         raise HTTPException(401, "phiên đã hết hạn")
+    # Phiên trượt: đang dùng thì gia hạn (khi còn dưới một nửa thời hạn để không ghi DB mỗi request), không quá tuổi tối đa.
+    now = db.now()
+    expires = datetime.fromisoformat(r["expires_at"])
+    if (expires - now).total_seconds() < settings.session_hours * 1800:
+        created = datetime.fromisoformat(r["created_at"]) if r["created_at"] else expires - timedelta(hours=settings.session_hours)
+        new_expiry = min(now + timedelta(hours=settings.session_hours), created + timedelta(days=settings.session_max_days))
+        if new_expiry > expires:
+            conn.execute("UPDATE session SET expires_at=? WHERE token_hash=?", (db.iso(new_expiry), _token_hash(token)))
+            _set_session_cookie(response, token, int((new_expiry - now).total_seconds()))
     return Principal(r["id"], r["username"], bool(r["is_org_admin"]))
 
 
@@ -204,8 +217,9 @@ def login(body: Login, request: Request, response: Response, conn=Depends(get_co
     _failures.pop(key, None)
     token = secrets.token_urlsafe(32)
     conn.execute("DELETE FROM session WHERE expires_at<=?", (db.iso(),))
-    conn.execute("INSERT INTO session(token_hash,user_id,expires_at) VALUES (?,?,?)", (_token_hash(token), r["id"], db.later(hours=settings.session_hours)))
-    response.set_cookie(COOKIE, token, httponly=True, samesite="strict", secure=settings.cookie_secure, max_age=settings.session_hours * 3600, path="/")
+    conn.execute("INSERT INTO session(token_hash,user_id,expires_at,created_at) VALUES (?,?,?,?)",
+                 (_token_hash(token), r["id"], db.later(hours=settings.session_hours), db.iso()))
+    _set_session_cookie(response, token, settings.session_hours * 3600)
     return {"ok": True}
 
 
@@ -438,7 +452,7 @@ def run(body: RunBody, t: Tenant = Depends(current_tenant), conn=Depends(get_con
         raise HTTPException(429, str(exc)) from exc
 
 
-_runs: dict[str, tuple[str, str, threading.Event]] = {}
+_runs: dict[str, tuple[str, str, threading.Event, str]] = {}  # run_id → (tenant, user, cancelled, conversation)
 _runs_lock = threading.Lock()
 
 
@@ -511,7 +525,7 @@ def chat(body: ChatBody, t: Tenant = Depends(current_tenant), conn=Depends(get_c
     run_id = db.new_id()
     cancelled = threading.Event()
     with _runs_lock:
-        _runs[run_id] = (t.tenant_id, t.user_id, cancelled)
+        _runs[run_id] = (t.tenant_id, t.user_id, cancelled, conversation_id)
     events: queue.Queue = queue.Queue()
     events.put({"type": "start", "run_id": run_id, "conversation_id": conversation_id})
 
@@ -590,7 +604,10 @@ def conversation(conversation_id: str, t: Tenant = Depends(current_tenant), conn
     c = _own_conversation(conn, t, conversation_id)
     gateway.expire_approvals(conn, t.tenant_id)
     rs = conn.execute("SELECT * FROM episode WHERE conversation_id=? AND tenant_id=? ORDER BY started_at, rowid", (conversation_id, t.tenant_id)).fetchall()
-    return {**c, "messages": [_chat_message(conn, t, db.row(r, "input", "trace", "ku_used", "human_edit")) for r in rs]}
+    with _runs_lock:
+        # Lượt vẫn chạy trên server sau khi người dùng tải lại trang; giao diện dùng cờ này để chờ câu trả lời.
+        running = any(r[0] == t.tenant_id and r[1] == t.user_id and r[3] == conversation_id for r in _runs.values())
+    return {**c, "running": running, "messages": [_chat_message(conn, t, db.row(r, "input", "trace", "ku_used", "human_edit")) for r in rs]}
 
 
 class ConversationPatch(BaseModel):
@@ -850,13 +867,21 @@ def ku_consolidate(body: Consolidate, t: Tenant = Depends(current_tenant), conn=
 
 
 @app.get("/api/ku/consolidate/{job_id}")
-def ku_consolidate_status(job_id: str, t: Tenant = Depends(current_tenant)):
+def ku_consolidate_status(job_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     t.require_admin()
     job = _consolidations.get(job_id)
     if job is None or job["tenant_id"] != t.tenant_id:
         raise HTTPException(404, "không có đề xuất này (máy chủ có thể đã khởi động lại)")
     with _consolidations_lock:
-        return {k: v for k, v in job.items() if k != "tenant_id"}
+        out = {k: v for k, v in job.items() if k != "tenant_id"}
+    # Mở lại đề xuất sau khi tải trang: bỏ các KU đã được xử lý trong lúc đó để không gộp hay loại lại.
+    ids = list(out["items"])
+    live = {r["id"] for r in conn.execute(f"SELECT id FROM knowledge_unit WHERE tenant_id=? AND status='candidate' AND id IN ({','.join('?' * len(ids))})",
+                                          (t.tenant_id, *ids)).fetchall()} if ids else set()
+    out["groups"] = [{**g, "ids": [i for i in g["ids"] if i in live]} for g in out["groups"]]
+    out["groups"] = [g for g in out["groups"] if len(g["ids"]) >= 2]
+    out["drop"] = [d for d in out["drop"] if d["id"] in live]
+    return out
 
 
 class Merge(BaseModel):

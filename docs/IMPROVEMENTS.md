@@ -209,3 +209,11 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend 
 - **Tổng hợp trùng lặp:** job nền chia ứng viên theo loại, mỗi lô tối đa 40 KU, chạy song song 3 lô; LLM gom KU trùng ý thành nhóm kèm bản gộp và đề xuất loại KU ít giá trị. Chỉ là đề xuất: người duyệt sửa bản gộp, chấp nhận từng nhóm hoặc "Gộp và chấp nhận tất cả", loại các mục đề xuất. Bản gốc chuyển "bị loại" kèm `superseded_by` và sự kiện `MERGE`, truy vết được; bản gộp mang mức tin cậy nguồn thấp nhất trong nhóm. Không có LLM thì gom theo trùng từ vựng.
 - **Lần thử đầu báo 502:** gửi cả 122 KU trong một request mất quá lâu qua relay (33 KU đã mất khoảng 60 giây). Nay chạy nền theo lô, giao diện hiện tiến độ. Trên dữ liệu thật: 5 lô, khoảng 1 phút, 72 KU gộp còn 23 và 21 KU đề xuất loại.
 - **Giảm tốc độ sinh mới:** Reflector rút 0–3 KU mỗi lượt (trước là tối đa 5), không ghi điều về cơ chế của agent/gateway/duyệt lệnh, không ghi lại điều đã có trong KU đã nạp.
+
+## Đợt 26 — 2026-11-11: giữ phiên và trạng thái các màn qua refresh
+
+- **Phiên trượt:** cookie phiên (HttpOnly) trước đây hết hạn cố định 12 giờ sau khi đăng nhập. Nay đang dùng thì tự gia hạn (khi còn dưới nửa thời hạn, để không ghi DB mỗi request), hết hạn sau 12 giờ không hoạt động, tối đa 30 ngày kể từ lúc đăng nhập.
+- **Vị trí trên URL:** `#/t/<tenant>/<màn>[/<hội thoại>]`; refresh, Back/Forward và link mở đúng tenant, màn, hội thoại.
+- **Trạng thái từng màn** lưu trong localStorage theo người dùng và tenant: tin nhắn đang gõ (theo từng hội thoại), môi trường chat, bộ lọc và form thêm KU, đề xuất tổng hợp KU (đang chạy thì theo dõi tiếp, xong thì mở lại, bỏ các KU đã xử lý trong lúc đó), form kết nối và kết nối đang sửa, form cấu hình LLM và cấu hình đang sửa, overlay chính sách đang soạn. Không bao giờ lưu key, mật khẩu, secret hay kubeconfig; bản nháp xóa khi lưu thành công.
+- **Lượt chat đang chạy khi refresh:** lượt vẫn chạy trên server; hội thoại trả `running`, giao diện hiện "agent vẫn đang trả lời" rồi tự hiện câu trả lời khi xong.
+- Đã thử trên Chrome: refresh ở màn Tri thức (giữ bộ lọc và nháp), ở chat (giữ hội thoại, nháp tin nhắn), ở Cài đặt (giữ cấu hình đang sửa, ô key vẫn trống), và nút Back.
