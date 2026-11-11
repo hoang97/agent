@@ -217,3 +217,8 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend 
 - **Trạng thái từng màn** lưu trong localStorage theo người dùng và tenant: tin nhắn đang gõ (theo từng hội thoại), môi trường chat, bộ lọc và form thêm KU, đề xuất tổng hợp KU (đang chạy thì theo dõi tiếp, xong thì mở lại, bỏ các KU đã xử lý trong lúc đó), form kết nối và kết nối đang sửa, form cấu hình LLM và cấu hình đang sửa, overlay chính sách đang soạn. Không bao giờ lưu key, mật khẩu, secret hay kubeconfig; bản nháp xóa khi lưu thành công.
 - **Lượt chat đang chạy khi refresh:** lượt vẫn chạy trên server; hội thoại trả `running`, giao diện hiện "agent vẫn đang trả lời" rồi tự hiện câu trả lời khi xong.
 - Đã thử trên Chrome: refresh ở màn Tri thức (giữ bộ lọc và nháp), ở chat (giữ hội thoại, nháp tin nhắn), ở Cài đặt (giữ cấu hình đang sửa, ô key vẫn trống), và nút Back.
+
+## Đợt 27 — 2026-11-11: biểu tượng xoay cho dòng đang thực hiện
+
+- Helper `busy(text)`: spinner 12px ở đầu dòng kèm nội dung, `role="status"`. Dùng cho: tiến độ tổng hợp KU, công cụ đang chạy trong chat, lượt chat đang chờ sau khi tải lại trang, kiểm tra kết nối, tải danh mục công cụ và công cụ học được. Hệ thống bật giảm chuyển động thì spinner đứng yên thành chấm tròn.
+- Kiểm tra kết nối mà request lỗi thì xóa spinner thay vì để quay mãi.

@@ -52,6 +52,11 @@ const guard = (fn) => async (ev) => {
   try { await fn(ev); } catch (e) { toast(e.message, true); } finally { if (btn) btn.disabled = false; }
 };
 
+// Dòng "đang thực hiện": biểu tượng xoay nhỏ đầu dòng kèm nội dung. role=status để trình đọc màn hình đọc khi thay đổi.
+function busy(text) {
+  return h("span", { class: "busy", role: "status" }, h("span", { class: "spinner", "aria-hidden": "true" }), text);
+}
+
 const fmtTime = (s) => (s ? new Date(s).toLocaleString("vi-VN") : "—");
 const CLASS = { proposed: "warn", disabled: "bad", success: "ok", ok: "ok", active: "ok", auto: "ok", approved: "ok", published: "ok", failure: "bad", error: "bad", blocked: "bad", denied: "bad", rejected: "bad", deprecated: "bad", invalid: "bad", pending: "warn", candidate: "warn", pending_review: "warn", partial: "warn", expired: "warn" };
 const LABEL = { success: "thành công", failure: "thất bại", partial: "một phần", unknown: "chưa rõ", ok: "ok", error: "lỗi", blocked: "bị chặn", pending: "chờ duyệt", auto: "tự chạy", approved: "đã duyệt", denied: "từ chối", expired: "hết hạn", invalid: "sai tham số", candidate: "ứng viên", active: "hiệu lực", deprecated: "hết hiệu lực", rejected: "bị loại", pending_review: "chờ duyệt", proposed: "đề xuất", disabled: "đã tắt", published: "đã publish", noop: "không đổi", stale: "đã cũ", reverted: "đã hoàn tác" };
@@ -260,7 +265,7 @@ VIEWS.knowledge = async (main) => {
     const progress = h("div", { class: "card muted" });
     consolidated.replaceChildren(progress);
     while (job.status === "running") {
-      progress.textContent = `Đang tổng hợp ${job.considered} ứng viên: xong ${job.done}/${job.total} lô… (có thể mất vài phút, cứ để trang mở)`;
+      progress.replaceChildren(busy(`Đang tổng hợp ${job.considered} ứng viên: xong ${job.done}/${job.total} lô… (có thể mất vài phút, cứ để trang mở)`));
       await new Promise((r) => setTimeout(r, 3000));
       if (!document.contains(progress)) return;  // người dùng đã rời trang hoặc đóng đề xuất
       job = await api("GET", `/api/ku/consolidate/${job.id}`);
@@ -400,7 +405,7 @@ const ROLE_LABEL = { member: "member", tenant_admin: "tenant admin", "approver:d
 
 function toolCatalogSection() {
   const admin = isAdmin();
-  const box = h("div", {}, h("div", { class: "card muted" }, "Đang tải danh mục…"));
+  const box = h("div", {}, h("div", { class: "card muted" }, busy("Đang tải danh mục…")));
   const search = h("input", { type: "search", placeholder: "Tìm công cụ", "aria-label": "Tìm công cụ" });
   const filter = h("select", { "aria-label": "Lọc công cụ" }, [["all", "Tất cả"], ["enabled", "Đang bật"], ["off", "Đang tắt"], ["personal", "Cá nhân"]].map(([v, l]) => h("option", { value: v }, l)));
   let list = [];
@@ -533,7 +538,14 @@ VIEWS.connections = async (main) => {
   const action = (c, fn) => guard(async () => { await fn(); reload(); });
   function card(c) {
     const result = h("div", { class: "small" });
-    const test = guard(async () => { result.textContent = "Đang kiểm tra…"; const r = await api("POST", `/api/connections/${c.id}/test`); result.className = "small " + (r.ok ? "ok-text" : "warn-text"); result.textContent = r.ok ? "Kết nối được: " + JSON.stringify(r.detail) : "Lỗi: " + r.error; });
+    const test = guard(async () => {
+      result.className = "small";
+      result.replaceChildren(busy("Đang kiểm tra…"));
+      let r;
+      try { r = await api("POST", `/api/connections/${c.id}/test`); } catch (e) { result.replaceChildren(); throw e; }  // không để spinner quay mãi khi request lỗi
+      result.className = "small " + (r.ok ? "ok-text" : "warn-text");
+      result.textContent = r.ok ? "Kết nối được: " + JSON.stringify(r.detail) : "Lỗi: " + r.error;
+    });
     const remove = h("button", { type: "button", class: "danger small-btn", onclick: () => {
       if (remove.dataset.confirm) action(c, () => api("DELETE", `/api/connections/${c.id}`))();
       else { remove.dataset.confirm = "1"; remove.textContent = "Bấm lần nữa để gỡ"; setTimeout(() => { delete remove.dataset.confirm; remove.textContent = "Gỡ"; }, 4000); }
@@ -562,7 +574,7 @@ VIEWS.connections = async (main) => {
 };
 
 function learnedToolsSection(personalOnly) {
-  const box = h("div", {}, h("div", { class: "card muted" }, "Đang tải…"));
+  const box = h("div", {}, h("div", { class: "card muted" }, busy("Đang tải…")));
   const tierClass = (r) => ({ R3: "warn", R4: "bad" }[r] || "");
   const load = async () => {
     const list = (await api("GET", "/api/learned-tools")).filter((t) => (personalOnly ? t.personal : !t.personal));

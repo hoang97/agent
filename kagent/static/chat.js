@@ -120,7 +120,7 @@ function activityView(steps, running) {
   running = running || [];
   if (!steps.length && !running.length) return null;
   const parallel = steps.filter((s) => s.parallel).length;
-  const summary = running.length ? `Đang chạy ${running.join(", ")}…`
+  const summary = running.length ? busy(`Đang chạy ${running.join(", ")}…`)
     : `Đã dùng ${steps.length} công cụ` + (parallel ? ` · ${parallel} chạy song song` : "");
   const rows = steps.map((s) => h("div", { class: "tool-row" },
     h("div", { class: "tool-title" }, h("code", {}, s.tool), s.risk_tier && h("span", { class: "badge" }, s.risk_tier), badge(s.status),
@@ -445,7 +445,7 @@ function chatView(main) {
   function waitForRunningTurn(known) {
     const conv = state.conversationId;
     const note = h("div", { class: "msg assistant" }, h("div", { class: "typing", "aria-label": "Agent đang trả lời" }, h("i"), h("i"), h("i")),
-      h("div", { class: "small muted" }, "Agent vẫn đang trả lời lượt trước (trang vừa được tải lại); câu trả lời sẽ hiện khi xong."));
+      h("div", { class: "small muted" }, busy("Agent vẫn đang trả lời lượt trước (trang vừa được tải lại); câu trả lời sẽ hiện khi xong.")));
     thread.append(note);
     scroll();
     const tick = async () => {
