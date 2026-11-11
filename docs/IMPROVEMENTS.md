@@ -201,3 +201,11 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend 
 - **Biểu đồ token theo LLM:** trang Đo lường có cột chồng theo ngày (14 ngày), mỗi "cấu hình · model" một màu cố định theo thứ tự xuất hiện lần đầu (không theo thứ hạng), quá 6 LLM gộp vào "Khác"; có chú thích, tooltip theo ngày và bảng số liệu. Palette đã chạy validator CVD/độ tương phản cho nền sáng và tối; ở nền sáng ba màu dưới 3:1 nên bảng số liệu luôn đi kèm.
 - `llm_call` ghi thêm tên cấu hình; model lấy theo tier khi phản hồi stream của dịch vụ tương thích không có tên model (trước đây ghi rỗng, hiện là "(không rõ)").
 - **Lỗi thấy khi xem trên trình duyệt:** CSP `default-src 'self'` chặn thuộc tính `style` viết thẳng, nên màu được gán bằng class.
+
+## Đợt 25 — 2026-11-11: tri thức sinh quá nhiều, tổng hợp và duyệt hàng loạt
+
+- **Vấn đề:** 122 KU ứng viên sau một buổi dùng, nhiều mục trùng ý (cùng một ý viết khác câu chữ hay khác ngôn ngữ, Curator dùng embedding băm theo từ vựng nên không nhận ra), nhiều mục nói về chính cơ chế của agent (gateway, duyệt lệnh).
+- **Duyệt hàng loạt:** trang Tri thức có lọc theo loại, ô chọn từng KU, chọn tất cả, "Chấp nhận đã chọn" / "Loại đã chọn" (`POST /api/ku/review-batch`).
+- **Tổng hợp trùng lặp:** job nền chia ứng viên theo loại, mỗi lô tối đa 40 KU, chạy song song 3 lô; LLM gom KU trùng ý thành nhóm kèm bản gộp và đề xuất loại KU ít giá trị. Chỉ là đề xuất: người duyệt sửa bản gộp, chấp nhận từng nhóm hoặc "Gộp và chấp nhận tất cả", loại các mục đề xuất. Bản gốc chuyển "bị loại" kèm `superseded_by` và sự kiện `MERGE`, truy vết được; bản gộp mang mức tin cậy nguồn thấp nhất trong nhóm. Không có LLM thì gom theo trùng từ vựng.
+- **Lần thử đầu báo 502:** gửi cả 122 KU trong một request mất quá lâu qua relay (33 KU đã mất khoảng 60 giây). Nay chạy nền theo lô, giao diện hiện tiến độ. Trên dữ liệu thật: 5 lô, khoảng 1 phút, 72 KU gộp còn 23 và 21 KU đề xuất loại.
+- **Giảm tốc độ sinh mới:** Reflector rút 0–3 KU mỗi lượt (trước là tối đa 5), không ghi điều về cơ chế của agent/gateway/duyệt lệnh, không ghi lại điều đã có trong KU đã nạp.

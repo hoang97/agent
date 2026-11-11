@@ -146,3 +146,41 @@ def recompute_confidence(ku: dict) -> float:
     """Làm trơn Laplace trên bộ đếm, kéo theo độ tin cậy của nguồn."""
     prior = {"user": 0.8, "verified_tool": 0.65, "internal_doc": 0.6, "external_untrusted": 0.2}[ku["source_trust"]]
     return round((ku["helpful_cnt"] + prior * 2) / (ku["helpful_cnt"] + ku["harmful_cnt"] + 2), 3)
+
+
+KINDS = ("rule", "fact", "procedure", "lesson", "insight")
+# Thứ tự tin cậy nguồn, thấp nhất trước: bản gộp mang mức thấp nhất trong nhóm, để nội dung untrusted không được "rửa" qua việc gộp.
+TRUST_ORDER = ("external_untrusted", "internal_doc", "verified_tool", "user")
+
+
+def merge(conn, tenant_id: str, ids: list[str], merged: dict, actor: str, activate: bool = False) -> dict:
+    """Gộp các KU ứng viên trùng ý thành một KU mới; bản gốc chuyển rejected kèm superseded_by, vẫn truy vết được."""
+    ids = list(dict.fromkeys(ids))
+    if len(ids) < 2:
+        raise ValueError("cần ít nhất 2 KU để gộp")
+    kus = [get(conn, tenant_id, i) for i in ids]
+    if any(k is None for k in kus):
+        raise KeyError("không tìm thấy KU")
+    if any(k["status"] != "candidate" for k in kus):
+        raise ValueError("chỉ gộp được KU đang là ứng viên")
+    scopes = {k["scope"] for k in kus}
+    if len(scopes) != 1:
+        raise ValueError("chỉ gộp được KU cùng phạm vi")
+    kind = merged.get("kind") or kus[0]["kind"]
+    if kind not in KINDS:
+        raise ValueError(f"loại KU phải thuộc {list(KINDS)}")
+    title, content = str(merged.get("title") or "").strip(), str(merged.get("content") or "").strip()
+    if not title or not content:
+        raise ValueError("bản gộp cần tiêu đề và nội dung")
+    domains = [k["domain"] for k in kus]
+    with db.tx(conn):
+        new = add(conn, tenant_id, kind=kind, title=title[:200], content=content[:2000], applies_when=(merged.get("applies_when") or None),
+                  entities=sorted({e for k in kus for e in k["entities"]}), source_eps=[e for k in kus for e in k["source_eps"]],
+                  source_trust=min((k["source_trust"] for k in kus), key=TRUST_ORDER.index), scope=scopes.pop(),
+                  domain=max(set(domains), key=domains.count), actor=actor, reason=f"gộp {len(kus)} KU trùng ý")
+        for k in kus:
+            update(conn, tenant_id, k["id"], {"status": "rejected", "superseded_by": new["id"]}, "MERGE", actor, f"gộp vào {new['id']}")
+            add_edge(conn, tenant_id, new["id"], k["id"], "refines")
+        if activate:
+            new = promote(conn, tenant_id, new["id"], actor, "người duyệt chấp nhận bản gộp")
+    return new

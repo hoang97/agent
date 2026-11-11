@@ -1,6 +1,7 @@
 """HTTP API và phục vụ giao diện. Mọi truy vấn đều đi kèm tenant_id đã kiểm tra quyền thành viên."""
 from __future__ import annotations
 
+import contextvars
 import difflib
 import hashlib
 import json
@@ -739,6 +740,144 @@ def ku_review(ku_id: str, body: Review, t: Tenant = Depends(current_tenant), con
     if body.approve:
         return _public(knowledge.promote(conn, t.tenant_id, ku_id, t.principal.username, body.reason or "người duyệt chấp nhận"))
     return _public(knowledge.update(conn, t.tenant_id, ku_id, {"status": "rejected"}, "DEPRECATE", t.principal.username, body.reason or "người duyệt từ chối"))
+
+
+class BatchReview(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=500)
+    approve: bool
+    reason: str | None = Field(default=None, max_length=500)
+
+
+@app.post("/api/ku/review-batch")
+def ku_review_batch(body: BatchReview, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    """Chấp nhận hoặc loại nhiều KU ứng viên một lần; KU không còn là ứng viên thì bỏ qua."""
+    t.require_admin()
+    done, skipped = [], []
+    for ku_id in dict.fromkeys(body.ids):
+        try:
+            ku = _visible_ku(conn, t, ku_id)
+        except HTTPException:
+            skipped.append(ku_id)
+            continue
+        if ku["status"] != "candidate":
+            skipped.append(ku_id)
+            continue
+        if body.approve:
+            knowledge.promote(conn, t.tenant_id, ku_id, t.principal.username, body.reason or "người duyệt chấp nhận hàng loạt")
+        else:
+            knowledge.update(conn, t.tenant_id, ku_id, {"status": "rejected"}, "DEPRECATE", t.principal.username, body.reason or "người duyệt loại hàng loạt")
+        done.append(ku_id)
+    return {"done": len(done), "skipped": len(skipped)}
+
+
+class Consolidate(BaseModel):
+    kind: str | None = None
+
+
+MAX_CONSOLIDATE = 300
+CONSOLIDATE_BATCH = 40  # mỗi lần gọi LLM; lô lớn hơn làm request chậm (khoảng 60 giây cho 33 KU qua relay) và dễ chạm giới hạn output
+_consolidations: dict[str, dict] = {}
+_consolidations_lock = threading.Lock()
+
+
+def _batches(items: list[dict]) -> list[list[dict]]:
+    """Chia theo loại rồi theo lô: KU trùng ý hầu như luôn cùng loại, và lô nhỏ thì mỗi lần gọi nhanh, chạy song song được."""
+    by_kind: dict[str, list[dict]] = defaultdict(list)
+    for it in items:
+        by_kind[it["kind"]].append(it)
+    return [group[i:i + CONSOLIDATE_BATCH] for group in by_kind.values() if len(group) >= 2 for i in range(0, len(group), CONSOLIDATE_BATCH)]
+
+
+def _run_consolidation(job_id: str, tenant_id: str, items: list[dict]) -> None:
+    job = _consolidations[job_id]
+    scope = {it["id"]: it["scope"] for it in items}
+    provider = llm.get_provider()
+
+    def one(batch: list[dict]) -> dict:
+        with llm.collect_usage() as usage:
+            try:
+                return provider.consolidate(batch)
+            finally:
+                if usage:
+                    with db.session() as conn:
+                        llm.save_usage(conn, tenant_id, None, usage)
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="consolidate") as pool:
+        futures = [pool.submit(contextvars.copy_context().run, one, b) for b in _batches(items)]
+        for fut in as_completed(futures):
+            try:
+                part = fut.result()
+            except llm.LLMError as exc:
+                job["errors"].append(str(exc))
+                part = {"groups": [], "drop": []}
+            except Exception:
+                log.exception("lỗi khi tổng hợp KU")
+                job["errors"].append("lỗi máy chủ khi tổng hợp một lô")
+                part = {"groups": [], "drop": []}
+            with _consolidations_lock:
+                # Gom chỉ trong cùng phạm vi: bỏ id khác phạm vi với KU đầu nhóm.
+                for g in part["groups"]:
+                    g["ids"] = [i for i in g["ids"] if scope[i] == scope[g["ids"][0]]]
+                job["groups"] += [g for g in part["groups"] if len(g["ids"]) >= 2]
+                job["drop"] += part["drop"]
+                job["done"] += 1
+    job["status"] = "done" if len(job["errors"]) < job["total"] else "error"
+
+
+@app.post("/api/ku/consolidate")
+def ku_consolidate(body: Consolidate, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    """Bắt đầu đề xuất gom KU ứng viên trùng ý và loại KU ít giá trị, chạy nền theo lô. Chỉ đề xuất, chưa thay đổi gì."""
+    t.require_admin()
+    sql = "SELECT id, kind, title, content, applies_when, source_trust, scope FROM knowledge_unit WHERE tenant_id=? AND status='candidate' AND scope NOT LIKE 'user:%'"
+    args: list = [t.tenant_id]
+    if body.kind:
+        sql += " AND kind=?"
+        args.append(body.kind)
+    items = db.rows(conn.execute(sql + " ORDER BY recorded_at DESC LIMIT ?", (*args, MAX_CONSOLIDATE)).fetchall())
+    job_id = db.new_id()
+    job = {"id": job_id, "tenant_id": t.tenant_id, "status": "running", "done": 0, "total": len(_batches(items)), "considered": len(items),
+           "groups": [], "drop": [], "errors": [], "items": {it["id"]: {k: it[k] for k in ("kind", "title", "content", "source_trust")} for it in items}}
+    with _consolidations_lock:
+        for old in [k for k, v in _consolidations.items() if v["tenant_id"] == t.tenant_id]:
+            _consolidations.pop(old)  # mỗi tenant giữ một đề xuất gần nhất
+        _consolidations[job_id] = job
+    if job["total"] == 0:
+        job["status"] = "done"
+    else:
+        threading.Thread(target=_run_consolidation, args=(job_id, t.tenant_id, items), name=f"consolidate-{job_id[:8]}", daemon=True).start()
+    return {k: v for k, v in job.items() if k != "tenant_id"}
+
+
+@app.get("/api/ku/consolidate/{job_id}")
+def ku_consolidate_status(job_id: str, t: Tenant = Depends(current_tenant)):
+    t.require_admin()
+    job = _consolidations.get(job_id)
+    if job is None or job["tenant_id"] != t.tenant_id:
+        raise HTTPException(404, "không có đề xuất này (máy chủ có thể đã khởi động lại)")
+    with _consolidations_lock:
+        return {k: v for k, v in job.items() if k != "tenant_id"}
+
+
+class Merge(BaseModel):
+    ids: list[str] = Field(min_length=2, max_length=50)
+    kind: str
+    title: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=2000)
+    applies_when: str | None = Field(default=None, max_length=500)
+    activate: bool = False
+
+
+@app.post("/api/ku/merge")
+def ku_merge(body: Merge, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_admin()
+    for ku_id in body.ids:
+        _visible_ku(conn, t, ku_id)
+    try:
+        ku = knowledge.merge(conn, t.tenant_id, body.ids, body.model_dump(), t.principal.username, body.activate)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return _public(ku)
 
 
 @app.post("/api/ku/events/{event_id}/rollback")

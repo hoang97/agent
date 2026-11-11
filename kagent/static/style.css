@@ -220,3 +220,6 @@ input.wide { flex: 1; min-width: 220px; }
 .s5 { fill: var(--series-5); background: var(--series-5); } .s6 { fill: var(--series-6); background: var(--series-6); }
 .so { fill: var(--series-other); background: var(--series-other); }
 .chart-tip .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
+.bulk-bar { position: sticky; top: 0; z-index: 3; }
+.bulk-bar button:disabled { opacity: .5; cursor: not-allowed; }
+.merge-card > input, .merge-card > textarea { display: block; width: 100%; box-sizing: border-box; margin: 6px 0; }

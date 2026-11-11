@@ -178,8 +178,14 @@ VIEWS.episodes = async (main) => {
 
 VIEWS.knowledge = async (main) => {
   const statusSel = h("select", { "aria-label": "Trạng thái", onchange: () => load() }, [["candidate", "Ứng viên"], ["active", "Hiệu lực"], ["deprecated", "Hết hiệu lực"], ["rejected", "Bị loại"], ["", "Tất cả"]].map(([v, l]) => h("option", { value: v }, l)));
+  const kindSel = h("select", { "aria-label": "Loại", onchange: () => load() }, [["", "Mọi loại"], ...["rule", "fact", "procedure", "lesson", "insight"].map((k) => [k, k])].map(([v, l]) => h("option", { value: v }, l)));
   const box = h("div");
   const detail = h("div");
+  const consolidated = h("div");
+  const selected = new Set();
+  const countLabel = h("span", { class: "small" });
+  const bulkBar = h("div", { class: "card row bulk-bar hidden" });
+  let current = [];
   const showKu = (id) => guard(async () => {
     const ku = await api("GET", `/api/ku/${id}`);
     detail.replaceChildren(h("div", { class: "card" }, h("h3", {}, "Lịch sử: " + ku.title),
@@ -188,22 +194,114 @@ VIEWS.knowledge = async (main) => {
         h("td", {}, isAdmin() && h("button", { class: "ghost", onclick: guard(async () => { await api("POST", `/api/ku/events/${ev.id}/rollback`); toast("Đã hoàn tác"); await load(); }) }, "Hoàn tác"))))))));
   });
   const review = (id, approve) => guard(async () => { await api("POST", `/api/ku/${id}/review`, { approve }); toast(approve ? "Đã chấp nhận" : "Đã loại"); await load(); });
+  const batch = (ids, approve) => api("POST", "/api/ku/review-batch", { ids: [...ids], approve });
+  const syncBulk = () => {
+    const reviewing = isAdmin() && statusSel.value === "candidate" && current.length > 0;
+    bulkBar.classList.toggle("hidden", !reviewing);
+    countLabel.textContent = selected.size ? `Đã chọn ${selected.size}/${current.length}` : `${current.length} ứng viên`;
+    for (const b of bulkBar.querySelectorAll("button.needs-sel")) b.disabled = selected.size === 0;
+  };
+  const selectAll = h("input", { type: "checkbox", "aria-label": "Chọn tất cả", onchange: () => {
+    selected.clear();
+    if (selectAll.checked) current.forEach((k) => selected.add(k.id));
+    box.querySelectorAll("input.ku-pick").forEach((c) => { c.checked = selectAll.checked; });
+    syncBulk();
+  } });
+  const doBatch = (approve) => guard(async () => {
+    const r = await batch(selected, approve);
+    toast(`${approve ? "Đã chấp nhận" : "Đã loại"} ${r.done} KU${r.skipped ? `, bỏ qua ${r.skipped}` : ""}`);
+    await load();
+  });
+  // Tổng hợp chạy nền theo lô (mỗi lô vài chục KU mất khoảng một phút); trang hỏi tiến độ mỗi 3 giây.
+  const consolidate = guard(async () => {
+    let job = await api("POST", "/api/ku/consolidate", { kind: kindSel.value || null });
+    const progress = h("div", { class: "card muted" });
+    consolidated.replaceChildren(progress);
+    while (job.status === "running") {
+      progress.textContent = `Đang tổng hợp ${job.considered} ứng viên: xong ${job.done}/${job.total} lô… (có thể mất vài phút, cứ để trang mở)`;
+      await new Promise((r) => setTimeout(r, 3000));
+      if (!document.contains(progress)) return;  // người dùng đã rời trang hoặc đóng đề xuất
+      job = await api("GET", `/api/ku/consolidate/${job.id}`);
+    }
+    if (job.status === "error") { consolidated.replaceChildren(); throw new Error("Không tổng hợp được: " + job.errors.join("; ")); }
+    renderProposal(job);
+    if (job.errors.length) toast(`${job.errors.length} lô bị lỗi: ${job.errors[0]}`, true);
+  });
+  bulkBar.append(h("label", { class: "small" }, selectAll, " Chọn tất cả"), countLabel, h("span", { class: "spacer" }),
+    h("button", { type: "button", class: "needs-sel", onclick: doBatch(true) }, "Chấp nhận đã chọn"),
+    h("button", { type: "button", class: "danger needs-sel", onclick: doBatch(false) }, "Loại đã chọn"),
+    h("button", { type: "button", class: "ghost", onclick: consolidate, title: "LLM gom các KU trùng ý và đề xuất loại KU ít giá trị; chưa thay đổi gì cho tới khi bạn chấp nhận" }, "Tổng hợp trùng lặp"));
+
+  // Đề xuất tổng hợp: mỗi nhóm có bản gộp sửa được; chấp nhận thì bản gốc chuyển "bị loại" kèm liên kết tới bản gộp.
+  function renderProposal(p) {
+    const title = (id) => (p.items[id] ? p.items[id].title : id);
+    const groupCard = (g) => {
+      const t = h("input", { class: "wide", value: g.title, "aria-label": "Tiêu đề bản gộp" });
+      const c = h("textarea", { rows: 3, value: g.content, "aria-label": "Nội dung bản gộp" });
+      const a = h("input", { class: "wide", value: g.applies_when || "", placeholder: "Áp dụng khi", "aria-label": "Điều kiện áp dụng" });
+      const card = h("div", { class: "card merge-card" });
+      const apply = async (activate) => {
+        await api("POST", "/api/ku/merge", { ids: g.ids, kind: g.kind, title: t.value, content: c.value, applies_when: a.value || null, activate });
+        card.classList.remove("merge-card");
+        card.replaceChildren(h("div", { class: "small" }, `Đã gộp ${g.ids.length} KU thành "${t.value}"${activate ? " và chấp nhận" : " (vẫn là ứng viên)"}.`));
+      };
+      card.applyMerge = apply;  // dùng cho nút "Gộp và chấp nhận tất cả", giữ nội dung người dùng đã sửa
+      const merge = (activate) => guard(async () => { await apply(activate); await load(); });
+      card.append(h("div", { class: "row spread" }, h("b", {}, `Gộp ${g.ids.length} KU`), h("span", { class: "badge info" }, g.kind)),
+        h("ul", { class: "small" }, g.ids.map((id) => h("li", {}, title(id), p.items[id] && p.items[id].source_trust === "external_untrusted" ? h("span", { class: "badge warn" }, "nội dung ngoài") : null))),
+        g.reason && h("div", { class: "small muted" }, g.reason), t, c, a,
+        h("div", { class: "row" }, h("button", { type: "button", onclick: merge(true) }, "Gộp và chấp nhận"), h("button", { type: "button", class: "ghost", onclick: merge(false) }, "Gộp, giữ là ứng viên"),
+          h("button", { type: "button", class: "ghost", onclick: () => card.remove() }, "Bỏ qua (giữ nguyên các KU này)")));
+      return card;
+    };
+    const dropIds = new Set(p.drop.map((d) => d.id));
+    const dropCard = p.drop.length > 0 && h("div", { class: "card" }, h("b", {}, `Đề xuất loại ${p.drop.length} KU ít giá trị`),
+      h("ul", { class: "small" }, p.drop.map((d) => h("li", {}, h("label", {}, h("input", { type: "checkbox", checked: true, onchange: (e) => (e.target.checked ? dropIds.add(d.id) : dropIds.delete(d.id)) }), " ", title(d.id), h("span", { class: "muted" }, " — " + d.reason))))),
+      h("div", { class: "row" }, h("button", { type: "button", class: "danger", onclick: guard(async (e) => {
+        const r = await batch(dropIds, false);
+        e.target.closest(".card").replaceChildren(h("div", { class: "small" }, `Đã loại ${r.done} KU.`));
+        await load();
+      }) }, "Loại các mục đã chọn")));
+    const mergedCount = p.groups.reduce((n, g) => n + g.ids.length, 0);
+    const acceptAll = guard(async () => {
+      let ok = 0, failed = 0;
+      for (const card of [...consolidated.querySelectorAll(".merge-card")]) {
+        try { await card.applyMerge(true); ok += 1; } catch (e) { failed += 1; }  // nhóm có KU đã bị xử lý ở nơi khác thì bỏ qua
+      }
+      toast(`Đã gộp và chấp nhận ${ok} nhóm${failed ? `, ${failed} nhóm lỗi` : ""}`, failed > 0);
+      await load();
+    });
+    consolidated.replaceChildren(h("h3", {}, `Đề xuất tổng hợp (đã xét ${p.considered} ứng viên)`),
+      p.groups.length > 0 && h("div", { class: "card row" }, h("span", { class: "small" }, `${p.groups.length} nhóm gộp ${mergedCount} KU thành ${p.groups.length}; ${p.drop.length} KU đề xuất loại. Sửa hoặc bỏ qua nhóm chưa ổn rồi chấp nhận phần còn lại.`),
+        h("span", { class: "spacer" }), h("button", { type: "button", onclick: acceptAll }, `Gộp và chấp nhận tất cả ${p.groups.length} nhóm`)),
+      ...(p.groups.length || p.drop.length ? [...p.groups.map(groupCard), dropCard] : [h("div", { class: "card muted" }, "Không thấy KU trùng ý hay ít giá trị.")]),
+      h("div", { class: "row" }, h("button", { type: "button", class: "ghost", onclick: () => consolidated.replaceChildren() }, "Đóng đề xuất")));
+  }
+
   async function load() {
-    const q = statusSel.value ? `?status=${statusSel.value}` : "";
-    const list = await api("GET", "/api/ku" + q);
-    box.replaceChildren(...(list.length ? list.map((k) => h("div", { class: "card" },
-      h("div", { class: "row spread" }, h("h3", {}, k.title), h("div", {}, badge(k.status), h("span", { class: "badge info" }, k.kind), h("span", { class: "badge" }, k.source_trust), h("span", { class: "badge" }, k.domain))),
+    const q = new URLSearchParams();
+    if (statusSel.value) q.set("status", statusSel.value);
+    if (kindSel.value) q.set("kind", kindSel.value);
+    current = await api("GET", "/api/ku" + (q.toString() ? "?" + q : ""));
+    selected.clear();
+    selectAll.checked = false;
+    const picking = isAdmin() && statusSel.value === "candidate";
+    box.replaceChildren(...(current.length ? current.map((k) => h("div", { class: "card" },
+      h("div", { class: "row spread" }, h("div", { class: "row" }, picking && h("input", { type: "checkbox", class: "ku-pick", "aria-label": "Chọn " + k.title,
+        onchange: (e) => { e.target.checked ? selected.add(k.id) : selected.delete(k.id); syncBulk(); } }), h("h3", {}, k.title)),
+        h("div", {}, badge(k.status), h("span", { class: "badge info" }, k.kind), h("span", { class: "badge" }, k.source_trust), h("span", { class: "badge" }, k.domain))),
       h("div", {}, k.content), k.applies_when && h("div", { class: "small" }, "Áp dụng: " + k.applies_when),
       h("div", { class: "small" }, `✓${k.helpful_cnt} ✗${k.harmful_cnt} · tin cậy ${k.confidence}`),
       h("div", { class: "row" }, k.status === "candidate" && isAdmin() && h("button", { onclick: review(k.id, true) }, "Chấp nhận"), k.status === "candidate" && isAdmin() && h("button", { class: "danger", onclick: review(k.id, false) }, "Loại"), h("button", { class: "ghost", onclick: showKu(k.id) }, "Lịch sử")))) : [h("div", { class: "card muted" }, "Không có KU ở trạng thái này.")]));
+    syncBulk();
   }
   const learn = guard(async () => { const r = await api("POST", "/api/learning/run"); toast(`Đã học ${r.processed} episode, thăng hạng ${r.promoted}, chờ duyệt ${r.needs_review}`); await load(); });
   const kind = h("select", { "aria-label": "Loại" }, ["rule", "fact", "procedure", "lesson", "insight"].map((x) => h("option", {}, x)));
   const title = h("input", { placeholder: "Tiêu đề", "aria-label": "Tiêu đề" });
   const content = h("input", { placeholder: "Nội dung một ý", "aria-label": "Nội dung" });
   const add = guard(async () => { await api("POST", "/api/ku", { kind: kind.value, title: title.value, content: content.value }); title.value = content.value = ""; toast("Đã thêm ứng viên"); statusSel.value = "candidate"; await load(); });
-  main.append(h("h2", {}, "Tri thức (L1)"), h("div", { class: "row" }, statusSel, isAdmin() && h("button", { onclick: learn }, "Chạy học ngay")),
-    h("div", { class: "card row" }, kind, title, content, h("button", { class: "ghost", onclick: add }, "Thêm KU")), detail, box);
+  main.append(h("h2", {}, "Tri thức (L1)"), h("div", { class: "row" }, statusSel, kindSel, isAdmin() && h("button", { onclick: learn }, "Chạy học ngay")),
+    h("div", { class: "card row" }, kind, title, content, h("button", { class: "ghost", onclick: add }, "Thêm KU")), detail, bulkBar, consolidated, box);
   await load();
 };
 
