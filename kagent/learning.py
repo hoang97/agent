@@ -31,8 +31,28 @@ def _episode_view(episode: dict) -> dict:
     return json.loads(scrub(json.dumps(episode, ensure_ascii=False)))
 
 
-def _update_counters(conn, tenant_id: str, episode: dict, blamed: set[str]) -> None:
-    clean_success = episode["outcome"] == "success" and not episode.get("human_edit")
+def _judge(conn, tenant_id: str, provider, episode: dict) -> None:
+    """LLM-as-judge cho episode chưa có kết quả, để Reflector và bộ đếm có tín hiệu."""
+    if episode["outcome"] != "unknown":
+        return
+    trace = episode["trace"]
+    # Lượt bị dừng hoặc còn lệnh chờ duyệt chưa có kết quả cuối để chấm.
+    if any(s.get("type") == "cancelled" or s.get("status") == "pending" for s in trace):
+        return
+    verdict = provider.judge(_episode_view(episode))
+    if verdict["outcome"] not in llm.JUDGED_OUTCOMES:
+        return
+    # Điều kiện outcome='unknown' giữ phản hồi người dùng gửi cùng lúc không bị ghi đè.
+    cur = conn.execute("UPDATE episode SET outcome=?, outcome_src='llm_judge' WHERE id=? AND tenant_id=? AND outcome='unknown'",
+                       (verdict["outcome"], episode["id"], tenant_id))
+    if cur.rowcount:
+        episode["outcome"], episode["outcome_src"] = verdict["outcome"], "llm_judge"
+
+
+def _update_counters(conn, tenant_id: str, episode: dict, blamed: set[str], untrusted_seen: bool) -> None:
+    # Nội dung untrusted có thể lái lời chấm của judge, nên "thành công" do judge chấm khi đó không cộng điểm hữu ích.
+    judged_on_untrusted = episode.get("outcome_src") == "llm_judge" and untrusted_seen
+    clean_success = episode["outcome"] == "success" and not episode.get("human_edit") and not judged_on_untrusted
     reason = f"bộ đếm từ episode {episode['id']}"
     for ku_id in episode["ku_used"]:
         ku = knowledge.get(conn, tenant_id, ku_id)
@@ -120,11 +140,12 @@ def process_episode(conn, tenant_id: str, provider, episode: dict) -> dict:
     untrusted_seen = any(s.get("untrusted") for s in trace)
     blamed: set[str] = set()
     ops: list[str] = []
+    _judge(conn, tenant_id, provider, episode)
     for item in provider.reflect(_episode_view(episode)):
         if item.get("blame_ku") in episode["ku_used"]:
             blamed.add(item["blame_ku"])
         ops.append(curate_item(conn, tenant_id, provider, item, episode, _source_trust(item, episode, untrusted_seen)))
-    _update_counters(conn, tenant_id, episode, blamed)
+    _update_counters(conn, tenant_id, episode, blamed, untrusted_seen)
     conn.execute("UPDATE episode SET processed_at=? WHERE id=? AND tenant_id=?", (db.iso(), episode["id"], tenant_id))
     return {"episode": episode["id"], "ops": ops}
 
