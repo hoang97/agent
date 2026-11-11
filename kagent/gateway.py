@@ -7,7 +7,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 
-from . import db
+from . import datafilter, db
 from .config import settings
 from .retrieval import tokenize
 from . import net
@@ -239,19 +239,34 @@ def audit(conn, ctx: CallContext, tool, args, tier, conf, decision, reasons, sta
          tier, conf, decision, json.dumps(reasons, ensure_ascii=False), status, db.iso()))
 
 
-def _run(conn, tenant_id: str, tool_name: str, args: dict, check: bool = False) -> dict:
-    """Gọi connector thật của công cụ (hoặc hàm chạy thử). Không giữ giao dịch DB trong lúc gọi mạng."""
+def _run(conn, tenant_id: str, tool_name: str, args: dict, check: bool = False, user_id: str | None = None) -> dict:
+    """Gọi connector thật của công cụ (hoặc hàm chạy thử). Không giữ giao dịch DB trong lúc gọi mạng.
+
+    _filter (nếu có) không gửi xuống connector mà được áp lên kết quả ở đây, trước khi kết quả vào context của agent.
+    """
     from . import connections
     _, _, spec, params = connections.resolve(conn, tenant_id, tool_name)
     fn = spec.check if check else spec.run
     if fn is None:
         return None
-    return fn(params, args)
+    params = {**params, "_tenant_id": tenant_id, "_user_id": user_id}
+    result = fn(params, {k: v for k, v in args.items() if k != "_filter"})
+    if args.get("_filter") and not check and result is not None:
+        raw = result
+        try:
+            result = datafilter.apply(raw, args["_filter"])
+        except datafilter.FilterError as exc:
+            raise ConnectorError(f"_filter: {exc}") from exc
+        # Bản gốc lớn được giữ lại để lọc theo cách khác bằng data.query mà không phải gọi lại hệ thống.
+        from . import results
+        if len(json.dumps(raw, ensure_ascii=False)) > results.INLINE_LIMIT:
+            result["raw_result_id"] = results.save(conn, tenant_id, user_id, None, tool_name, raw, spec.untrusted_output)
+    return result
 
 
-def _execute(conn, tenant_id: str, env: str, tool_name: str, args: dict) -> tuple[str, dict]:
+def _execute(conn, tenant_id: str, env: str, tool_name: str, args: dict, user_id: str | None = None) -> tuple[str, dict]:
     try:
-        return "ok", _run(conn, tenant_id, tool_name, args)
+        return "ok", _run(conn, tenant_id, tool_name, args, user_id=user_id)
     except net.NetError as exc:
         return "error", {"error": f"kết nối bị chặn: {exc}"}
     except (ConnectorError, ValueError, TypeError) as exc:
@@ -293,12 +308,17 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
     if missing or not isinstance(args, dict):
         audit(conn, ctx, tool_name, args, tier, 0.0, "blocked", [f"thiếu tham số: {missing}"], "invalid")
         return {**step, "decision": "blocked", "status": "invalid", "risk_tier": tier, "reasons": [f"thiếu tham số: {missing}"]}
+    if args.get("_filter") is not None:
+        try:
+            datafilter.check(args["_filter"])
+        except datafilter.FilterError as exc:
+            return {**step, "decision": "blocked", "status": "invalid", "risk_tier": tier, "reasons": [f"_filter: {exc}"]}
 
     dry_result = None
     dry_ok = 0.0
     if tool.check:
         try:
-            dry_result = _run(conn, ctx.tenant_id, tool_name, args, check=True)
+            dry_result = _run(conn, ctx.tenant_id, tool_name, args, check=True, user_id=ctx.user_id)
             dry_ok = 1.0
         except net.NetError as exc:
             dry_result = {"error": f"kết nối bị chặn: {exc}"}
@@ -309,7 +329,8 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
 
     tenant = conn.execute("SELECT change_freeze, write_quota_daily, self_approve FROM tenant WHERE id=?", (ctx.tenant_id,)).fetchone()
     forced: list[str] = []
-    if ctx.tainted and not _auto_read_despite_taint(grant_policy(conn, ctx.tenant_id), ctx.env, meta["action_class"], tier):
+    # Công cụ local chỉ xử lý dữ liệu đã lấy về; nội dung untrusted không lái được nó tác động ra ngoài.
+    if ctx.tainted and not tool.local and not _auto_read_despite_taint(grant_policy(conn, ctx.tenant_id), ctx.env, meta["action_class"], tier):
         forced.append(UNTRUSTED_REASON)
     if meta["action_class"] != "read":
         unseen = _unseen_object(conn, ctx, args)
@@ -322,7 +343,8 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
 
     policy = get_policy(conn, ctx.tenant_id)
     conf, parts = confidence(conn, ctx, meta, args, dry_ok)
-    decision = evaluate(policy, tier, tool_name, ctx.env, conf, forced, meta.get("canonical"))
+    # Công cụ local không chạm môi trường nào, nên dùng cột dev của ma trận (R4 vẫn luôn phải hỏi).
+    decision = evaluate(policy, tier, tool_name, "dev" if tool.local else ctx.env, conf, forced, meta.get("canonical"))
     step.update(risk_tier=tier, confidence=conf, confidence_parts=parts, reasons=decision.reasons, dry_run=dry_result)
 
     if decision.outcome == "block":
@@ -347,7 +369,7 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
         audit(conn, ctx, tool_name, args, tier, conf, "pending", decision.reasons, "pending")
         return {**step, "decision": "pending", "status": "pending", "approval_id": approval_id, "required_approvals": required}
 
-    status, result = _execute(conn, ctx.tenant_id, ctx.env, tool_name, args)
+    status, result = _execute(conn, ctx.tenant_id, ctx.env, tool_name, args, ctx.user_id)
     audit(conn, ctx, tool_name, args, tier, conf, "auto", decision.reasons, status)
     step.update(decision="auto", status=status, result=result, untrusted=bool(meta["untrusted_output"]))
     return step
@@ -483,7 +505,8 @@ def decide(conn, tenant_id: str, approval_id: str, user_id: str, roles: set[str]
             if len(decided) < req["required_approvals"]:
                 conn.execute("UPDATE approval_request SET decided_by=? WHERE id=?", (json.dumps(decided), approval_id))
             else:
-                status, result = _execute(conn, tenant_id, req["env"], req["tool"], req["args"])
+                status, result = _execute(conn, tenant_id, req["env"], req["tool"], req["args"], req["requester_id"])
+                result = _compact(conn, tenant_id, req, meta, result)
                 conn.execute("UPDATE approval_request SET status='approved', decided_by=?, decided_at=?, result=? WHERE id=?",
                              (json.dumps(decided), db.iso(), json.dumps({"status": status, "result": result}, ensure_ascii=False), approval_id))
                 audit(conn, ctx, req["tool"], req["args"], req["risk_tier"], req["confidence"], "approved", decided, status)
@@ -496,6 +519,15 @@ def decide(conn, tenant_id: str, approval_id: str, user_id: str, roles: set[str]
                  "args", "decided_by", "reasons", "dry_run", "result")
     out["also_approved"] = also
     return out
+
+
+def _compact(conn, tenant_id: str, req: dict, meta, result):
+    """Kết quả lớn của lệnh chạy sau khi duyệt cũng được lưu thành result_id, như lệnh chạy ngay trong lượt."""
+    from . import results
+    from .tools import spec_of
+    spec = spec_of(meta)
+    small = results.compact(conn, tenant_id, req["requester_id"], req["episode_id"], req["tool"], result, bool(spec and spec.untrusted_output))
+    return small or result
 
 
 def _run_covered_siblings(conn, tenant_id: str, req: dict, meta, user_id: str) -> list[str]:
@@ -513,7 +545,8 @@ def _run_covered_siblings(conn, tenant_id: str, req: dict, meta, user_id: str) -
         forced = [x for x in other["reasons"] if x == UNTRUSTED_REASON]
         if not grant_covers(policy, other["env"], meta["action_class"], other["confidence"], forced):
             continue
-        status, result = _execute(conn, tenant_id, other["env"], other["tool"], other["args"])
+        status, result = _execute(conn, tenant_id, other["env"], other["tool"], other["args"], other["requester_id"])
+        result = _compact(conn, tenant_id, other, meta, result)
         decided = other["decided_by"] + [user_id]
         conn.execute("UPDATE approval_request SET status='approved', decided_by=?, decided_at=?, result=? WHERE id=?",
                      (json.dumps(decided), db.iso(), json.dumps({"status": status, "result": result}, ensure_ascii=False), other["id"]))

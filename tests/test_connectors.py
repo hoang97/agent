@@ -194,7 +194,7 @@ def test_sql_read_only_and_write(infra):
 
 def test_shipped_templates_valid():
     templates = tools.load_templates()
-    assert set(templates) == {"k8s", "grafana", "elasticsearch", "web", "http_api", "postgres", "mysql"}
+    assert set(templates) == {"k8s", "grafana", "elasticsearch", "web", "http_api", "postgres", "mysql", "data"}
     for t in templates.values():
         for s in t.tools.values():
             assert tools.TIERS.index(s.risk_tier) >= tools.TIERS.index(tools.minimum_tier(s.action_class, s.reversible, s.blast_radius, s.data_sensitivity))
@@ -359,6 +359,6 @@ def test_old_simulated_tools_marked_removed_on_startup(client):
 
 def test_other_tenant_cannot_see_connections(client, users):
     finance = Session(client, "admin", "team-finance")
-    assert finance.get("/api/connections").json() == []
+    assert [c["name"] for c in finance.get("/api/connections").json()] == ["data"]  # chỉ kết nối nội bộ của chính tenant đó
     k8s_conn = next(c for c in users["admin"].get("/api/connections").json() if c["name"] == "k8s")
     assert finance.patch(f"/api/connections/{k8s_conn['id']}", json={"title": "x"}).status_code == 404

@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import threading
 
-from . import compiler, db, gateway, learning
+from . import compiler, db, gateway, learning, results
 from .config import settings
 
 log = logging.getLogger("kagent.scheduler")
@@ -13,6 +13,7 @@ log = logging.getLogger("kagent.scheduler")
 def tick() -> None:
     with db.session() as conn:
         gateway.expire_approvals(conn)
+        results.purge(conn)
         for t in conn.execute("SELECT id FROM tenant").fetchall():
             if learning.should_learn(conn, t["id"]):
                 result = learning.run_learning(conn, t["id"])

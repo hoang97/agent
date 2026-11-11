@@ -17,6 +17,7 @@ from .retrieval import tokenize
 from .tools import callable_by, max_tier
 
 PREFIX = "learned."
+EPHEMERAL = "data."  # data.query/data.script làm việc trên result_id của một lượt cụ thể nên không dùng lại được
 PLACEHOLDER = re.compile(r"^\{\{([a-z_][a-z0-9_]{0,30})\}\}$")
 PARAM_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,30}$")
 PARAM_TYPES = ("string", "integer")
@@ -185,7 +186,7 @@ def from_episode(conn, tenant_id: str, user_id: str, episode_id: str, name: str 
         raise LearnedError("chỉ người chạy lượt này mới lưu được thành công cụ", 403)
     ep = db.row(r, "input", "trace")
     steps = [s for s in ep["trace"] if s["type"] == "tool_call"]
-    ok = [s for s in steps if s["status"] == "ok" and not s["tool"].startswith(PREFIX)]
+    ok = [s for s in steps if s["status"] == "ok" and not s["tool"].startswith((PREFIX, EPHEMERAL))]
     if not ok:
         raise LearnedError("lượt này không có bước công cụ nào chạy thành công")
     if _tainted(steps):
@@ -217,7 +218,7 @@ def propose(conn, tenant_id: str) -> int:
                       (tenant_id, db.later(days=-30))).fetchall()
     groups: dict[tuple, list] = defaultdict(list)
     for r in rs:
-        steps = [s for s in json.loads(r["trace"]) if s["type"] == "tool_call"]
+        steps = [s for s in json.loads(r["trace"]) if s["type"] == "tool_call" and not s["tool"].startswith(EPHEMERAL)]
         if len(steps) < 2 or any(s["status"] != "ok" or s["tool"].startswith(PREFIX) for s in steps) or _tainted(steps):
             continue
         groups[tuple(s["tool"] for s in steps)].append((r["id"], r["user_id"], steps))

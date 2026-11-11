@@ -1,0 +1,44 @@
+template: data
+title: Xử lý dữ liệu
+description: Lọc, đếm, nhóm kết quả công cụ đã lưu ở server mà không gọi lại hệ thống; script Python trong sandbox khi bộ lọc không đủ.
+ping: data:ping
+tools:
+  - name: query
+    description: >-
+      Lọc kết quả lớn đã lưu (result_id) mà không gọi lại hệ thống. Tham số giống _filter: path, where [{field, op, value}]
+      (op: eq ne contains icontains regex gt gte lt lte exists in), fields, group_by, sort ("-field" để giảm dần), limit, max_chars.
+    handler: data:query
+    action_class: read
+    data_sensitivity: internal
+    untrusted_output: true
+    local: true
+    input_schema:
+      properties:
+        result_id: {type: string}
+        path: {type: string}
+        where: {type: array, items: {type: object}}
+        fields: {type: array, items: {type: string}}
+        group_by: {type: string}
+        sort: {type: string}
+        limit: {type: integer}
+        max_chars: {type: integer}
+      required: [result_id]
+
+  - name: script
+    description: >-
+      Chạy script Python ngắn trên các kết quả đã lưu khi bộ lọc không đủ (ví dụ trích request_id bằng regex rồi đếm).
+      Biến inputs là dict {result_id: dữ liệu}; gán kết quả cần trả về vào biến result. Không có mạng, file hay tiến trình con;
+      giới hạn CPU, RAM và kích thước đầu ra. Luôn cần người duyệt.
+    handler: data:script
+    action_class: exec
+    reversible: "n/a"
+    blast_radius: object
+    data_sensitivity: internal
+    untrusted_output: true
+    local: true
+    rollback_hint: Không tác động hệ thống; chỉ đọc dữ liệu đã lưu
+    input_schema:
+      properties:
+        result_ids: {type: array, items: {type: string}}
+        code: {type: string}
+      required: [result_ids, code]

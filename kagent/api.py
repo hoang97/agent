@@ -15,6 +15,7 @@ import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
@@ -55,6 +56,7 @@ def seed() -> None:
         db.init_schema(conn)
         if conn.execute("SELECT 1 FROM org").fetchone():
             connections.sync_all(conn)
+            connections.ensure_builtin(conn)
             return
         creds: dict[str, str] = {}
 
@@ -88,6 +90,7 @@ def seed() -> None:
                   (platform, "carol", "member"), (platform, "carol", "approver:prod")]
         for tenant, user, role in grants:
             conn.execute("INSERT INTO membership(tenant_id,user_id,role) VALUES (?,?,?)", (tenant, ids[user], role))
+        connections.ensure_builtin(conn)
         if creds:
             path = settings.data_dir / "initial-credentials.txt"
             path.write_text("\n".join(f"{k}: {v}" for k, v in creds.items()) + "\n", encoding="utf-8")
@@ -1114,6 +1117,37 @@ def metrics(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
                                   "FROM episode WHERE tenant_id=? GROUP BY week ORDER BY week DESC LIMIT 8", (tid,)).fetchall())
     decided = status.get("active", 0) + status.get("rejected", 0)
     n = e["n"] or 1
+    return {**_base_metrics(e, n, status, decided, decisions, weekly), "tokens": token_metrics(conn, tid)}
+
+
+def token_metrics(conn, tid: str, days: int = 7) -> dict:
+    """Token theo mục đích, tỷ lệ cache, công cụ trả kết quả lớn nhất và các lượt tốn nhất trong N ngày."""
+    since = db.iso(db.now() - timedelta(days=days))
+    by_purpose = db.rows(conn.execute(
+        "SELECT purpose, count(*) calls, sum(input_tokens) input, sum(output_tokens) output, sum(cache_read) cache_read, sum(cache_write) cache_write "
+        "FROM llm_call WHERE tenant_id=? AND at>=? GROUP BY purpose ORDER BY sum(input_tokens+cache_read+cache_write+output_tokens) DESC", (tid, since)).fetchall())
+    total_in = sum(r["input"] + r["cache_read"] + r["cache_write"] for r in by_purpose)
+    cached = sum(r["cache_read"] for r in by_purpose)
+    tools: dict[str, dict] = {}
+    for r in conn.execute("SELECT trace FROM episode WHERE tenant_id=? AND started_at>=?", (tid, since)).fetchall():
+        for step in json.loads(r["trace"]):
+            if step.get("type") == "tool_call":
+                t = tools.setdefault(step["tool"], {"tool": step["tool"], "calls": 0, "result_chars": 0, "max_chars": 0})
+                size = step.get("result_chars") or len(json.dumps(step.get("result"), ensure_ascii=False))
+                t["calls"] += 1
+                t["result_chars"] += size
+                t["max_chars"] = max(t["max_chars"], size)
+    top_turns = db.rows(conn.execute(
+        "SELECT e.id, e.started_at, substr(json_extract(e.input, '$.task'), 1, 80) task, count(c.id) llm_calls, sum(c.input_tokens) input, "
+        "sum(c.cache_read) cache_read, sum(c.cache_write) cache_write, sum(c.output_tokens) output "
+        "FROM episode e JOIN llm_call c ON c.episode_id=e.id AND c.purpose!='reflect' AND c.purpose!='curate' AND c.purpose!='judge' "
+        "WHERE e.tenant_id=? AND e.started_at>=? GROUP BY e.id ORDER BY sum(c.input_tokens+c.cache_read+c.cache_write+c.output_tokens) DESC LIMIT 10",
+        (tid, since)).fetchall())
+    return {"days": days, "by_purpose": by_purpose, "cache_hit_pct": round(100 * cached / total_in, 1) if total_in else None,
+            "tools": sorted(tools.values(), key=lambda t: -t["result_chars"])[:15], "top_turns": top_turns}
+
+
+def _base_metrics(e, n, status, decided, decisions, weekly) -> dict:
     return {"episodes": e["n"], "labeled_pct": round(100 * e["labeled"] / n, 1), "edited_pct": round(100 * e["edited"] / n, 1), "failed_pct": round(100 * e["failed"] / n, 1),
             "avg_tokens": round(e["tokens"], 1), "processed": e["processed"], "ku_status": status, "ku_accept_pct": round(100 * status.get("active", 0) / decided, 1) if decided else None,
             "tool_decisions": decisions, "weekly": weekly}

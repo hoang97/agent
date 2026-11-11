@@ -128,6 +128,20 @@ CREATE TABLE IF NOT EXISTS skill (
   success_rate_30d REAL NOT NULL DEFAULT 0, PRIMARY KEY (tenant_id, name)
 );
 
+CREATE TABLE IF NOT EXISTS tool_result (
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT, episode_id TEXT, tool TEXT NOT NULL,
+  untrusted INTEGER NOT NULL DEFAULT 0, chars INTEGER NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_tool_result_created ON tool_result(created_at);
+
+CREATE TABLE IF NOT EXISTS llm_call (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT NOT NULL, episode_id TEXT, purpose TEXT NOT NULL, model TEXT,
+  input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read INTEGER NOT NULL DEFAULT 0, cache_write INTEGER NOT NULL DEFAULT 0, at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_llm_call_tenant ON llm_call(tenant_id, at);
+CREATE INDEX IF NOT EXISTS ix_llm_call_episode ON llm_call(episode_id);
+
 CREATE TABLE IF NOT EXISTS golden_task (
   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, query TEXT NOT NULL, expect_domain TEXT NOT NULL,
   expect_terms TEXT NOT NULL

@@ -179,10 +179,14 @@ def run_learning(conn, tenant_id: str, limit: int = 50) -> dict:
         processed, errors = [], []
         for r in rs:
             episode = db.row(r, "input", "trace", "ku_used", "human_edit")
-            try:
-                processed.append(process_episode(conn, tenant_id, provider, episode))
-            except llm.LLMError as exc:
-                errors.append({"episode": episode["id"], "error": str(exc)})
+            with llm.collect_usage() as usage:
+                try:
+                    processed.append(process_episode(conn, tenant_id, provider, episode))
+                except llm.LLMError as exc:
+                    errors.append({"episode": episode["id"], "error": str(exc)})
+                finally:
+                    if usage:
+                        llm.save_usage(conn, tenant_id, episode["id"], usage)
         denials = learn_from_denials(conn, tenant_id)
         gated = gate(conn, tenant_id)
         proposed = learned.propose(conn, tenant_id)

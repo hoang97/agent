@@ -14,6 +14,7 @@ Agent chỉ dùng công cụ thật. Mỗi công cụ được tạo từ một 
 | `grafana` | search_dashboards, list_datasources, prometheus_query, list_alerts (R0), create_silence R3 | url, token service account, default_datasource_uid |
 | `elasticsearch` (Kibana) | search_logs R1, list_indices R0, delete_index R3 | url Elasticsearch hoặc Kibana (đi qua Console proxy), api_key hoặc username/password, index_pattern |
 | `web` | fetch_page R0 | allowed_domains, max_chars |
+| `data` (nội bộ, tự có ở mọi tenant) | query R0 (lọc kết quả đã lưu theo result_id), script R4 (Python trong sandbox, luôn cần duyệt) | — |
 | `http_api` | get R1, post R3 | base_url, auth_header, auth_value, allowed_paths |
 | `postgres`, `mysql` | query R1 (chỉ đọc, 15 giây, 200 dòng), execute R3 (có chạy thử rồi rollback) | host, port, database, user, password |
 

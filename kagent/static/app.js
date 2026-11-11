@@ -504,11 +504,33 @@ VIEWS.policy = async (main) => {
     h("h2", {}, "Danh mục công cụ"), toolCatalogSection());
 };
 
+const PURPOSE = { agent: "Agent trả lời", route: "Router", check_plan: "Kiểm tra độc lập", reflect: "Reflector", curate: "Curator", judge: "Chấm kết quả", other: "Khác" };
+const num = (v) => (v === null || v === undefined ? "—" : Number(v).toLocaleString("vi-VN"));
+
+function tokenSection(t) {
+  if (!t) return null;
+  const all = t.by_purpose.reduce((a, r) => a + r.input + r.cache_read + r.cache_write + r.output, 0);
+  const table = (head, rows) => h("div", { class: "card scroll" }, h("table", {}, h("thead", {}, h("tr", {}, head.map((x) => h("th", {}, x)))), h("tbody", {}, rows)));
+  return h("div", {},
+    h("h2", { class: "row" }, `Token ${t.days} ngày qua`),
+    h("div", { class: "grid" }, h("div", { class: "tile" }, h("b", {}, num(all)), h("span", { class: "small" }, "Tổng token xử lý")),
+      h("div", { class: "tile" }, h("b", {}, t.cache_hit_pct === null ? "—" : t.cache_hit_pct + "%"), h("span", { class: "small" }, "Input đọc từ cache"))),
+    table(["Mục đích", "Lần gọi", "Input", "Cache đọc", "Cache ghi", "Output"], t.by_purpose.map((r) =>
+      h("tr", {}, h("td", {}, PURPOSE[r.purpose] || r.purpose), h("td", {}, num(r.calls)), h("td", {}, num(r.input)), h("td", {}, num(r.cache_read)), h("td", {}, num(r.cache_write)), h("td", {}, num(r.output))))),
+    h("h2", { class: "row" }, "Công cụ trả kết quả lớn nhất"),
+    h("p", { class: "small" }, "Kết quả công cụ đi thẳng vào context của agent; công cụ trả nhiều ký tự là chỗ nên lọc trước."),
+    table(["Công cụ", "Lần gọi", "Tổng ký tự", "Lớn nhất"], t.tools.map((r) => h("tr", {}, h("td", {}, h("code", {}, r.tool)), h("td", {}, num(r.calls)), h("td", {}, num(r.result_chars)), h("td", {}, num(r.max_chars))))),
+    h("h2", { class: "row" }, "Lượt tốn token nhất"),
+    table(["Thời gian", "Yêu cầu", "Lần gọi LLM", "Input", "Cache đọc", "Output"], t.top_turns.map((r) =>
+      h("tr", {}, h("td", {}, fmtTime(r.started_at)), h("td", {}, r.task), h("td", {}, num(r.llm_calls)), h("td", {}, num(r.input + r.cache_write)), h("td", {}, num(r.cache_read)), h("td", {}, num(r.output))))));
+}
+
 VIEWS.metrics = async (main) => {
   const m = await api("GET", "/api/metrics");
   const tile = (label, value) => h("div", { class: "tile" }, h("b", {}, value === null || value === undefined ? "—" : value), h("span", { class: "small" }, label));
   main.append(h("h2", {}, "Đo lường"), h("div", { class: "grid" }, tile("Episode", m.episodes), tile("Có kết quả (%)", m.labeled_pct), tile("Người phải sửa (%)", m.edited_pct), tile("Thất bại (%)", m.failed_pct), tile("Token mỗi nhiệm vụ", m.avg_tokens), tile("Tỷ lệ chấp nhận KU (%)", m.ku_accept_pct)),
     h("h2", { class: "row" }, "Trạng thái KU và quyết định công cụ"), h("div", { class: "card" }, h("div", {}, Object.entries(m.ku_status).map(([k, v]) => h("span", { class: "badge " + (CLASS[k] || "") }, `${LABEL[k] || k}: ${v}`))), h("div", { class: "row" }, Object.entries(m.tool_decisions).map(([k, v]) => h("span", { class: "badge " + (CLASS[k] || "") }, `${LABEL[k] || k}: ${v}`)))),
+    tokenSection(m.tokens),
     h("h2", { class: "row" }, "Theo tuần"), h("div", { class: "card scroll" }, h("table", {}, h("thead", {}, h("tr", {}, ["Tuần", "Nhiệm vụ", "Người sửa", "Thất bại", "Token TB"].map((x) => h("th", {}, x)))), h("tbody", {}, m.weekly.map((w) => h("tr", {}, h("td", {}, w.week), h("td", {}, w.tasks), h("td", {}, w.edited), h("td", {}, w.failed), h("td", {}, Math.round(w.tokens))))))));
 };
 

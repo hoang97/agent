@@ -151,3 +151,15 @@ Phát hiện khi người dùng điều tra lỗi 500 qua Kibana thật: 6 lư�
 | Nút "Tiếp tục" còn lại trên lượt đã được chạy tiếp, và hiện cả khi agent đang chạy | Ẩn nút khi lượt chạy tiếp bắt đầu, làm mới lượt gốc khi lượt chạy tiếp xong |
 
 Còn mở: điểm tin cậy thực tế rất thấp (0,02–0,34 với hệ thống mới, chưa có Skill và tiền lệ), nên ngưỡng mặc định 0,5 của grant ở staging gần như không bao giờ đạt.
+
+## Đợt 19 — 2026-11-11: đo token và lấy dữ liệu gọn
+
+Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend devtest 1 giờ qua": **326.664 token trước, 22.774 token sau** (giảm 93%). Lượt cũ có một `search_logs` trả 228.574 ký tự và `list_indices` trả 22.019 ký tự, đổ thẳng vào context rồi bị gửi lại ở mọi bước.
+
+- **Metrics token:** mỗi lần gọi LLM ghi vào bảng `llm_call` (mục đích, model, input, output, cache đọc/ghi); mỗi bước công cụ ghi `result_chars`. Trang Đo lường có token theo mục đích, tỷ lệ cache, công cụ trả kết quả lớn nhất và các lượt tốn nhất.
+- **Prompt caching (Anthropic):** breakpoint ở system (phủ cả danh sách công cụ) và ở message cuối mỗi vòng; relay từ chối `cache_control` thì tự tắt và gửi lại. Relay của người dùng hỗ trợ caching.
+- **Kết quả lớn thành result_id:** kết quả trên 6.000 ký tự được lưu ở bảng `tool_result` (chỉ người tạo đọc được, xóa sau 7 ngày); context nhận bản xem trước gồm các trường có sẵn và vài mẫu. Kết quả của lệnh chạy sau khi duyệt cũng vậy.
+- **`_filter` cho mọi công cụ đọc:** path, where, fields, group_by, sort, limit, max_chars, chạy ở server trước khi vào context. Khi bản gốc lớn, kết quả có thêm `raw_result_id` để lọc lại mà không gọi lại hệ thống.
+- **Kết nối nội bộ `data` cho mọi tenant:** `data.query` (R0, lọc trên result_id; không bị bắt duyệt vì nội dung untrusted vì không tác động ra ngoài) và `data.script` (R4, luôn cần duyệt): Python trong tiến trình con có rlimit CPU/RAM/ghi file/fork/fd và audit hook chặn open, socket, subprocess, os.*, import ngoài danh sách. Thẻ duyệt hiện code giữ nguyên xuống dòng.
+- **Connector Elasticsearch** trả `_source` dạng object, chỉ cắt từng chuỗi dài. Trước đây cả `_source` bị dồn thành chuỗi JSON rồi cắt, nên không lọc hay parse được (thấy khi chạy `data.script` thật: 100/100 bản ghi không parse được).
+- **Công cụ học được** giữ `_filter` trong tham số các bước; bỏ qua bước `data.*` vì chúng gắn với result_id của một lượt.

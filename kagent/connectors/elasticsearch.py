@@ -60,7 +60,21 @@ def search_logs(p, args):
     total = hits.get("total", {})
     return {"index": index, "total": total.get("value") if isinstance(total, dict) else total,
             "hits": [{"index": h.get("_index"), "timestamp": (h.get("_source") or {}).get("@timestamp"),
-                      "source": clip(json.dumps(h.get("_source"), ensure_ascii=False), 2000)} for h in hits.get("hits", [])]}
+                      "source": _clip_values(h.get("_source"))} for h in hits.get("hits", [])]}
+
+
+def _clip_values(value, limit: int = 2000, depth: int = 0):
+    """Giữ _source dạng object để lọc, nhóm được theo trường lồng nhau; chỉ cắt từng chuỗi quá dài.
+
+    Trước đây cả _source bị dồn thành một chuỗi JSON rồi cắt, nên bản ghi dài không parse lại được.
+    """
+    if isinstance(value, str):
+        return clip(value, limit)
+    if isinstance(value, dict) and depth < 6:
+        return {k: _clip_values(v, limit, depth + 1) for k, v in value.items()}
+    if isinstance(value, list) and depth < 6:
+        return [_clip_values(v, limit, depth + 1) for v in value[:100]]
+    return value if isinstance(value, (int, float, bool)) or value is None else clip(json.dumps(value, ensure_ascii=False), limit)
 
 
 def list_indices(p, args):

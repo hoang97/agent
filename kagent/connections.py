@@ -221,6 +221,22 @@ def sync_all(conn) -> None:
         conn.execute("UPDATE tool_registry SET status='removed' WHERE connection_id IS NULL AND status!='removed'")
 
 
+BUILTIN = ("data", "data")  # (tên kết nối, template): công cụ xử lý dữ liệu nội bộ, tenant nào cũng có
+
+
+def ensure_builtin(conn) -> None:
+    """Mỗi tenant có sẵn kết nối data (data.query, data.script) để agent lọc kết quả lớn đã lưu."""
+    name, template = BUILTIN
+    for t in conn.execute("SELECT id FROM tenant").fetchall():
+        if conn.execute("SELECT 1 FROM connection WHERE tenant_id=? AND template=? AND status='active'", (t["id"], template)).fetchone():
+            continue
+        if conn.execute("SELECT 1 FROM connection WHERE tenant_id=? AND name=? AND status!='removed'", (t["id"], name)).fetchone():
+            log.warning("tenant %s đã có kết nối khác tên %s; bỏ qua kết nối xử lý dữ liệu nội bộ", t["id"], name)
+            continue
+        create(conn, t["id"], "system", is_admin=True, is_org_admin=False, template=template, name=name, scope="tenant",
+               envs=list(ENVS), roles=list(ROLE_CHOICES), enable_all=True)
+
+
 def resolve(conn, tenant_id: str, tool_name: str) -> tuple[dict, dict, object, dict]:
     """(dòng registry, kết nối, ToolSpec, params gồm secret đã giải mã) để thực thi."""
     meta = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (tenant_id, tool_name)).fetchone()

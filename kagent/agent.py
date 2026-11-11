@@ -1,12 +1,13 @@
 """Luồng đọc trong phiên: router → truy xuất → lắp ngữ cảnh theo ngân sách → thực thi qua gateway → ghi episode."""
 from __future__ import annotations
 
+import contextvars
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
-from . import compiler, db, gateway, learned, llm
+from . import compiler, connections, db, gateway, learned, llm, results
 from .config import settings
 from .retrieval import retrieve
 from .tools import callable_by
@@ -139,6 +140,24 @@ CONTINUE_TASK = ("Các lệnh chờ duyệt ở lượt trước đã được x
                  "Tiếp tục nhiệm vụ trước đó dựa trên các kết quả này, không gọi lại những lệnh đã chạy.")
 
 
+FILTER_SCHEMA = {
+    "type": "object",
+    "description": "Lọc kết quả ở server trước khi trả về để không phình context: path (danh sách cần lọc), "
+                   "where [{field, op, value}] (op: eq ne contains icontains regex gt gte lt lte exists in), fields, group_by, "
+                   "sort (\"-field\" để giảm dần), limit, max_chars. Trường lồng nhau dùng dấu chấm, ví dụ source.level.",
+    "properties": {"path": {"type": "string"}, "where": {"type": "array", "items": {"type": "object"}}, "fields": {"type": "array", "items": {"type": "string"}},
+                   "group_by": {"type": "string"}, "sort": {"type": "string"}, "limit": {"type": "integer"}, "max_chars": {"type": "integer"}},
+}
+
+
+def _with_filter(row) -> dict:
+    """Công cụ đọc nhận thêm _filter; công cụ local (data.*) đã có tham số lọc riêng."""
+    schema = json.loads(row["input_schema"])
+    if row["action_class"] == "read" and row["template"] != connections.BUILTIN[1]:
+        schema = {**schema, "properties": {**schema.get("properties", {}), "_filter": FILTER_SCHEMA}}
+    return schema
+
+
 def _clip_chars(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + f"…(đã cắt {len(text) - limit} ký tự)"
 
@@ -180,13 +199,24 @@ def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
 def run_task(conn, tenant_id: str, user_id: str, task: str, env: str = "dev", project: str | None = None, agent_id: str = "ops-agent",
              conversation_id: str | None = None, episode_id: str | None = None, on_event=None, cancelled=None,
              continuation_of: str | None = None) -> dict:
+    """Chạy một lượt và ghi số token của từng lần gọi LLM vào llm_call để đo chi phí."""
+    episode_id = episode_id or db.new_id()
+    with llm.collect_usage() as usage:
+        try:
+            return _run_task(conn, tenant_id, user_id, task, env, project, agent_id, conversation_id, episode_id, on_event, cancelled, continuation_of)
+        finally:
+            if usage:
+                llm.save_usage(conn, tenant_id, episode_id, usage)
+
+
+def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: str | None, agent_id: str,
+              conversation_id: str | None, episode_id: str, on_event, cancelled, continuation_of: str | None) -> dict:
     """on_event nhận các sự kiện tiến trình để stream; cancelled là threading.Event do nút dừng đặt."""
     tenant = conn.execute("SELECT token_quota_daily FROM tenant WHERE id=?", (tenant_id,)).fetchone()
     if tokens_today(conn, tenant_id) >= tenant["token_quota_daily"]:
         raise QuotaExceeded("tenant đã hết quota token trong ngày")
 
     provider = llm.get_provider()
-    episode_id = episode_id or db.new_id()
     started = db.iso()
     trace: list[dict] = []
     tokens = 0
@@ -232,10 +262,15 @@ def run_task(conn, tenant_id: str, user_id: str, task: str, env: str = "dev", pr
         else:
             batches["n"] += 1
             with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, len(calls)), thread_name_prefix="tool") as pool:
-                steps = list(pool.map(lambda call: run_isolated(*call), calls))
+                # copy_context để lần gọi LLM kiểm tra độc lập trong luồng con vẫn được đo vào lượt này.
+                steps = list(pool.map(lambda call: contextvars.copy_context().run(run_isolated, *call), calls))
             for step in steps:
                 step["parallel"] = batches["n"]
         for step in steps:
+            step["result_chars"] = len(json.dumps(step.get("result"), ensure_ascii=False)) if step.get("result") is not None else 0
+            small = results.compact(conn, tenant_id, user_id, episode_id, step["tool"], step.get("result"), bool(step.get("untrusted")))
+            if small:
+                step["result"], step["result_id"] = small, small["result_id"]
             trace.append(step)
             statuses.append(step["status"])
         if any(step.get("untrusted") for step in steps):
@@ -253,7 +288,7 @@ def run_task(conn, tenant_id: str, user_id: str, task: str, env: str = "dev", pr
         task_type, entities = route["task_type"], route["entities"]
         trace.append({"type": "route", "task_type": task_type, "entities": entities, "provider": provider.name})
         visible = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND enabled=1 AND status='active' ORDER BY tool", (tenant_id,)).fetchall()
-        tool_list = [{"tool": r["tool"], "description": r["description"], "input_schema": json.loads(r["input_schema"]),
+        tool_list = [{"tool": r["tool"], "description": r["description"], "input_schema": _with_filter(r),
                       "canonical": r["canonical"], "action_class": r["action_class"]}
                      for r in visible if callable_by(r, env, roles, user_id)[0]]
         tool_list += learned.for_agent(conn, tenant_id, user_id, env, roles)

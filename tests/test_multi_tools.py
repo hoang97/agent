@@ -10,14 +10,14 @@ def test_parallel_reads_run_concurrently(users, monkeypatch):
     real = gateway._run
     active, peak, lock = [0], [0], threading.Lock()
 
-    def slow(conn, tenant_id, tool_name, args, check=False):
+    def slow(conn, tenant_id, tool_name, args, check=False, user_id=None):
         with lock:
             active[0] += 1
             peak[0] = max(peak[0], active[0])
         time.sleep(0.3)
         with lock:
             active[0] -= 1
-        return real(conn, tenant_id, tool_name, args, check)
+        return real(conn, tenant_id, tool_name, args, check, user_id)
 
     monkeypatch.setattr(gateway, "_run", slow)
     started = time.time()

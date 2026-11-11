@@ -141,7 +141,9 @@ function approvalCard(a, onDecide, streaming) {
     h("div", { class: "approval-head" }, h("strong", {}, heading), badge(failed ? "error" : a.status)),
     h("div", {}, h("code", {}, a.tool), ` ở ${a.env} · ${a.risk_tier} · tin cậy ${a.confidence}`),
     a.args && Object.keys(a.args).length > 0 && h("div", { class: "approval-args" },
-      Object.entries(a.args).map(([k, v]) => h("div", {}, h("span", { class: "muted" }, k + ": "), h("code", {}, typeof v === "string" ? v : JSON.stringify(v))))),
+      Object.entries(a.args).map(([k, v]) => typeof v === "string" && v.includes("\n")
+        ? h("div", {}, h("span", { class: "muted" }, k + ":"), h("pre", { class: "approval-code" }, v))  // code của data.script: giữ xuống dòng để người duyệt đọc được
+        : h("div", {}, h("span", { class: "muted" }, k + ": "), h("code", {}, typeof v === "string" ? v : JSON.stringify(v))))),
     a.reasons.length > 0 && h("div", { class: "small" }, a.reasons.join("; ")),
     a.status === "pending" && a.dry_run && h("div", { class: "small" + (a.dry_run.error ? " warn-text" : "") }, (a.dry_run.error ? "Chạy thử báo lỗi, lệnh nhiều khả năng sẽ thất bại: " : "Chạy thử: ") + (a.dry_run.error || JSON.stringify(a.dry_run))),
     a.status === "pending" && a.rollback_hint && h("div", { class: "small" }, "Cách hoàn tác: " + a.rollback_hint),

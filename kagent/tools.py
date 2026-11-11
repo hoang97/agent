@@ -33,7 +33,7 @@ HINTS = ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")
 UNCLASSIFIED = {"action_class": "destructive", "reversible": "no", "blast_radius": "workload", "data_sensitivity": "internal"}
 FILE_KEYS = {"template", "title", "description", "ping", "validate", "fields", "tools"}
 TOOL_KEYS = {"name", "description", "handler", "check", "action_class", "reversible", "blast_radius", "data_sensitivity", "dry_run",
-             "untrusted_output", "risk_tier", "rollback_hint", "annotations", "input_schema"}
+             "untrusted_output", "risk_tier", "rollback_hint", "annotations", "input_schema", "local"}
 FIELD_KEYS = {"name", "type", "required", "default", "description"}
 _IDENT = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
 _HANDLER = re.compile(r"^([a-z0-9_]+):([a-z_][a-z0-9_]*)$")
@@ -77,6 +77,7 @@ class ToolSpec:
     rollback_hint: str = ""
     classified: bool = True
     warnings: list = field(default_factory=list)
+    local: bool = False  # chỉ xử lý dữ liệu đã lấy về, không chạm hệ thống ngoài nên không phụ thuộc môi trường
 
     @property
     def canonical(self) -> str:
@@ -172,6 +173,9 @@ def _tool(entry: dict, template: str, path: str, errors: list[str]) -> ToolSpec 
     untrusted = entry.get("untrusted_output", False)
     if not isinstance(untrusted, bool):
         errors.append(f"{where}: untrusted_output phải là true/false")
+    local = entry.get("local", False)
+    if not isinstance(local, bool):
+        errors.append(f"{where}: local phải là true/false")
     floor = minimum_tier(action_class, reversible, blast, sensitivity) if action_class in ACTION_CLASSES else "R4"
     tier = entry.get("risk_tier", floor)
     if tier not in TIERS:
@@ -205,7 +209,7 @@ def _tool(entry: dict, template: str, path: str, errors: list[str]) -> ToolSpec 
     return ToolSpec(name=name, template=template, description=entry["description"].strip(), action_class=action_class, reversible=reversible,
                     blast_radius=blast, data_sensitivity=sensitivity, risk_tier=tier, run=run, properties=props, required=tuple(required),
                     dry_run=dry_run, untrusted_output=untrusted, check=check, rollback_hint=str(entry.get("rollback_hint", "")),
-                    classified=classified, warnings=warnings)
+                    classified=classified, warnings=warnings, local=local)
 
 
 def load_templates(directory: Path = TEMPLATE_DIR) -> dict[str, Template]:
