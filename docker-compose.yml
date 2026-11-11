@@ -19,6 +19,8 @@ services:
       KAGENT_DEMO_PASSWORD: ${KAGENT_DEMO_PASSWORD:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       KAGENT_LLM: ${KAGENT_LLM:-auto}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # LLM tự host chạy trên máy host (localhost trong container là chính container)
     volumes:
       - kagent-data:/data
 

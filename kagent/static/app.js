@@ -558,6 +558,10 @@ VIEWS.settings = async (main) => {
   const describe = { ui: "Đang dùng key nhập trên giao diện", env: "Đang dùng key từ biến môi trường của máy chủ", none: "Chưa có key: agent chạy chế độ heuristic" }[s.source];
   const key = h("input", { type: "password", autocomplete: "off", placeholder: "Key hoặc token", "aria-label": "Key hoặc token", class: "wide" });
   const baseUrl = h("input", { type: "url", placeholder: "Base URL https://... (để trống nếu gọi thẳng nhà cung cấp)", "aria-label": "Base URL", class: "wide", value: s.base_url || "" });
+  const allowPrivate = h("input", { type: "checkbox", checked: !!s.allow_private, "aria-label": "Cho phép địa chỉ mạng nội bộ" });
+  const httpWarn = h("div", { class: "small warn-text hidden" }, "Base URL dùng http: key và nội dung chat đi qua mạng nội bộ dưới dạng không mã hóa.");
+  const syncHttp = () => httpWarn.classList.toggle("hidden", !/^http:\/\//i.test(baseUrl.value.trim()));
+  baseUrl.addEventListener("input", syncHttp);
   const modelList = h("datalist", { id: "llm-model-list" });
   const modelStrong = h("input", { "aria-label": "Model chính", class: "wide", list: "llm-model-list", value: s.model_strong || "" });
   const modelFast = h("input", { "aria-label": "Model nhanh", class: "wide", list: "llm-model-list", placeholder: "Model nhanh (để trống thì dùng model chính)", value: s.model_fast || "" });
@@ -568,14 +572,14 @@ VIEWS.settings = async (main) => {
     ev.preventDefault();
     if (!key.value.trim()) throw new Error("Hãy nhập key");
     if (provider.value === "openai" && !modelStrong.value.trim()) throw new Error("OpenAI cần tên model chính");
-    await api("POST", "/api/settings/llm-key", { key: key.value, base_url: baseUrl.value || null, auth_type: authType.value, provider: provider.value, model_strong: modelStrong.value || null, model_fast: modelFast.value || null });
+    await api("POST", "/api/settings/llm-key", { key: key.value, base_url: baseUrl.value || null, auth_type: authType.value, provider: provider.value, model_strong: modelStrong.value || null, model_fast: modelFast.value || null, allow_private: allowPrivate.checked });
     key.value = "";
     toast("Đã kiểm tra và lưu key");
     await refreshMe();
   });
   const remove = guard(async () => { await api("DELETE", "/api/settings/llm-key"); toast("Đã xóa key"); await refreshMe(); });
   const fetchModels = guard(async () => {
-    const r = await api("POST", "/api/settings/llm-models", { key: key.value, base_url: baseUrl.value || null, auth_type: authType.value, provider: provider.value });
+    const r = await api("POST", "/api/settings/llm-models", { key: key.value, base_url: baseUrl.value || null, auth_type: authType.value, provider: provider.value, allow_private: allowPrivate.checked });
     modelList.replaceChildren(...r.models.map((m) => h("option", { value: m.id }, m.name !== m.id ? m.name : null)));
     modelInfo.textContent = r.models.length ? `Có ${r.models.length} model; bấm vào ô model để chọn.` : "Endpoint không trả về model nào.";
     toast(`Đã lấy ${r.models.length} model`);
@@ -587,12 +591,14 @@ VIEWS.settings = async (main) => {
   };
   provider.addEventListener("change", syncProvider);
   syncProvider();
+  syncHttp();
   main.append(h("h2", {}, "Khóa LLM"),
     h("div", { class: "card" }, h("div", {}, describe, s.last4 && ` (kết thúc bằng ${s.last4})`),
       s.provider && h("div", { class: "small" }, `Nhà cung cấp: ${s.provider === "openai" ? "OpenAI" : "Anthropic"}${s.model_strong ? ` · Model: ${s.model_strong}${s.model_fast ? `, ${s.model_fast}` : ""}` : ""}`),
       s.base_url && h("div", { class: "small" }, "Endpoint: " + s.base_url),
       s.updated_at && h("div", { class: "small" }, `Cập nhật ${fmtTime(s.updated_at)} bởi ${s.updated_by}`),
-      h("form", { onsubmit: save }, h("div", { class: "row" }, provider, authType, baseUrl), h("div", { class: "row" }, modelStrong, modelFast, h("button", { type: "button", onclick: fetchModels }, "Lấy danh sách model"), modelList), modelInfo, h("div", { class: "row" }, key, h("button", { type: "submit" }, "Kiểm tra và lưu"), s.source === "ui" && h("button", { type: "button", class: "danger", onclick: remove }, "Xóa key"))),
+      h("form", { onsubmit: save }, h("div", { class: "row" }, provider, authType, baseUrl),
+        h("div", { class: "row" }, h("label", { class: "small" }, allowPrivate, " Cho phép địa chỉ mạng nội bộ (LLM tự host như vLLM, Ollama, LiteLLM; nhận cả http)")), httpWarn, h("div", { class: "row" }, modelStrong, modelFast, h("button", { type: "button", onclick: fetchModels }, "Lấy danh sách model"), modelList), modelInfo, h("div", { class: "row" }, key, h("button", { type: "submit" }, "Kiểm tra và lưu"), s.source === "ui" && h("button", { type: "button", class: "danger", onclick: remove }, "Xóa key"))),
       h("p", { class: "small" }, "Key dùng chung cho cả tổ chức, được kiểm tra trước khi lưu, mã hóa khi lưu và không hiển thị lại. Với relay và OpenAI, bước kiểm tra gửi một tin nhắn rất ngắn; nội dung nhiệm vụ đi qua máy chủ của dịch vụ đó. Giá trị nhập ở đây được ưu tiên hơn biến môi trường. Lấy danh sách model dùng key vừa nhập, hoặc key đang lưu nếu ô key để trống và giữ nguyên nhà cung cấp, Base URL.")));
 };
 

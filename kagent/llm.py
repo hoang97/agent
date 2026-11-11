@@ -713,20 +713,35 @@ class OpenAIProvider(_StructuredProvider):
         return {"answer": "\n\n".join(parts) or "(không có nội dung trả lời)", "tokens": total}
 
 
-def check_base_url(url: str | None) -> str | None:
-    """Chỉ nhận HTTPS tới địa chỉ công khai, vì server sẽ gửi credential tới đó."""
+def check_base_url(url: str | None, allow_private: bool = False) -> str | None:
+    """Server gửi credential tới Base URL nên kiểm tra kỹ.
+
+    Mặc định chỉ nhận https tới địa chỉ công khai. allow_private (org admin bật) cho phép địa chỉ mạng nội bộ, kể cả http,
+    vì LLM nội bộ (vLLM, Ollama, LiteLLM) thường chạy http; http chỉ nhận khi mọi IP phân giải ra đều là nội bộ.
+    Loopback, link-local (gồm metadata của cloud), multicast luôn bị chặn.
+    """
+    from . import net
     url = (url or "").strip().rstrip("/")
     if not url:
         return None
     parts = urlsplit(url)
-    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
-        raise LLMError("Base URL phải có dạng https://tên-miền")
+    if parts.scheme not in ("https", "http") or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
+        raise LLMError("Base URL phải có dạng https://tên-miền" + (" hoặc http://địa-chỉ-nội-bộ" if allow_private else ""))
+    if parts.scheme == "http" and not allow_private:
+        raise LLMError("Base URL phải dùng https; với LLM trong mạng nội bộ chạy http, hãy bật cho phép địa chỉ mạng nội bộ")
     try:
-        infos = socket.getaddrinfo(parts.hostname, parts.port or 443, proto=socket.IPPROTO_TCP)
+        infos = socket.getaddrinfo(parts.hostname, parts.port or (443 if parts.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
     except (socket.gaierror, UnicodeError) as exc:
         raise LLMError("không phân giải được tên miền của Base URL") from exc
-    if not all(ipaddress.ip_address(info[4][0]).is_global for info in infos):
-        raise LLMError("Base URL không được trỏ tới địa chỉ nội bộ")
+    ips = {info[4][0] for info in infos}
+    for ip in ips:
+        try:
+            net.check_ip(ip, allow_private)
+        except net.NetError as exc:
+            raise LLMError("Base URL không được trỏ tới địa chỉ nội bộ; org admin có thể bật cho phép địa chỉ mạng nội bộ"
+                           if "nội bộ" in str(exc) else f"Base URL bị chặn: {exc}") from exc
+    if parts.scheme == "http" and any(ipaddress.ip_address(ip).is_global for ip in ips):
+        raise LLMError("http chỉ dùng được cho địa chỉ mạng nội bộ; địa chỉ công khai phải dùng https")
     return url
 
 

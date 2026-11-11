@@ -257,6 +257,7 @@ class LLMKey(BaseModel):
     provider: str = "anthropic"
     model_strong: str | None = None
     model_fast: str | None = None
+    allow_private: bool = False
 
 
 _MODEL_NAME = re.compile(r"[\w.:/-]{1,100}")
@@ -274,10 +275,11 @@ def llm_key_status(_: Principal = Depends(require_org_admin), conn=Depends(get_c
     return vault.status(conn)
 
 
-def _clean_key(value: str) -> str:
+def _clean_key(value: str, local: bool = False) -> str:
+    """local: dịch vụ tương thích OpenAI trong mạng nội bộ, thường không cần key thật (ví dụ Ollama nhận bất kỳ chuỗi nào)."""
     key = value.strip()
-    if not 20 <= len(key) <= 300 or any(c.isspace() or not c.isprintable() for c in key):
-        raise HTTPException(400, "key không đúng định dạng")
+    if not (1 if local else 20) <= len(key) <= 300 or any(c.isspace() or not c.isprintable() for c in key):
+        raise HTTPException(400, "key không đúng định dạng" + ("" if local else " (với LLM nội bộ không cần key, nhập một chuỗi bất kỳ và bật cho phép mạng nội bộ)"))
     return key
 
 
@@ -293,15 +295,17 @@ class LLMModelsQuery(BaseModel):
     base_url: str | None = None
     auth_type: str = "api_key"
     provider: str = "anthropic"
+    allow_private: bool = False
 
 
 @app.post("/api/settings/llm-models")
 def llm_models(body: LLMModelsQuery, _: Principal = Depends(require_org_admin)):
     _check_endpoint(body)
     try:
-        base_url = llm.check_base_url(body.base_url)
+        base_url = llm.check_base_url(body.base_url, body.allow_private)
         if body.key.strip():
-            cred = vault.Credential(_clean_key(body.key), base_url, body.auth_type, body.provider)
+            cred = vault.Credential(_clean_key(body.key, body.allow_private and body.provider == "openai"), base_url, body.auth_type, body.provider,
+                                    allow_private=body.allow_private)
         else:
             current = vault.resolve()[0]
             # Chỉ dùng lại key đã lưu cho đúng endpoint đã lưu: đổi Base URL mà không nhập key sẽ gửi key đó tới máy chủ khác.
@@ -315,13 +319,14 @@ def llm_models(body: LLMModelsQuery, _: Principal = Depends(require_org_admin)):
 
 @app.post("/api/settings/llm-key")
 def llm_key_save(body: LLMKey, principal: Principal = Depends(require_org_admin), conn=Depends(get_conn)):
-    key = _clean_key(body.key)
+    key = _clean_key(body.key, body.allow_private and body.provider == "openai")
     _check_endpoint(body)
     strong, fast = _clean_model(body.model_strong), _clean_model(body.model_fast)
     if body.provider == "openai" and not strong:
         raise HTTPException(400, "OpenAI cần tên model")
     try:
-        cred = vault.Credential(key, llm.check_base_url(body.base_url), body.auth_type, body.provider, strong, fast)
+        cred = vault.Credential(key, llm.check_base_url(body.base_url, body.allow_private), body.auth_type, body.provider, strong, fast,
+                                body.allow_private)
         llm.validate_key(cred)
     except llm.LLMError as exc:
         raise HTTPException(400, f"không lưu key: {exc}") from exc

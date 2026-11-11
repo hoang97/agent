@@ -23,6 +23,7 @@ class Credential:
     provider: str = "anthropic"  # anthropic | openai (gồm cả dịch vụ tương thích OpenAI)
     model_strong: str | None = None
     model_fast: str | None = None
+    allow_private: bool = False  # org admin cho phép Base URL trong mạng nội bộ (LLM tự host)
 
 
 def _fernet() -> Fernet:
@@ -99,4 +100,5 @@ def status(conn) -> dict:
     return {"source": source, "last4": cred.key[-4:] if cred else None, "base_url": cred.base_url if cred else None,
             "auth_type": cred.auth_type if cred else None, "provider": cred.provider if cred else None,
             "model_strong": cred.model_strong if cred else None, "model_fast": cred.model_fast if cred else None,
+            "allow_private": bool(cred and cred.allow_private),
             "updated_at": updated_at, "updated_by": updated_by}

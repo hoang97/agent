@@ -176,8 +176,56 @@ def test_bad_base_url_rejected(users, auto_provider, public_dns, bad):
 def test_base_url_to_private_address_rejected(users, auto_provider, monkeypatch, ip):
     monkeypatch.setattr(llm.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", (ip, 443))])
     r = users["admin"].post(URL, tenant=False, json={"key": KEY, "base_url": RELAY})
-    assert r.status_code == 400 and "nội bộ" in r.text
+    assert r.status_code == 400 and ("nội bộ" in r.text or "bị chặn" in r.text)
 
 
 def test_invalid_auth_type_rejected(users, auto_provider):
     assert users["admin"].post(URL, tenant=False, json={"key": KEY, "auth_type": "basic"}).status_code == 400
+
+
+# ---------- LLM tự host trong mạng nội bộ ----------
+
+def _dns(monkeypatch, ip):
+    monkeypatch.setattr(llm.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", (ip, 443))])
+
+
+def test_internal_base_url_needs_opt_in(monkeypatch):
+    _dns(monkeypatch, "10.20.30.40")
+    with pytest.raises(llm.LLMError, match="cho phép địa chỉ mạng nội bộ"):
+        llm.check_base_url("http://llm.internal:8000/v1")
+    with pytest.raises(llm.LLMError, match="nội bộ"):
+        llm.check_base_url("https://llm.internal:8000/v1")
+    assert llm.check_base_url("http://llm.internal:8000/v1/", allow_private=True) == "http://llm.internal:8000/v1"
+    assert llm.check_base_url("https://llm.internal/v1", allow_private=True) == "https://llm.internal/v1"
+
+
+@pytest.mark.parametrize("ip", ["127.0.0.1", "169.254.169.254", "::1", "0.0.0.0"])
+def test_loopback_and_metadata_blocked_even_with_opt_in(monkeypatch, ip):
+    _dns(monkeypatch, ip)
+    with pytest.raises(llm.LLMError, match="bị chặn"):
+        llm.check_base_url("http://llm.internal/v1", allow_private=True)
+
+
+def test_http_to_public_address_rejected_even_with_opt_in(monkeypatch):
+    _dns(monkeypatch, "93.184.216.34")
+    with pytest.raises(llm.LLMError, match="địa chỉ công khai phải dùng https"):
+        llm.check_base_url("http://relay.example.test/v1", allow_private=True)
+
+
+def test_save_and_list_models_for_local_openai_compatible(users, monkeypatch):
+    _dns(monkeypatch, "10.20.30.40")
+    admin = users["admin"]
+    seen = []
+    monkeypatch.setattr(llm, "validate_key", lambda cred: seen.append(cred))
+    monkeypatch.setattr(llm, "list_models", lambda cred: seen.append(cred) or [{"id": "qwen", "name": "qwen"}])
+    body = {"key": "ollama", "base_url": "http://llm.internal:11434/v1", "provider": "openai", "model_strong": "qwen"}
+    assert admin.post(URL, tenant=False, json=body).status_code == 400  # chưa bật cho phép mạng nội bộ
+    r = admin.post("/api/settings/llm-models", tenant=False, json={**body, "allow_private": True})
+    assert r.status_code == 200 and r.json()["models"] == [{"id": "qwen", "name": "qwen"}]
+    saved = admin.post(URL, tenant=False, json={**body, "allow_private": True})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["allow_private"] is True and saved.json()["base_url"] == "http://llm.internal:11434/v1"
+    assert seen[-1].allow_private is True and seen[-1].key == "ollama"
+    assert vault.resolve()[0].allow_private is True
+    # Key ngắn chỉ được nhận cho dịch vụ tương thích OpenAI trong mạng nội bộ.
+    assert admin.post(URL, tenant=False, json={"key": "short"}).status_code == 400

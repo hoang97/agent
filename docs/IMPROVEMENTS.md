@@ -178,3 +178,9 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend 
 - **`count_logs` (Elasticsearch):** đếm và nhóm bằng aggregation trên toàn bộ bản ghi khớp; field text tự thử bản `.keyword` (cả khi Elasticsearch báo lỗi lẫn khi trả 0 nhóm). Trước đó agent đếm bằng `search_logs` size 5000 nhưng connector chỉ trả 100 bản ghi, nên số đếm sai mà không ai biết; nay `_filter` cảnh báo khi chỉ lọc trên một phần của tổng số khớp.
 - **Reflector chỉ nhận 1.500 ký tự đầu kết quả của mỗi bước:** trang Đo lường cho thấy Reflector tốn ~28.000 token input mỗi lần vì nhận nguyên trace kèm kết quả thô.
 - **Hết số bước không còn bỏ cả lượt:** khi chạm giới hạn (nâng từ 8 lên 12 bước), model buộc phải tổng kết những gì đã có. Trước đây lượt 15 lệnh chỉ trả "vượt số bước tối đa".
+
+## Đợt 21 — 2026-11-11: LLM tự host trong mạng nội bộ
+
+- **Vấn đề:** lấy danh sách model của dịch vụ tương thích OpenAI chạy trong mạng nội bộ báo "Base URL không được trỏ tới địa chỉ nội bộ". Base URL chỉ nhận https tới địa chỉ công khai, và key phải dài 20–300 ký tự, nên LLM tự host (vLLM, Ollama, LiteLLM) không dùng được.
+- **Thay đổi:** form LLM có ô "Cho phép địa chỉ mạng nội bộ" (chỉ org admin, lưu cùng credential đã mã hóa). Khi bật: nhận địa chỉ nội bộ, nhận cả http nhưng chỉ khi mọi IP phân giải ra đều nội bộ, giao diện cảnh báo khi dùng http; dịch vụ tương thích OpenAI nội bộ nhận key ngắn. Địa chỉ công khai vẫn bắt buộc https; loopback, link-local (gồm metadata của cloud) luôn bị chặn.
+- **Docker:** thêm `host.docker.internal` để gọi LLM chạy trên chính máy host (trong container, `localhost` là container).
