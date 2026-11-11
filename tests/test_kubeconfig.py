@@ -134,3 +134,18 @@ def test_connection_with_only_kubeconfig_works_and_secret_stays_hidden(users):
 def test_connection_create_validates_kubeconfig(users, kw, message):
     with db.session() as conn, pytest.raises(connections.ConnectionError_, match=message):
         _create(conn, users["admin"].tenant, name="kc_bad", **kw)
+
+
+def test_secret_sent_in_params_is_stored_as_secret(users):
+    tenant = users["admin"].tenant
+    with db.session() as conn:
+        created = _create(conn, tenant, name="kc_old_client", params={"kubeconfig": TOKEN_KC}, secrets={})
+        row = conn.execute("SELECT params, secrets FROM connection WHERE id=?", (created["id"],)).fetchone()
+        assert connections.test(conn, tenant, created["id"], _admin(conn))["ok"] is True
+    assert "kubeconfig" not in row["params"] and fakes.K8S_TOKEN not in row["secrets"]
+
+
+def test_static_files_are_revalidated(client):
+    r = client.get("/static/app.js")
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-cache" and r.headers.get("etag")
+    assert client.get("/static/app.js", headers={"if-none-match": r.headers["etag"]}).status_code == 304

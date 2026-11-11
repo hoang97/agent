@@ -59,7 +59,8 @@ def _clean(template: Template, params: dict, secrets: dict, old_params: dict, ol
         raise _err(f"tham số không có trong template: {sorted(unknown)}")
     for f in template.fields:
         if f.secret:
-            value = secrets.get(f.name)
+            # Client cũ (JS còn trong cache) có thể gửi secret kiểu mới trong params; nhận luôn thay vì lặng lẽ bỏ qua.
+            value = secrets.get(f.name) or params.get(f.name)
             value = value.strip() if isinstance(value, str) and value.strip() else old_secrets.get(f.name)
             if f.required and not value:
                 raise _err(f"thiếu {f.name}")

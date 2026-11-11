@@ -1090,4 +1090,13 @@ def index():
     return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+class _RevalidatedStatic(StaticFiles):
+    """Không có Cache-Control thì trình duyệt tự cache theo phỏng đoán và chạy JS cũ sau khi nâng cấp; no-cache vẫn nhận 304 nhờ ETag."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/static", _RevalidatedStatic(directory=STATIC_DIR), name="static")
