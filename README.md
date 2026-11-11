@@ -9,6 +9,8 @@ bằng tham số của riêng mình ở trang **Kết nối công cụ**; chi ti
 
 ## Chạy cục bộ
 
+Cần Python 3.10 trở lên.
+
 ```bash
 python -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt

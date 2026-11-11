@@ -17,7 +17,7 @@ mọi lệnh gọi công cụ đi qua gateway có phân mức rủi ro, multi-te
 | L2 Tri thức biên dịch | Repo git, playbook có ID + bộ đếm, Skill | Repo git riêng mỗi tenant, nhánh `proposal/*` thay cho pull request | `kagent/compiler.py` |
 | L3 Chỉ mục | Vector + BM25 + đồ thị | Vector băm + FTS5 BM25 + mở rộng 1 bước trên `ku_edge` | `kagent/retrieval.py` |
 | Luồng đọc | Router → truy xuất → lắp ngữ cảnh theo ngân sách → ghi episode | Như thiết kế | `kagent/agent.py` |
-| Luồng học | Reflector → Curator → Cổng duyệt → Compiler | Như thiết kế, chạy nền theo lịch và theo sự kiện | `kagent/learning.py`, `kagent/scheduler.py` |
+| Luồng học | Reflector → Curator → Cổng duyệt → Compiler | Như thiết kế, chạy nền theo lịch và theo sự kiện; episode chưa có kết quả được LLM-as-judge chấm trước khi phản tư | `kagent/learning.py`, `kagent/scheduler.py` |
 | Đo lường | Golden task, chỉ số tuần | Golden task chặn publish, trang Đo lường | `kagent/compiler.py`, `kagent/api.py` |
 | MCP Gateway | Danh mục, kiểm quyền, audit | Template công cụ (git) + kết nối do admin/user tạo với tham số riêng, gắn tenant/user/môi trường; connector gọi hệ thống thật qua lớp mạng chống SSRF; secret mã hóa; 3 cửa quyết định, audit | `kagent/templates/`, `kagent/connectors/`, `kagent/connections.py`, `kagent/net.py`, `kagent/gateway.py`, `docs/TOOLS.md` |
 | Phân cấp quyền | R0–R4 × môi trường × tin cậy | Ma trận, `auto_execute`, điểm tin cậy 4 thành phần, ép hỏi | `kagent/gateway.py` |

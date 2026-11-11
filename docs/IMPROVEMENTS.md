@@ -99,3 +99,11 @@ Dựng MVP theo `docs/PLAN.md`.
 - **Test:** chạy connector thật trên hạ tầng giả ở tầng HTTP (`tests/fakes.py`) và SQLite.
 - **Lỗi phát hiện khi gọi Internet thật:** TLS dùng kho chứng chỉ hệ thống nên lỗi trên Windows; nay dùng bộ CA của certifi. Ngoài ra, tên công cụ học được từng kích hoạt nhầm từ khóa của công cụ khác trong planner heuristic.
 - **Lưu ý về lịch sử commit:** các commit từ `6de5c6d` đến `fd1f497` không chạy được riêng lẻ, vì việc xóa phần mô phỏng lọt vào commit đầu tiên. Trạng thái chạy đúng là `3b6dc4a`. Muốn hoàn tác đợt này thì revert cả dải `git revert --no-commit 6de5c6d^..3b6dc4a`.
+
+## Đợt 13 — 2026-11-11: LLM-as-judge cho episode chưa có kết quả
+
+- **Vấn đề:** `outcome` chỉ suy từ trạng thái công cụ, nên lượt chat không gọi công cụ giữ `unknown`. Reflector thiếu tín hiệu, còn KU đã nạp cho các lượt đó không bao giờ được cộng điểm hữu ích. Tài liệu kiến trúc yêu cầu Reflector tự chấm khi chưa có kết quả.
+- **Thay đổi:** trước khi phản tư, episode `unknown` được model mạnh chấm thành success / partial / failure, ghi `outcome_src='llm_judge'`. Judge trả `unknown` hoặc giá trị lạ thì giữ nguyên. Chế độ heuristic không chấm.
+- **Không chấm:** lượt bị dừng, lượt còn lệnh chờ duyệt, và episode đã có kết quả (từ công cụ hoặc người dùng). Phản hồi người dùng gửi cùng lúc không bị ghi đè.
+- **An toàn:** episode có nội dung untrusted mà judge chấm thành công thì không cộng điểm hữu ích cho KU đã dùng, vì nội dung đó có thể lái lời chấm.
+- **README:** ghi rõ cần Python 3.10 trở lên; Python 3.9 không cài được.
