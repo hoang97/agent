@@ -889,9 +889,15 @@ def _job_view(conn, job: dict, tenant_id: str) -> dict:
     ids = list(job["items"])
     live = {r["id"] for r in conn.execute(f"SELECT id FROM knowledge_unit WHERE tenant_id=? AND status='candidate' AND id IN ({','.join('?' * len(ids))})",
                                           (tenant_id, *ids)).fetchall()} if ids else set()
-    groups = [{**g, "ids": [i for i in g["ids"] if i in live]} for g in job["groups"]]
+    groups = [g for g in ({**g, "ids": [i for i in g["ids"] if i in live]} for g in job["groups"]) if len(g["ids"]) >= 2]
+    drop = [d for d in job["drops"] if d["id"] in live]
+    taken = {i for g in groups for i in g["ids"]} | {d["id"] for d in drop}
+    # Ứng viên trong phạm vi đề xuất mà không trùng với mục nào và không bị đề xuất loại: người duyệt chấp nhận hàng loạt được.
+    singles = [i for i in ids if i in live and i not in taken] if job["status"] == "done" else []
+    outside = conn.execute("SELECT count(*) FROM knowledge_unit WHERE tenant_id=? AND status='candidate' AND scope NOT LIKE 'user:%'",
+                           (tenant_id,)).fetchone()[0] - len(live)
     return {"id": job["id"], "status": job["status"], "considered": job["considered"], "total": len(job["batches"]), "done": len(job["done_batches"]),
-            "errors": job["errors"], "groups": [g for g in groups if len(g["ids"]) >= 2], "drop": [d for d in job["drops"] if d["id"] in live],
+            "errors": job["errors"], "groups": groups, "drop": drop, "singles": singles, "outside": outside, "kind": job.get("kind"),
             "items": {i: {k: it[k] for k in ("kind", "title", "content", "source_trust")} for i, it in job["items"].items()}}
 
 
@@ -908,8 +914,8 @@ def ku_consolidate(body: Consolidate, t: Tenant = Depends(current_tenant), conn=
     batches = [[it["id"] for it in b] for b in _batches(items)]
     job_id, now = db.new_id(), db.iso()
     conn.execute("DELETE FROM ku_consolidation WHERE tenant_id=?", (t.tenant_id,))  # mỗi tenant giữ một đề xuất gần nhất
-    conn.execute("INSERT INTO ku_consolidation(id,tenant_id,status,considered,items,batches,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
-                 (job_id, t.tenant_id, "running" if batches else "done", len(items),
+    conn.execute("INSERT INTO ku_consolidation(id,tenant_id,status,kind,considered,items,batches,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                 (job_id, t.tenant_id, "running" if batches else "done", body.kind or None, len(items),
                   json.dumps({it["id"]: {k: it[k] for k in ("kind", "title", "content", "applies_when", "source_trust", "scope")} for it in items}, ensure_ascii=False),
                   json.dumps(batches), now, now))
     if batches:

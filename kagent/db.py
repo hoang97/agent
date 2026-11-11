@@ -264,6 +264,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
     if "self_approve" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
         # Mặc định người yêu cầu tự duyệt lệnh của mình; admin có thể tắt cho tenant cần duyệt chặt.
         conn.execute("ALTER TABLE tenant ADD COLUMN self_approve INTEGER NOT NULL DEFAULT 1")
+    if "kind" not in {r["name"] for r in conn.execute("PRAGMA table_info(ku_consolidation)")}:
+        conn.execute("ALTER TABLE ku_consolidation ADD COLUMN kind TEXT")  # bộ lọc loại khi tạo đề xuất; NULL = mọi loại
     if "created_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(session)")}:
         conn.execute("ALTER TABLE session ADD COLUMN created_at TEXT")  # mốc để giới hạn tuổi tối đa của phiên trượt
     if "llm" not in {r["name"] for r in conn.execute("PRAGMA table_info(llm_call)")}:

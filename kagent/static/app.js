@@ -289,10 +289,15 @@ VIEWS.knowledge = async (main) => {
       consolidated.replaceChildren();
     }
   }
+  // Tên nút cho biết phạm vi sẽ xét, để không nhầm chỉ tổng hợp một loại khi bộ lọc đang bật.
+  const consolidateBtn = h("button", { type: "button", class: "ghost", onclick: consolidate, title: "LLM gom các KU trùng ý và đề xuất loại KU ít giá trị; chưa thay đổi gì cho tới khi bạn chấp nhận" });
+  const syncConsolidateLabel = () => { consolidateBtn.textContent = kindSel.value ? `Tổng hợp trùng lặp (loại ${kindSel.value})` : "Tổng hợp trùng lặp (mọi loại)"; };
+  kindSel.addEventListener("change", syncConsolidateLabel);
+  syncConsolidateLabel();
   bulkBar.append(h("label", { class: "small" }, selectAll, " Chọn tất cả"), countLabel, h("span", { class: "spacer" }),
     h("button", { type: "button", class: "needs-sel", onclick: doBatch(true) }, "Chấp nhận đã chọn"),
     h("button", { type: "button", class: "danger needs-sel", onclick: doBatch(false) }, "Loại đã chọn"),
-    h("button", { type: "button", class: "ghost", onclick: consolidate, title: "LLM gom các KU trùng ý và đề xuất loại KU ít giá trị; chưa thay đổi gì cho tới khi bạn chấp nhận" }, "Tổng hợp trùng lặp"));
+    consolidateBtn);
 
   // Đề xuất tổng hợp: mỗi nhóm có bản gộp sửa được; chấp nhận thì bản gốc chuyển "bị loại" kèm liên kết tới bản gộp.
   function renderProposal(p) {
@@ -333,9 +338,19 @@ VIEWS.knowledge = async (main) => {
       toast(`Đã gộp và chấp nhận ${ok} nhóm${failed ? `, ${failed} nhóm lỗi` : ""}`, failed > 0);
       await load();
     });
-    consolidated.replaceChildren(h("h3", {}, `Đề xuất tổng hợp (đã xét ${p.considered} ứng viên)`),
+    const acceptSingles = guard(async (e) => {
+      const r = await batch(p.singles, true);
+      e.target.closest(".card").replaceChildren(h("div", { class: "small" }, `Đã chấp nhận ${r.done} ứng viên không trùng.`));
+      await load();
+    });
+    const scope = p.kind ? `chỉ loại ${p.kind}` : "mọi loại";
+    consolidated.replaceChildren(h("h3", {}, `Đề xuất tổng hợp (${scope}, đã xét ${p.considered} ứng viên)`),
       p.groups.length > 0 && h("div", { class: "card row" }, h("span", { class: "small" }, `${p.groups.length} nhóm gộp ${mergedCount} KU thành ${p.groups.length}; ${p.drop.length} KU đề xuất loại. Sửa hoặc bỏ qua nhóm chưa ổn rồi chấp nhận phần còn lại.`),
         h("span", { class: "spacer" }), h("button", { type: "button", onclick: acceptAll }, `Gộp và chấp nhận tất cả ${p.groups.length} nhóm`)),
+      p.singles && p.singles.length > 0 && h("div", { class: "card row" },
+        h("span", { class: "small" }, `${p.singles.length} ứng viên trong phạm vi này không trùng với mục nào và không bị đề xuất loại: ${p.singles.slice(0, 3).map(title).join("; ")}${p.singles.length > 3 ? "…" : ""}`),
+        h("span", { class: "spacer" }), h("button", { type: "button", class: "ghost", onclick: acceptSingles }, `Chấp nhận ${p.singles.length} ứng viên không trùng`)),
+      p.outside > 0 && h("div", { class: "card small muted" }, `Còn ${p.outside} ứng viên ngoài phạm vi đề xuất này (${p.kind ? "loại khác hoặc " : ""}mới sinh sau khi tổng hợp). Chọn "Mọi loại" rồi tổng hợp lại để xét cả những mục đó.`),
       ...(p.groups.length || p.drop.length ? [...p.groups.map(groupCard), dropCard] : [h("div", { class: "card muted" }, "Không thấy KU trùng ý hay ít giá trị.")]),
       h("div", { class: "row" }, h("button", { type: "button", class: "ghost", onclick: () => { store.set("ku:consolidate", null); consolidated.replaceChildren(); } }, "Đóng đề xuất")));
   }

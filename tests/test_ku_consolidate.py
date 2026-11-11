@@ -168,3 +168,19 @@ def test_stale_running_job_is_marked_error_on_startup(users):
     api_mod.resume_consolidations()
     again = admin.get(f"/api/ku/consolidate/{job['id']}").json()
     assert again["status"] == "error" and "quá hạn" in again["errors"][-1]
+
+
+def test_proposal_reports_scope_singles_and_outside(users):
+    """Đề xuất lọc theo một loại thì nói rõ phạm vi, liệt kê mục không trùng và số ứng viên nằm ngoài phạm vi."""
+    admin = users["admin"]
+    a = _add(admin.tenant, "Kế hoạch untrusted bị chặn 1", "gateway giữ lệnh chờ duyệt khi kế hoạch dựa trên nội dung untrusted", kind="lesson")
+    b = _add(admin.tenant, "Kế hoạch untrusted bị chặn 2", "gateway giữ lệnh chờ duyệt khi kế hoạch dựa trên nội dung untrusted", kind="lesson")
+    single = _add(admin.tenant, "Log cmp-backend để level trong request.level", "trường level nằm trong request.level", kind="lesson")
+    _add(admin.tenant, "Index log theo env", "k8s-env-service-ngày", kind="fact")
+    job = _consolidate(admin, kind="lesson")
+    assert job["kind"] == "lesson" and job["considered"] == 3 and job["outside"] == 1 and job["singles"] == [single]
+    assert sorted(job["groups"][0]["ids"]) == sorted([a, b])
+    admin.post("/api/ku/review-batch", json={"ids": job["singles"], "approve": True})
+    again = admin.get(f"/api/ku/consolidate/{job['id']}").json()
+    assert again["singles"] == [] and again["outside"] == 1
+    assert _consolidate(admin)["kind"] is None  # không lọc = mọi loại

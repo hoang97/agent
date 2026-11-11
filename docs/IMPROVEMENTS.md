@@ -228,3 +228,8 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend 
 - **Nguyên nhân:** job chỉ nằm trong bộ nhớ server, nên mất mỗi lần server khởi động lại (kể cả khi triển khai bản mới). Ngoài ra trong lúc theo dõi, chỉ một lần hỏi tiến độ bị lỗi (server đang khởi động lại, mạng chập chờn) là giao diện xóa job đã ghi nhớ.
 - **Thay đổi:** job lưu trong bảng `ku_consolidation` (danh sách lô, lô đã xong, kết quả từng lô ghi ngay khi xong). Server khởi động lại thì chạy tiếp các lô còn dở, không chạy lại lô đã xong; job quá 1 ngày thì đánh dấu lỗi. Giao diện chỉ bỏ job khi server trả 404 (đã có lần tổng hợp mới hơn); lỗi tạm thời thì hiện "mất kết nối, đang thử lại" và tiếp tục.
 - Đã thử trên trình duyệt với job 27 KU: chuyển màn giữa chừng, F5 giữa chừng, khởi động lại container giữa chừng; job chạy tiếp và trang tự hiện đề xuất khi xong.
+
+## Đợt 29 — 2026-11-11: còn ứng viên sau "Gộp và chấp nhận tất cả"
+
+- **Vì sao còn 46 ứng viên:** đề xuất gần nhất chỉ xét loại procedure (một lần chạy thử khi sửa lỗi ở đợt 28 dùng bộ lọc này và thay thế đề xuất đầy đủ trước đó, vì mỗi tenant giữ một đề xuất), nên 42 ứng viên loại khác chưa được xét; còn 4 procedure không trùng với mục nào nên nút gộp không chạm tới. Giao diện không cho biết phạm vi của đề xuất.
+- **Thay đổi:** tiêu đề đề xuất ghi phạm vi ("chỉ loại X" hoặc "mọi loại"); nút tổng hợp ghi phạm vi sẽ xét theo bộ lọc đang chọn; thêm "Chấp nhận N ứng viên không trùng"; ghi số ứng viên nằm ngoài phạm vi đề xuất và cách xét cả chúng.
