@@ -79,11 +79,10 @@ def test_agent_invalid_tool_arguments_not_executed():
     assert calls == [] and "invalid" in seen[1]["body"]["messages"][-1]["content"]
 
 
-def test_agent_step_limit():
+def test_agent_step_limit_ends_with_summary():
     replies = [completion(tool_calls=[tool_call("k8s__list_pods", "{}")], finish="tool_calls") for _ in range(settings.max_agent_steps)]
-    p, _ = provider(*replies)
-    with pytest.raises(llm.LLMError, match="số bước"):
-        p.run_agent("x", "c", [], lambda n, a: {"status": "ok"})
+    p, fake = provider(*replies, completion("tổng kết"))
+    assert p.run_agent("x", "c", [], lambda n, a: {"status": "ok"})["answer"] == "tổng kết"
 
 
 @pytest.mark.parametrize("finish,text", [("content_filter", "từ chối"), ("length", "bị cắt")])

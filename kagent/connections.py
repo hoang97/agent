@@ -235,6 +235,8 @@ def ensure_builtin(conn) -> None:
             continue
         create(conn, t["id"], "system", is_admin=True, is_org_admin=False, template=template, name=name, scope="tenant",
                envs=list(ENVS), roles=list(ROLE_CHOICES), enable_all=True)
+    # Công cụ nội bộ mới thêm vào template (đồng bộ mặc định tắt) được bật luôn, trừ khi admin đã từng chỉnh nó.
+    conn.execute("UPDATE tool_registry SET enabled=1 WHERE template=? AND approved_by IS NULL AND enabled=0 AND status='active'", (template,))
 
 
 def resolve(conn, tenant_id: str, tool_name: str) -> tuple[dict, dict, object, dict]:

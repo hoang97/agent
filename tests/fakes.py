@@ -140,6 +140,22 @@ class Infra:
         path = r.url.path
         if path == "/":
             return self._json({"version": {"number": "8.15.0"}})
+        if path.endswith("/_search") and json.loads(r.content or b"{}").get("size") == 0:
+            body = json.loads(r.content)
+            levels = ["error", "warn", "error"] * 40  # 120 bản ghi khớp, nhiều hơn số search_logs trả về
+            out = {"hits": {"total": {"value": len(levels)}, "hits": []}}
+            if "aggs" in body:
+                field = body["aggs"]["g"]["terms"]["field"]
+                if field == "module":  # field text đã map nhưng không có doc_values: Kibana/ES có thể trả 0 nhóm thay vì báo lỗi
+                    return self._json({**out, "aggregations": {"g": {"buckets": [], "sum_other_doc_count": 0}}})
+                if field == "level":  # field text: Elasticsearch không cho aggregate
+                    return self._json({"error": {"type": "illegal_argument_exception", "reason": "Text fields are not optimised; use a keyword field (fielddata disabled)"}}, 400)
+                counts = {}
+                for lv in (levels if field != "module.keyword" else ["billing"] * 120):
+                    counts[lv] = counts.get(lv, 0) + 1
+                out["aggregations"] = {"g": {"buckets": [{"key": k, "doc_count": v} for k, v in sorted(counts.items(), key=lambda kv: -kv[1])],
+                                             "sum_other_doc_count": 0}}
+            return self._json(out)
         if path.endswith("/_search"):
             return self._json({"hits": {"total": {"value": 2}, "hits": [
                 {"_index": "logs-app", "_source": {"@timestamp": "2026-11-11T00:00:00Z", "level": "error", "message": "payment gateway timeout"}},

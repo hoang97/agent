@@ -11,14 +11,17 @@ import json
 import re
 import unicodedata
 from collections import defaultdict
+from dataclasses import replace
 
-from . import db, gateway
+from . import db, gateway, results
 from .retrieval import tokenize
 from .tools import callable_by, max_tier
 
 PREFIX = "learned."
 EPHEMERAL = "data."  # data.query/data.script làm việc trên result_id của một lượt cụ thể nên không dùng lại được
 PLACEHOLDER = re.compile(r"^\{\{([a-z_][a-z0-9_]{0,30})\}\}$")
+# {{step:N}}: kết quả đầy đủ của bước N, chỉ dùng làm dữ liệu đầu vào cho công cụ local (data.*), không bao giờ cho lệnh gọi ra ngoài.
+STEP_REF = re.compile(r"^\{\{step:([1-9])\}\}$")
 PARAM_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,30}$")
 PARAM_TYPES = ("string", "integer")
 MIN_EPISODES = 3
@@ -44,6 +47,15 @@ def _placeholder(value) -> str | None:
     return m.group(1) if m else None
 
 
+def _step_ref(value) -> int | None:
+    m = STEP_REF.match(value) if isinstance(value, str) else None
+    return int(m.group(1)) if m else None
+
+
+def _values(value) -> list:
+    return value if isinstance(value, list) else [value]
+
+
 def _registry(conn, tenant_id: str, tool: str):
     return conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=? AND status='active'", (tenant_id, tool)).fetchone()
 
@@ -64,12 +76,18 @@ def validate(conn, tenant_id: str, steps, params) -> None:
         args = step.get("args", {})
         if not isinstance(args, dict):
             raise LearnedError(f"bước {i}: args phải là object")
-        for value in args.values():
+        for value in (v for raw in args.values() for v in _values(raw)):
             name = _placeholder(value)
             if name:
                 if name not in params:
                     raise LearnedError(f"bước {i}: tham số {name} chưa được khai báo")
                 used.add(name)
+            ref = _step_ref(value)
+            if ref is not None:
+                if meta["template"] != EPHEMERAL.rstrip("."):
+                    raise LearnedError(f"bước {i}: chỉ công cụ data.* được dùng kết quả bước trước ({{{{step:N}}}})")
+                if ref >= i:
+                    raise LearnedError(f"bước {i}: {{{{step:{ref}}}}} phải trỏ tới bước đứng trước")
         missing = set(json.loads(meta["input_schema"]).get("required", [])) - set(args)
         if missing:
             raise LearnedError(f"bước {i}: thiếu tham số bắt buộc {sorted(missing)}")
@@ -294,12 +312,27 @@ def invoke_by_name(conn, ctx, name: str, args: dict) -> dict:
         if value is None:
             return {**base, "risk_tier": tier, "decision": "blocked", "status": "invalid", "reasons": [f"thiếu hoặc sai tham số {pname}"]}
         values[pname] = value
-    subs = []
+    subs: list[dict] = []
+    handles: dict[int, str] = {}
+    consumed: set[int] = set()
+
+    def resolve(value):
+        ref = _step_ref(value)
+        if ref is None:
+            return values[_placeholder(value)] if _placeholder(value) else value
+        consumed.add(ref)
+        if ref not in handles:
+            prev = subs[ref - 1]
+            handles[ref] = prev.get("result", {}).get("raw_result_id") if isinstance(prev.get("result"), dict) and "raw_result_id" in prev["result"] \
+                else results.save(conn, ctx.tenant_id, ctx.user_id, ctx.episode_id, prev["tool"], prev.get("result"), bool(prev.get("untrusted")))
+        return handles[ref]
+
+    reviewed = _reviewed(conn, ctx.tenant_id, row)
     for step in row["steps"]:
-        call_args = {k: values[_placeholder(v)] if _placeholder(v) else v for k, v in step["args"].items()}
-        # Tham số của mọi bước đã cố định trước khi chạy, bước sau không đọc kết quả bước trước,
-        # nên kết quả untrusted của một bước không thể lái bước sau. Các lượt sau vẫn bị đánh dấu qua step["untrusted"].
-        sub = gateway.invoke(conn, ctx, step["tool"], call_args)
+        call_args = {k: [resolve(x) for x in v] if isinstance(v, list) else resolve(v) for k, v in step["args"].items()}
+        # Tham số của lệnh gọi ra ngoài cố định trước khi chạy; kết quả bước trước chỉ đi vào công cụ local (data.*)
+        # qua {{step:N}}, nên nội dung untrusted không lái được lệnh nào tác động ra ngoài.
+        sub = gateway.invoke(conn, replace(ctx, reviewed=reviewed), step["tool"], call_args)
         subs.append(sub)
         if sub["status"] != "ok":
             break
@@ -308,9 +341,28 @@ def invoke_by_name(conn, ctx, name: str, args: dict) -> dict:
     if status in ("ok", "error"):
         record_use(conn, row, status == "ok")
     return {**base, "risk_tier": tier, "status": status, "decision": "auto" if status == "ok" else last.get("decision"),
-            "steps": subs, "result": {"steps": [{"tool": s["tool"], "status": s["status"], "result": s.get("result")} for s in subs]},
+            "steps": subs, "result": {"steps": [{"tool": s["tool"], "status": s["status"],
+                                                 # Bước đã được bước sau xử lý thì chỉ trả result_id, không đổ dữ liệu thô vào context.
+                                                 "result": {"result_id": handles[i]} if i in consumed and i in handles else s.get("result")}
+                                                for i, s in enumerate(subs, 1)]},
             "untrusted": any(s.get("untrusted") for s in subs), "reasons": [] if status == "ok" else last.get("reasons", []),
             "approval_id": last.get("approval_id"), "required_approvals": last.get("required_approvals")}
+
+
+def _reviewed(conn, tenant_id: str, row: dict) -> bool:
+    """Các bước (kể cả code data.script) đã được người có quyền xem và bật: công cụ tenant do admin, công cụ cá nhân do chính chủ khi tenant cho tự duyệt."""
+    if not row.get("approved_by"):
+        return False
+    return row["scope"] == "tenant" or gateway.self_approve_enabled(conn, tenant_id)
+
+
+def propose_tool(conn, tenant_id: str, user_id: str, *, name: str, description: str, steps, params, scope: str) -> dict:
+    """Agent đề xuất công cụ chuẩn hóa từ cách lấy và lọc dữ liệu vừa làm; luôn chờ người xem các bước rồi mới bật."""
+    if scope not in ("user", "tenant"):
+        raise LearnedError("scope phải là user hoặc tenant")
+    scope_value = f"user:{user_id}" if scope == "user" else "tenant"
+    return create(conn, tenant_id, name=_unique_name(conn, tenant_id, scope_value, slug(name)), description=str(description or name)[:300],
+                  steps=steps, params=params or {}, scope=scope_value, status="proposed", origin="agent", source_eps=[], created_by=user_id)
 
 
 def update(conn, tenant_id: str, tool_id: str, user_id: str, is_admin: bool, changes: dict) -> dict:

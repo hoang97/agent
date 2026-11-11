@@ -131,6 +131,11 @@ def apply(data, spec: dict) -> dict:
     where = spec.get("where") or []
     matched = [it for it in items if all(_compare(get_path(it, c["field"]), c.get("op", "eq"), c.get("value")) for c in where)]
     out: dict = {"path": path, "total": len(items), "matched": len(matched)}
+    reported = data.get("total") if isinstance(data, dict) else None
+    if isinstance(reported, int) and not isinstance(reported, bool) and reported > len(items):
+        # Đếm trên một trang kết quả dễ bị hiểu nhầm là đếm toàn bộ.
+        out["warning"] = (f"chỉ lọc trên {len(items)}/{reported} bản ghi khớp do giới hạn số bản ghi trả về; "
+                          "muốn đếm toàn bộ hãy dùng công cụ đếm phía máy chủ (ví dụ count_logs)")
     limit = min(spec.get("limit") or 20, MAX_LIMIT)
     max_chars = spec.get("max_chars") or 500
     if spec.get("group_by"):

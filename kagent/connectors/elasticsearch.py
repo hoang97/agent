@@ -45,14 +45,54 @@ def ping(p, args=None):
     return {"ok": True, "version": info.get("version", {}).get("number")}
 
 
-def search_logs(p, args):
+FIELD = r"[A-Za-z0-9_.@-]{1,100}"
+
+
+def _index_and_query(p, args) -> tuple[str, dict]:
     index = need({"index": args.get("index") or p.get("index_pattern") or "logs-*"}, "index", INDEX_PATTERN)
     minutes = integer(args, "minutes", 60, 1, 30 * 24 * 60)
+    return index, {"bool": {"must": [{"query_string": {"query": str(args.get("query") or "*")[:1000]}}],
+                            "filter": [{"range": {"@timestamp": {"gte": f"now-{minutes}m"}}}]}}
+
+
+def count_logs(p, args):
+    """Đếm và nhóm bằng aggregation trên toàn bộ bản ghi khớp, không giới hạn bởi số bản ghi trả về như search_logs."""
+    index, query = _index_and_query(p, args)
+    field = need(args, "group_by", FIELD) if args.get("group_by") else None
+    buckets = integer(args, "buckets", 20, 1, 100)
+    with _client(p) as c:
+        for candidate in ([field, f"{field}.keyword"] if field and not field.endswith(".keyword") else [field]):
+            body = {"size": 0, "track_total_hits": True, "query": query}
+            if candidate:
+                body["aggs"] = {"g": {"terms": {"field": candidate, "size": buckets}}}
+            try:
+                data = _es(c, "POST", f"/{index}/_search", body=body)
+                total = data.get("hits", {}).get("total", {})
+                matched = total.get("value") if isinstance(total, dict) else total
+                # Field text (hoặc tên chưa đúng) cho 0 nhóm mà không báo lỗi dù có bản ghi khớp: thử bản .keyword.
+                if candidate == field and field and not field.endswith(".keyword") and matched and not data.get("aggregations", {}).get("g", {}).get("buckets"):
+                    continue
+                break
+            except ConnectorError as exc:
+                # Field dạng text không aggregate được; bản .keyword thường có sẵn trong mapping mặc định.
+                if candidate == field and field and any(k in str(exc) for k in ("fielddata", "keyword", "aggregat")):
+                    continue
+                raise
+    total = data.get("hits", {}).get("total", {})
+    out = {"index": index, "total": total.get("value") if isinstance(total, dict) else total}
+    if field:
+        agg = data.get("aggregations", {}).get("g", {})
+        out.update(group_by=candidate, buckets=[{"key": b.get("key_as_string", b.get("key")), "count": b.get("doc_count")} for b in agg.get("buckets", [])],
+                   other=agg.get("sum_other_doc_count", 0))
+    return out
+
+
+def search_logs(p, args):
+    index, query = _index_and_query(p, args)
     body = {
         "size": integer(args, "size", 20, 1, 100),
         "sort": [{"@timestamp": {"order": "desc", "unmapped_type": "date"}}],
-        "query": {"bool": {"must": [{"query_string": {"query": str(args.get("query") or "*")[:1000]}}],
-                           "filter": [{"range": {"@timestamp": {"gte": f"now-{minutes}m"}}}]}},
+        "query": query,
     }
     with _client(p) as c:
         data = _es(c, "POST", f"/{index}/_search", body=body)

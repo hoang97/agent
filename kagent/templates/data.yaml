@@ -42,3 +42,25 @@ tools:
         result_ids: {type: array, items: {type: string}}
         code: {type: string}
       required: [result_ids, code]
+
+  - name: propose_tool
+    description: >-
+      Đề xuất một công cụ chuẩn hóa để dùng lại cách lấy và lọc dữ liệu vừa làm hiệu quả. steps là danh sách
+      {tool, args}: bước lấy dữ liệu với _filter cố định; giá trị thay đổi giữa các lần dùng viết là {{tên_tham_số}} và khai trong params
+      ({tên: {type: string|integer, description}}); bước data.query/data.script đọc kết quả bước trước bằng result_id/result_ids là "{{step:N}}".
+      Công cụ ở trạng thái đề xuất, người có quyền xem các bước rồi mới bật. scope: user (riêng bạn) hoặc tenant (cả nhóm, admin duyệt).
+    handler: data:propose_tool
+    action_class: write
+    reversible: "yes"
+    blast_radius: object
+    data_sensitivity: internal
+    local: true
+    rollback_hint: Từ chối hoặc tắt công cụ ở trang Công cụ & Chính sách
+    input_schema:
+      properties:
+        name: {type: string}
+        description: {type: string}
+        steps: {type: array, items: {type: object}}
+        params: {type: object}
+        scope: {type: string, enum: [user, tenant]}
+      required: [name, description, steps]

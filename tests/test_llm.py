@@ -80,11 +80,12 @@ def test_agent_loop_routes_tools_through_gateway_and_marks_untrusted():
     assert result["content"].startswith("<untrusted>") and result["is_error"] is False
 
 
-def test_agent_step_limit():
-    replies = [msg([use("k8s__list_pods", {})], stop="tool_use") for _ in range(10)]
-    p, _ = provider(replies)
-    with pytest.raises(llm.LLMError):
-        p.run_agent("x", "c", [], lambda n, a: {"status": "ok"})
+def test_agent_step_limit_ends_with_summary():
+    from kagent.config import settings
+    replies = [msg([use("k8s__list_pods", {})], stop="tool_use") for _ in range(settings.max_agent_steps)] + [msg([text("tổng kết")])]
+    p, fake = provider(replies)
+    assert p.run_agent("x", "c", [], lambda n, a: {"status": "ok"})["answer"] == "tổng kết"
+    assert fake.calls[-1]["tool_choice"] == {"type": "none"}
 
 
 def test_model_error_recorded_as_failed_episode(users):

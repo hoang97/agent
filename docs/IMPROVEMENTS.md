@@ -163,3 +163,17 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend 
 - **Kết nối nội bộ `data` cho mọi tenant:** `data.query` (R0, lọc trên result_id; không bị bắt duyệt vì nội dung untrusted vì không tác động ra ngoài) và `data.script` (R4, luôn cần duyệt): Python trong tiến trình con có rlimit CPU/RAM/ghi file/fork/fd và audit hook chặn open, socket, subprocess, os.*, import ngoài danh sách. Thẻ duyệt hiện code giữ nguyên xuống dòng.
 - **Connector Elasticsearch** trả `_source` dạng object, chỉ cắt từng chuỗi dài. Trước đây cả `_source` bị dồn thành chuỗi JSON rồi cắt, nên không lọc hay parse được (thấy khi chạy `data.script` thật: 100/100 bản ghi không parse được).
 - **Công cụ học được** giữ `_filter` trong tham số các bước; bỏ qua bước `data.*` vì chúng gắn với result_id của một lượt.
+
+## Đợt 20 — 2026-11-11: công cụ chuẩn hóa do agent đề xuất, đếm phía máy chủ
+
+| Lượt thật (log cmp-backend devtest) | Token xử lý | Lệnh công cụ | Ghi chú |
+| --- | --- | --- | --- |
+| Trước đợt 19 | 326.664 | 7 | `search_logs` 228.574 ký tự vào context |
+| Sau đợt 19 | 22.774 (+ lượt chạy tiếp) | 4 | `_filter`, result_id |
+| Dùng lại công cụ chuẩn hóa | ~19.800 (phần lớn cache) | 1 | đếm đúng trên toàn bộ 7.009 bản ghi |
+
+- **`data.propose_tool`:** agent đề xuất công cụ chuẩn hóa từ các bước đã chốt (không giữ bước thử sai), giá trị thay đổi thành tham số. Công cụ luôn ở trạng thái đề xuất; chủ sở hữu (cá nhân) hoặc admin (tenant) xem các bước rồi bật. Trang công cụ hiển thị từng bước, code giữ xuống dòng, cảnh báo khi có `data.script`.
+- **`{{step:N}}`:** bước `data.query`/`data.script` trong công cụ học được đọc kết quả đầy đủ của bước trước (lưu thành result_id). Chỉ công cụ local được tham chiếu, nên kết quả untrusted không lọt vào tham số của lệnh gọi ra ngoài. Bước đã được bước sau xử lý chỉ trả result_id, không đổ dữ liệu thô vào context.
+- **Script trong công cụ đã duyệt chạy không hỏi lại:** code cố định đã được người có quyền xem khi bật công cụ (công cụ tenant: admin; cá nhân: chính chủ khi tenant cho tự duyệt). Script viết trong chat vẫn luôn phải duyệt.
+- **`count_logs` (Elasticsearch):** đếm và nhóm bằng aggregation trên toàn bộ bản ghi khớp; field text tự thử bản `.keyword` (cả khi Elasticsearch báo lỗi lẫn khi trả 0 nhóm). Trước đó agent đếm bằng `search_logs` size 5000 nhưng connector chỉ trả 100 bản ghi, nên số đếm sai mà không ai biết; nay `_filter` cảnh báo khi chỉ lọc trên một phần của tổng số khớp.
+- **Hết số bước không còn bỏ cả lượt:** khi chạm giới hạn (nâng từ 8 lên 12 bước), model buộc phải tổng kết những gì đã có. Trước đây lượt 15 lệnh chỉ trả "vượt số bước tối đa".

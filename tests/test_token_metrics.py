@@ -88,3 +88,15 @@ def test_run_task_saves_usage_rows(users, monkeypatch):
     with db.session() as conn:
         rows = conn.execute("SELECT purpose, input_tokens FROM llm_call WHERE episode_id=?", (ep["id"],)).fetchall()
     assert [(r["purpose"], r["input_tokens"]) for r in rows] == [("route", 10)]
+
+
+def test_step_limit_forces_a_summary_instead_of_failing(monkeypatch):
+    from kagent.config import settings
+    monkeypatch.setattr(settings, "max_agent_steps", 2)
+    loop = NS(content=[use("k8s__list_pods", {})], stop_reason="tool_use", usage=usage(), model="m")
+    p, fake = provider([loop, loop, NS(content=[text("Tóm tắt: đã xem pod, chưa xong phần log.")], stop_reason="end_turn", usage=usage(), model="m")])
+    out = p.run_agent("x", "", [{"tool": "k8s.list_pods", "description": "d", "input_schema": {"type": "object", "properties": {}}}],
+                      lambda n, a: {"status": "ok", "result": {}})
+    assert out["answer"].endswith("Tóm tắt: đã xem pod, chưa xong phần log.")
+    last = fake.calls[-1]
+    assert last["tool_choice"] == {"type": "none"} and last["messages"][-1]["content"][-1]["text"] == llm.WRAP_UP

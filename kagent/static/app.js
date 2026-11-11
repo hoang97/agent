@@ -410,12 +410,18 @@ function learnedToolsSection(personalOnly) {
     const params = Object.entries(t.params);
     return h("div", { class: "card" },
       h("div", { class: "tool-head" }, h("code", {}, t.name), badge(t.status), h("span", { class: "badge " + tierClass(t.risk_tier) }, t.risk_tier),
-        h("span", { class: "badge" }, t.origin === "auto" ? "tự đề xuất" : "lưu từ chat"),
+        h("span", { class: "badge" }, { auto: "tự đề xuất", agent: "agent đề xuất", manual: "lưu từ chat" }[t.origin] || t.origin),
         t.success_rate !== null && h("span", { class: "small" }, `thành công ${Math.round(t.success_rate * 100)}% trên ${t.uses} lần`), h("span", { class: "spacer" }), actions),
       h("div", { class: "small" }, t.description), h("div", { class: "small" }, "Các bước: ", t.flow),
       params.length > 0 && h("div", { class: "small" }, "Tham số: " + params.map(([k, v]) => `${k} (${v.type}${v.description ? `, ${v.description}` : ""})`).join("; ")),
       t.note && h("div", { class: "small warn-text" }, t.note),
-      h("details", {}, h("summary", { class: "small" }, "Chi tiết các bước"), h("pre", {}, JSON.stringify(t.steps, null, 1))));
+      t.status === "proposed" && t.steps.some((st) => st.tool.endsWith(".script")) && h("div", { class: "small warn-text" },
+        "Có bước data.script: sau khi duyệt, code bên dưới chạy mỗi lần dùng công cụ mà không hỏi lại. Hãy đọc kỹ code."),
+      h("details", { open: t.status === "proposed" }, h("summary", { class: "small" }, "Chi tiết các bước"),
+        t.steps.map((st, i) => h("div", { class: "learned-step" }, h("div", { class: "small" }, `${i + 1}. `, h("code", {}, st.tool)),
+          Object.entries(st.args).map(([k, v]) => typeof v === "string" && v.includes("\n")
+            ? h("div", {}, h("span", { class: "muted small" }, k + ":"), h("pre", { class: "approval-code" }, v))
+            : h("div", { class: "small" }, h("span", { class: "muted" }, k + ": "), h("code", {}, typeof v === "string" ? v : JSON.stringify(v))))))));
   }
   load().catch((e) => toast(e.message, true));
   return h("div", {}, h("p", { class: "small" }, "Mỗi bước của công cụ học được vẫn đi qua gateway với quyền của người gọi, nên không tạo thêm quyền. Tỷ lệ thành công tụt dưới 50% thì công cụ tự tắt."), box);

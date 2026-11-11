@@ -86,7 +86,7 @@ def test_builtin_data_connection_exists_for_every_tenant(users):
     with db.session() as conn:
         for t in conn.execute("SELECT id FROM tenant").fetchall():
             tools = {r["tool"]: (r["enabled"], r["risk_tier"]) for r in conn.execute("SELECT tool, enabled, risk_tier FROM tool_registry WHERE tenant_id=? AND template='data'", (t["id"],))}
-            assert tools == {"data.query": (1, "R0"), "data.script": (1, "R4")}
+            assert tools == {"data.query": (1, "R0"), "data.script": (1, "R4"), "data.propose_tool": (1, "R2")}
 
 
 def test_script_needs_approval_then_runs_in_sandbox(users):
@@ -162,3 +162,86 @@ def test_elasticsearch_source_stays_an_object_so_fields_can_be_grouped(infra):
     hits = elasticsearch.search_logs({"_allow_private": False, "url": "https://es.test:9200", "api_key": fakes.ES_KEY}, {"query": "error"})["hits"]
     assert isinstance(hits[0]["source"], dict)
     assert datafilter.apply({"hits": hits}, {"group_by": "source.level"})["groups"] == [{"key": "error", "count": 1}, {"key": "warn", "count": 1}]
+
+
+# ---------- công cụ chuẩn hóa do agent đề xuất ----------
+
+def _propose(users, steps, params=None, scope="user"):
+    with db.session() as conn:
+        return gateway.invoke(conn, _ctx(users), "data.propose_tool",
+                              {"name": "Đếm lỗi theo loại", "description": "đếm log ERROR theo logger", "steps": steps, "params": params or {}, "scope": scope})
+
+
+PIPELINE = [{"tool": "logs.search_logs", "args": {"query": "{{query}}", "_filter": {"fields": ["source"]}}},
+            {"tool": "data.query", "args": {"result_id": "{{step:1}}", "group_by": "source.level"}}]
+
+
+def test_agent_proposes_tool_that_waits_for_review(users):
+    step = _propose(users, PIPELINE, {"query": {"type": "string", "description": "query string"}})
+    assert step["status"] == "ok" and step["result"]["status"] == "proposed"
+    with db.session() as conn:
+        row = conn.execute("SELECT * FROM learned_tool WHERE name=?", ("learned.dem_loi_theo_loai",)).fetchone()
+    assert row["origin"] == "agent" and row["status"] == "proposed" and row["scope"].startswith("user:")
+
+
+@pytest.mark.parametrize("steps, message", [
+    ([{"tool": "logs.search_logs", "args": {"query": "x"}}, {"tool": "k8s.list_pods", "args": {"namespace": "{{step:1}}"}}], "chỉ công cụ data"),
+    ([{"tool": "data.query", "args": {"result_id": "{{step:1}}"}}], "bước đứng trước"),
+])
+def test_step_refs_only_feed_local_tools(users, steps, message):
+    step = _propose(users, steps)
+    assert step["status"] == "error" and message in step["result"]["error"]
+
+
+def test_reviewed_pipeline_runs_and_returns_only_processed_result(users):
+    alice = users["alice"]
+    _propose(users, PIPELINE, {"query": {"type": "string", "description": "q"}})
+    with db.session() as conn:
+        tool = conn.execute("SELECT id FROM learned_tool WHERE name='learned.dem_loi_theo_loai'").fetchone()["id"]
+    assert alice.patch(f"/api/learned-tools/{tool}", json={"status": "active"}).status_code == 200
+    with db.session() as conn:
+        step = gateway.invoke(conn, _ctx(users), "learned.dem_loi_theo_loai", {"query": "error"})
+    assert step["status"] == "ok", step
+    first, second = step["result"]["steps"]
+    assert set(first["result"]) == {"result_id"}  # dữ liệu thô không vào context
+    assert second["result"]["groups"] == [{"key": "error", "count": 1}, {"key": "warn", "count": 1}]
+
+
+def test_script_in_reviewed_tool_runs_without_asking_again(users):
+    alice = users["alice"]
+    steps = [{"tool": "logs.search_logs", "args": {"query": "error"}},
+             {"tool": "data.script", "args": {"result_ids": ["{{step:1}}"], "code": "result = len(list(inputs.values())[0]['hits'])"}}]
+    _propose(users, steps)
+    with db.session() as conn:
+        tool = conn.execute("SELECT id FROM learned_tool WHERE name='learned.dem_loi_theo_loai'").fetchone()["id"]
+        pending = gateway.invoke(conn, _ctx(users), "data.script", {"result_ids": ["r_000000000000"], "code": "result = 1"})
+    assert pending["status"] == "pending"  # script viết trong chat vẫn phải duyệt
+    alice.patch(f"/api/learned-tools/{tool}", json={"status": "active"})
+    with db.session() as conn:
+        step = gateway.invoke(conn, _ctx(users), "learned.dem_loi_theo_loai", {})
+    assert step["status"] == "ok" and step["result"]["steps"][1]["result"] == {"result": 2, "stdout": ""}
+    assert step["steps"][1]["reasons"] == ["bước của công cụ học được đã được duyệt"]
+
+
+def test_count_logs_aggregates_all_matches_and_falls_back_to_keyword(infra):
+    from kagent.connectors import elasticsearch
+    import fakes
+    p = {"_allow_private": False, "url": "https://es.test:9200", "api_key": fakes.ES_KEY}
+    out = elasticsearch.count_logs(p, {"query": "*", "group_by": "level"})
+    assert out["total"] == 120 and out["group_by"] == "level.keyword"
+    assert out["buckets"] == [{"key": "error", "count": 80}, {"key": "warn", "count": 40}]
+    assert elasticsearch.count_logs(p, {"query": "*"}) == {"index": "logs-*", "total": 120}
+
+
+def test_filter_warns_when_counting_a_partial_page():
+    out = datafilter.apply({"total": 7077, "hits": [{"level": "ERROR"}] * 100}, {"group_by": "level"})
+    assert "100/7077" in out["warning"] and out["groups"] == [{"key": "ERROR", "count": 100}]
+    assert "warning" not in datafilter.apply({"total": 2, "hits": [{"a": 1}, {"a": 2}]}, {})
+
+
+def test_count_logs_retries_keyword_when_text_field_gives_no_buckets(infra):
+    from kagent.connectors import elasticsearch
+    import fakes
+    p = {"_allow_private": False, "url": "https://es.test:9200", "api_key": fakes.ES_KEY}
+    out = elasticsearch.count_logs(p, {"query": "*", "group_by": "module"})
+    assert out["group_by"] == "module.keyword" and out["buckets"]

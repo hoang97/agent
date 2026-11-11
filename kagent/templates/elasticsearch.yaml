@@ -25,6 +25,23 @@ tools:
         minutes: {type: integer}
         size: {type: integer}
 
+  - name: count_logs
+    description: >-
+      Đếm số log khớp query trong N phút gần nhất, tùy chọn nhóm theo một trường (group_by, ví dụ kubernetes.pod_name hoặc module)
+      bằng aggregation trên toàn bộ bản ghi khớp. Dùng cái này để đếm hoặc thống kê thay vì search_logs với size lớn.
+    handler: elasticsearch:count_logs
+    action_class: read
+    blast_radius: namespace
+    data_sensitivity: personal
+    untrusted_output: true
+    input_schema:
+      properties:
+        query: {type: string}
+        index: {type: string}
+        minutes: {type: integer}
+        group_by: {type: string}
+        buckets: {type: integer}
+
   - name: list_indices
     description: Liệt kê index, số tài liệu và dung lượng
     handler: elasticsearch:list_indices

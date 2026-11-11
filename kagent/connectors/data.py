@@ -117,3 +117,15 @@ def script(p, args):
     if out.get("error"):
         raise ConnectorError(f"script lỗi: {out['error'][:500]}")
     return {"result": out["result"], "stdout": out["stdout"]}
+
+
+def propose_tool(p, args):
+    from .. import learned
+    with db.session() as conn:
+        try:
+            row = learned.propose_tool(conn, p["_tenant_id"], p.get("_user_id"), name=need(args, "name"), description=str(args.get("description") or ""),
+                                       steps=args.get("steps"), params=args.get("params") or {}, scope=args.get("scope") or "user")
+        except learned.LearnedError as exc:
+            raise ConnectorError(str(exc)) from exc
+    return {"name": row["name"], "status": row["status"], "scope": row["scope"], "steps": len(row["steps"]),
+            "note": "Đã tạo công cụ ở trạng thái đề xuất; người có quyền xem các bước ở trang Công cụ & Chính sách rồi bật."}

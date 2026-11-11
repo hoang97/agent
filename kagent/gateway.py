@@ -158,6 +158,7 @@ class CallContext:
     independent: float = 0.5
     tokens: list = field(default_factory=list)
     roles: set | None = None  # vai trò của người yêu cầu trong tenant; None = tra cứu khi gọi
+    reviewed: bool = False  # đang chạy bước của công cụ học được đã được người có quyền xem và bật
 
 
 def user_roles(conn, tenant_id: str, user_id: str) -> set[str]:
@@ -350,6 +351,10 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
     if decision.outcome == "block":
         audit(conn, ctx, tool_name, args, tier, conf, "blocked", decision.reasons, "blocked")
         return {**step, "decision": "blocked", "status": "blocked"}
+    if decision.outcome == "ask" and tool.local and ctx.reviewed and not forced:
+        # Code của data.script nằm cố định trong công cụ đã được duyệt; chỉ dữ liệu đầu vào thay đổi giữa các lần chạy.
+        decision = Decision("auto", reasons=["bước của công cụ học được đã được duyệt"])
+        step["reasons"] = decision.reasons
 
     # Khi tenant cho tự duyệt, một lần xác nhận của chính người yêu cầu là đủ, kể cả ô ma trận cần 2 người.
     required = 1 if tenant["self_approve"] else decision.required
