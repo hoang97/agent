@@ -310,7 +310,7 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
     tenant = conn.execute("SELECT change_freeze, write_quota_daily, self_approve FROM tenant WHERE id=?", (ctx.tenant_id,)).fetchone()
     forced: list[str] = []
     if ctx.tainted:
-        forced.append("kế hoạch chịu ảnh hưởng từ nội dung untrusted")
+        forced.append(UNTRUSTED_REASON)
     if meta["action_class"] != "read":
         unseen = _unseen_object(conn, ctx, args)
         if unseen:
@@ -331,7 +331,7 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
 
     # Khi tenant cho tự duyệt, một lần xác nhận của chính người yêu cầu là đủ, kể cả ô ma trận cần 2 người.
     required = 1 if tenant["self_approve"] else decision.required
-    if decision.outcome == "ask" and required == 1 and not forced \
+    if decision.outcome == "ask" and required == 1 and grant_covers(grant_policy(conn, ctx.tenant_id), ctx.env, meta["action_class"], conf, forced) \
             and policy["environments"][ctx.env]["auto_execute"] != "off" and _has_grant(conn, ctx, tool_name, args):
         decision = Decision("auto", reasons=["dùng quyền đã duyệt cho phiên"])
         step["reasons"] = decision.reasons
@@ -368,6 +368,53 @@ def self_approve_enabled(conn, tenant_id: str) -> bool:
     return bool(r and r["self_approve"])
 
 
+UNTRUSTED_REASON = "kế hoạch chịu ảnh hưởng từ nội dung untrusted"
+GRANT_MODES = ("off", "read", "all")
+# Grant "cho phép trong 1 giờ" có được vượt qua lý do untrusted không, theo môi trường. Tenant admin chỉnh được.
+DEFAULT_GRANT_POLICY = {"dev": {"untrusted": "read", "min_confidence": 0.0},
+                        "staging": {"untrusted": "read", "min_confidence": 0.5},
+                        "prod": {"untrusted": "off", "min_confidence": 0.8}}
+
+
+def check_grant_policy(policy: dict) -> dict:
+    """Gộp với mặc định và kiểm tra. 'all' ở prod bị cấm: log độc hại có thể lái agent gọi lệnh ghi mà không ai xác nhận."""
+    if not isinstance(policy, dict) or set(policy) - set(ENVS):
+        raise PolicyError(f"chính sách grant phải là object theo môi trường {list(ENVS)}")
+    merged = copy.deepcopy(DEFAULT_GRANT_POLICY)
+    for env, conf in policy.items():
+        if not isinstance(conf, dict) or set(conf) - {"untrusted", "min_confidence"}:
+            raise PolicyError(f"{env}: chỉ gồm untrusted và min_confidence")
+        mode = conf.get("untrusted", merged[env]["untrusted"])
+        value = conf.get("min_confidence", merged[env]["min_confidence"])
+        if mode not in GRANT_MODES:
+            raise PolicyError(f"{env}: untrusted phải thuộc {list(GRANT_MODES)}")
+        if env == "prod" and mode == "all":
+            raise PolicyError("prod không được cho grant phủ lệnh ghi khi kế hoạch chịu ảnh hưởng từ nội dung untrusted")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+            raise PolicyError(f"{env}: min_confidence phải nằm trong 0..1")
+        merged[env] = {"untrusted": mode, "min_confidence": float(value)}
+    return merged
+
+
+def grant_policy(conn, tenant_id: str) -> dict:
+    r = conn.execute("SELECT grant_policy FROM tenant WHERE id=?", (tenant_id,)).fetchone()
+    try:
+        return check_grant_policy(json.loads(r["grant_policy"]) if r and r["grant_policy"] else {})
+    except (PolicyError, ValueError):
+        return copy.deepcopy(DEFAULT_GRANT_POLICY)
+
+
+def grant_covers(policy: dict, env: str, action_class: str, confidence: float, forced: list[str]) -> bool:
+    """Grant phiên có thay được việc hỏi lại không. Chỉ lý do untrusted mới có thể được grant vượt qua."""
+    if not forced:
+        return True
+    if any(reason != UNTRUSTED_REASON for reason in forced):
+        return False
+    rule = policy.get(env) or {"untrusted": "off", "min_confidence": 1.0}
+    allowed = rule["untrusted"] == "all" or (rule["untrusted"] == "read" and action_class == "read")
+    return allowed and confidence >= rule["min_confidence"]
+
+
 def can_decide(req: dict, user_id: str, roles: set[str], is_org_admin: bool, self_approve: bool) -> bool:
     """Ai được quyết định yêu cầu này: chính người yêu cầu (nếu tenant cho tự duyệt) hoặc người có quyền duyệt."""
     if req["status"] != "pending" or user_id in req["decided_by"]:
@@ -393,6 +440,7 @@ def decide(conn, tenant_id: str, approval_id: str, user_id: str, roles: set[str]
     if action not in ("approve_once", "approve_session", "deny"):
         raise ApprovalError("hành động không hợp lệ")
     expire_approvals(conn, tenant_id)
+    also: list[str] = []
     with db.tx(conn):
         req = db.row(conn.execute("SELECT * FROM approval_request WHERE id=? AND tenant_id=?", (approval_id, tenant_id)).fetchone(),
                      "args", "decided_by", "reasons")
@@ -431,8 +479,36 @@ def decide(conn, tenant_id: str, approval_id: str, user_id: str, roles: set[str]
                     conn.execute("INSERT INTO approval_grant(id,tenant_id,user_id,tool,env,namespace,expires_at) VALUES (?,?,?,?,?,?,?)",
                                  (db.new_id(), tenant_id, req["requester_id"], req["tool"], req["env"], req["args"].get("namespace"),
                                   db.later(minutes=settings.grant_ttl_minutes)))
-    return db.row(conn.execute("SELECT * FROM approval_request WHERE id=?", (approval_id,)).fetchone(),
-                  "args", "decided_by", "reasons", "dry_run", "result")
+                    also = _run_covered_siblings(conn, tenant_id, req, meta, user_id)
+    out = db.row(conn.execute("SELECT * FROM approval_request WHERE id=?", (approval_id,)).fetchone(),
+                 "args", "decided_by", "reasons", "dry_run", "result")
+    out["also_approved"] = also
+    return out
+
+
+def _run_covered_siblings(conn, tenant_id: str, req: dict, meta, user_id: str) -> list[str]:
+    """Grant vừa cấp phủ luôn các lệnh đọc cùng loại đang chờ của cùng người yêu cầu, để không phải bấm duyệt từng lệnh."""
+    if meta["action_class"] != "read":
+        return []
+    policy = grant_policy(conn, tenant_id)
+    done = []
+    rows = conn.execute("SELECT * FROM approval_request WHERE tenant_id=? AND requester_id=? AND tool=? AND env=? AND status='pending' "
+                        "AND required_approvals=1 AND id!=? ORDER BY created_at", (tenant_id, req["requester_id"], req["tool"], req["env"], req["id"])).fetchall()
+    for r in rows:
+        other = db.row(r, "args", "decided_by", "reasons")
+        if other["args"].get("namespace") != req["args"].get("namespace"):
+            continue
+        forced = [x for x in other["reasons"] if x == UNTRUSTED_REASON]
+        if not grant_covers(policy, other["env"], meta["action_class"], other["confidence"], forced):
+            continue
+        status, result = _execute(conn, tenant_id, other["env"], other["tool"], other["args"])
+        decided = other["decided_by"] + [user_id]
+        conn.execute("UPDATE approval_request SET status='approved', decided_by=?, decided_at=?, result=? WHERE id=?",
+                     (json.dumps(decided), db.iso(), json.dumps({"status": status, "result": result}, ensure_ascii=False), other["id"]))
+        ctx = CallContext(tenant_id, other["requester_id"], other["env"], other["original_request"], other["episode_id"])
+        audit(conn, ctx, other["tool"], other["args"], other["risk_tier"], other["confidence"], "approved", ["dùng quyền đã duyệt cho phiên"], status)
+        done.append(other["id"])
+    return done
 
 
 def plan_overlap(task: str, tool_name: str, args: dict) -> float:

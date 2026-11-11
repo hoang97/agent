@@ -134,6 +134,15 @@ def _untrusted_tool(conn, tenant_id: str, tool: str) -> bool:
     return bool(r and r["untrusted_output"])
 
 
+APPROVED_RESULT_CHARS = 24000  # tổng cho mọi lệnh đã duyệt của lượt mới nhất
+CONTINUE_TASK = ("Các lệnh chờ duyệt ở lượt trước đã được xử lý; kết quả nằm trong lịch sử ngay trên. "
+                 "Tiếp tục nhiệm vụ trước đó dựa trên các kết quả này, không gọi lại những lệnh đã chạy.")
+
+
+def _clip_chars(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + f"…(đã cắt {len(text) - limit} ký tự)"
+
+
 def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
     """Các lượt gần nhất trong ngân sách cố định, gồm kết quả các lệnh đã được duyệt sau đó."""
     empty = {"messages": [], "tainted": False, "last_task": ""}
@@ -144,16 +153,20 @@ def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
     turns: list[tuple[str, str]] = []
     tainted = False
     used, limit = 0, settings.budget_history * 4
-    for r in rs:
+    for i, r in enumerate(rs):
         ep = db.row(r, "input", "trace")
         answer = ep["output"] or "(không có nội dung)"
-        approvals = db.rows(conn.execute("SELECT tool, status, result, deny_reason FROM approval_request WHERE episode_id=? AND tenant_id=?",
-                                         (ep["id"], tenant_id)).fetchall(), "result")
+        approvals = db.rows(conn.execute("SELECT tool, args, status, result, deny_reason FROM approval_request WHERE episode_id=? AND tenant_id=? "
+                                         "ORDER BY created_at, rowid", (ep["id"], tenant_id)).fetchall(), "args", "result")
+        # Lượt mới nhất nhận đủ kết quả lệnh vừa duyệt để agent đọc được; lượt cũ hơn chỉ cần bản tóm lược.
+        cap = max(1000, APPROVED_RESULT_CHARS // max(1, len(approvals))) if i == 0 else 300
         for a in approvals:
-            detail = json.dumps(a["result"], ensure_ascii=False)[:300] if a["result"] else (a["deny_reason"] or "")
-            answer += f"\n[Lệnh {a['tool']}: {a['status']} {detail}]".rstrip()
+            detail = _clip_chars(json.dumps(a["result"], ensure_ascii=False), cap) if a["result"] else (a["deny_reason"] or "")
+            if a["result"] and _untrusted_tool(conn, tenant_id, a["tool"]):
+                detail = f"<untrusted>{detail}</untrusted>"
+            answer += f"\n[Lệnh {a['tool']} {json.dumps(a['args'], ensure_ascii=False)}: {a['status']} {detail}]".rstrip()
         size = len(ep["input"]["task"]) + len(answer)
-        if used + size > limit:
+        if used + size > limit and turns:  # lượt mới nhất luôn được giữ
             break
         used += size
         turns.insert(0, (ep["input"]["task"], answer))
@@ -165,7 +178,8 @@ def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
 
 
 def run_task(conn, tenant_id: str, user_id: str, task: str, env: str = "dev", project: str | None = None, agent_id: str = "ops-agent",
-             conversation_id: str | None = None, episode_id: str | None = None, on_event=None, cancelled=None) -> dict:
+             conversation_id: str | None = None, episode_id: str | None = None, on_event=None, cancelled=None,
+             continuation_of: str | None = None) -> dict:
     """on_event nhận các sự kiện tiến trình để stream; cancelled là threading.Event do nút dừng đặt."""
     tenant = conn.execute("SELECT token_quota_daily FROM tenant WHERE id=?", (tenant_id,)).fetchone()
     if tokens_today(conn, tenant_id) >= tenant["token_quota_daily"]:
@@ -268,7 +282,7 @@ def run_task(conn, tenant_id: str, user_id: str, task: str, env: str = "dev", pr
         output = f"Lỗi khi gọi model: {exc}"
         outcome, outcome_src = "failure", "metric"
 
-    input_doc = {"task": task, "entities": entities, "project": project}
+    input_doc = {"task": task, "entities": entities, "project": project, **({"continuation_of": continuation_of} if continuation_of else {})}
     conn.execute(
         "INSERT INTO episode(id,tenant_id,user_id,agent_id,scope,task_type,env,started_at,input,trace,output,ku_used,tokens,outcome,outcome_src,conversation_id) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",

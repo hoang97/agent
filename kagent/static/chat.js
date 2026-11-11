@@ -140,13 +140,15 @@ function approvalCard(a, onDecide) {
   return h("div", { class: "approval " + (failed ? "bad" : CLASS[a.status] || "") },
     h("div", { class: "approval-head" }, h("strong", {}, heading), badge(failed ? "error" : a.status)),
     h("div", {}, h("code", {}, a.tool), ` ở ${a.env} · ${a.risk_tier} · tin cậy ${a.confidence}`),
+    a.args && Object.keys(a.args).length > 0 && h("div", { class: "approval-args" },
+      Object.entries(a.args).map(([k, v]) => h("div", {}, h("span", { class: "muted" }, k + ": "), h("code", {}, typeof v === "string" ? v : JSON.stringify(v))))),
     a.reasons.length > 0 && h("div", { class: "small" }, a.reasons.join("; ")),
     a.status === "pending" && a.dry_run && h("div", { class: "small" + (a.dry_run.error ? " warn-text" : "") }, (a.dry_run.error ? "Chạy thử báo lỗi, lệnh nhiều khả năng sẽ thất bại: " : "Chạy thử: ") + (a.dry_run.error || JSON.stringify(a.dry_run))),
     a.status === "pending" && a.rollback_hint && h("div", { class: "small" }, "Cách hoàn tác: " + a.rollback_hint),
     a.status === "pending" && (a.can_decide && onDecide ? approvalActions(a, onDecide)
       : h("div", { class: "small" }, `Đã có ${a.decided_by.length}/${a.required_approvals} người duyệt. Đang chờ người có quyền duyệt tại trang Duyệt lệnh.`)),
     a.deny_reason && h("div", { class: "small" }, "Lý do từ chối: " + a.deny_reason),
-    result && h("pre", {}, JSON.stringify(result, null, 1)));
+    result && h("details", { class: "approval-result" }, h("summary", {}, "Kết quả"), h("pre", {}, JSON.stringify(result, null, 1))));
 }
 
 function approvalActions(a, onDecide) {
@@ -197,6 +199,10 @@ function chatView(main) {
     return h("div", { class: "msg user" }, h("div", { class: "bubble" }, text));
   }
 
+  function continuationNote() {
+    return h("div", { class: "continuation-note small" }, "↻ Agent tiếp tục với kết quả các lệnh vừa duyệt");
+  }
+
   function actionsRow(m) {
     const row = h("div", { class: "actions" });
     const feedback = (outcome, final) => guard(async () => {
@@ -244,7 +250,13 @@ function chatView(main) {
     const body = h("div", { class: "prose" });
     if (m.error) body.append(h("div", { class: "msg-error" }, m.output));
     else body.append(renderMarkdown(m.output || ""));
-    const el = h("div", { class: "msg assistant", "data-ep": m.id }, activityView(m.steps, null), m.approvals.map((a) => approvalCard(a, decide)), body,
+    const open = m.approvals.filter((a) => a.status === "pending" && a.can_decide);
+    const bulk = open.length > 1 && h("div", { class: "row approval-bulk" }, h("span", { class: "small" }, `${open.length} lệnh đang chờ duyệt`),
+      h("button", { type: "button", onclick: guard(() => decideAll(m, open, "approve_once")) }, "Chạy tất cả"),
+      h("button", { type: "button", class: "ghost", onclick: guard(() => decideAll(m, open, "approve_session")), title: "Cùng công cụ và namespace, trong 1 giờ" }, "Cho phép tất cả trong 1 giờ"));
+    const canContinue = !m.continued && m.approvals.length > 0 && !m.approvals.some((a) => a.status === "pending") && m.approvals.some((a) => a.status === "approved");
+    const resume = canContinue && h("div", { class: "row" }, h("button", { type: "button", class: "ghost", onclick: () => send(null, m.id) }, "Tiếp tục với kết quả các lệnh đã duyệt"));
+    const el = h("div", { class: "msg assistant", "data-ep": m.id }, activityView(m.steps, null), bulk, m.approvals.map((a) => approvalCard(a, decide)), resume, body,
       m.cancelled && h("div", { class: "small" }, "Đã dừng"), actionsRow(m));
     return el;
   }
@@ -252,9 +264,33 @@ function chatView(main) {
   async function decide(a, action, reason) {
     const r = await api("POST", `/api/approvals/${a.id}/decide`, { action, reason });
     const failed = r.result && r.result.status === "error";
-    toast(r.status === "pending" ? "Đã ghi nhận, cần thêm người duyệt" : r.status === "denied" ? "Đã từ chối lệnh" : failed ? "Lệnh đã chạy nhưng báo lỗi" : "Đã chạy lệnh", failed);
+    const extra = r.also_approved && r.also_approved.length ? ` (và ${r.also_approved.length} lệnh cùng loại)` : "";
+    toast(r.status === "pending" ? "Đã ghi nhận, cần thêm người duyệt" : r.status === "denied" ? "Đã từ chối lệnh" : failed ? "Lệnh đã chạy nhưng báo lỗi" : "Đã chạy lệnh" + extra, failed);
+    await refreshAndContinue();
+  }
+
+  async function decideAll(m, list, action) {
+    let done = 0;
+    for (const a of list) {
+      try { const r = await api("POST", `/api/approvals/${a.id}/decide`, { action }); done += 1 + (r.also_approved ? r.also_approved.length : 0); }
+      catch (e) { if (!/đã ở trạng thái/.test(e.message)) { toast(e.message, true); break; } }  // lệnh đã được grant phủ thì bỏ qua
+    }
+    toast(`Đã chạy ${done} lệnh`);
+    await refreshAndContinue();
+  }
+
+  // Khi lượt mới nhất không còn lệnh chờ và đã có lệnh chạy, agent tự viết tiếp với kết quả đó. Server từ chối nếu đã chạy tiếp rồi.
+  async function refreshAndContinue() {
     const data = await api("GET", `/api/conversations/${state.conversationId}`);
-    for (const m of data.messages) if (blocks.has(m.id) && m.approvals.some((x) => x.id === a.id)) replaceBlock(m);
+    for (const m of data.messages) if (blocks.has(m.id)) replaceBlock(m);
+    maybeContinue(data.messages);
+  }
+
+  function maybeContinue(messages) {
+    const last = messages[messages.length - 1];
+    if (!last || activeRun || last.continued || !last.approvals.length) return;
+    if (last.approvals.some((a) => a.status === "pending") || !last.approvals.some((a) => a.status === "approved")) return;
+    send(null, last.id);
   }
 
   function replaceBlock(m) {
@@ -266,8 +302,8 @@ function chatView(main) {
   }
 
   function addMessage(m) {
-    lastTask = m.task;
-    thread.append(userBubble(m.task));
+    if (!m.continuation) lastTask = m.task;
+    thread.append(m.continuation ? continuationNote() : userBubble(m.task));
     const el = assistantBlock(m);
     blocks.set(m.id, el);
     thread.append(el);
@@ -294,12 +330,12 @@ function chatView(main) {
     try { await api("POST", `/api/chat/${activeRun.id}/cancel`); } catch (e) { toast(e.message, true); sendBtn.disabled = false; }
   }
 
-  async function send(text) {
+  async function send(text, continueEpisode) {
     if (activeRun) return;
     const empty = thread.querySelector(".empty");
     if (empty) empty.remove();
-    lastTask = text;
-    thread.append(userBubble(text));
+    if (continueEpisode) thread.append(continuationNote());
+    else { lastTask = text; thread.append(userBubble(text)); }
     const typing = h("div", { class: "typing", "aria-label": "Agent đang trả lời" }, h("i"), h("i"), h("i"));
     const live = { text: "", steps: [], running: [] };
     const activitySlot = h("div");
@@ -353,7 +389,8 @@ function chatView(main) {
     };
 
     try {
-      const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json", "X-Tenant-Id": state.tenant.id }, credentials: "same-origin", body: JSON.stringify({ message: text, conversation_id: state.conversationId, env: env.value }) });
+      const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json", "X-Tenant-Id": state.tenant.id }, credentials: "same-origin", body: JSON.stringify(continueEpisode ? { continue_episode: continueEpisode, conversation_id: state.conversationId, env: env.value }
+        : { message: text, conversation_id: state.conversationId, env: env.value }) });
       if (!res.ok) {
         const data = await res.json().catch(() => null);
         fail(typeof (data && data.detail) === "string" ? data.detail : `Lỗi ${res.status}`);
@@ -399,6 +436,7 @@ function chatView(main) {
           }
           pending = pending || m.approvals.some((a) => a.status === "pending");
         }
+        if (!pending) maybeContinue(data.messages);
       } catch { pending = true; }
       if (pending) setTimeout(tick, 5000); else polling = false;
     };

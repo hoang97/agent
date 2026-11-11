@@ -402,10 +402,33 @@ _runs_lock = threading.Lock()
 
 
 class ChatBody(BaseModel):
-    message: str = Field(min_length=1, max_length=8000)
+    message: str = Field(default="", max_length=8000)
     conversation_id: str | None = None
+    continue_episode: str | None = None  # chạy tiếp lượt này sau khi các lệnh chờ duyệt của nó đã được quyết định
     env: str = "dev"
     project: str | None = Field(default=None, max_length=64)
+
+
+def _continued(conn, tenant_id: str, episode_id: str) -> bool:
+    return conn.execute("SELECT 1 FROM episode WHERE tenant_id=? AND json_extract(input, '$.continuation_of')=? LIMIT 1",
+                        (tenant_id, episode_id)).fetchone() is not None
+
+
+def _check_continuable(conn, t: "Tenant", conversation_id: str, episode_id: str) -> str:
+    """Chỉ chạy tiếp lượt mới nhất của hội thoại, khi nó không còn lệnh chờ, có ít nhất một lệnh đã chạy, và chưa được chạy tiếp."""
+    latest = conn.execute("SELECT id FROM episode WHERE tenant_id=? AND conversation_id=? ORDER BY started_at DESC, rowid DESC LIMIT 1",
+                          (t.tenant_id, conversation_id)).fetchone()
+    if latest is None or latest["id"] != episode_id:
+        raise HTTPException(409, "chỉ chạy tiếp được lượt mới nhất của hội thoại")
+    counts = conn.execute("SELECT coalesce(sum(status='pending'),0) pending, coalesce(sum(status='approved'),0) approved "
+                          "FROM approval_request WHERE tenant_id=? AND episode_id=?", (t.tenant_id, episode_id)).fetchone()
+    if counts["pending"]:
+        raise HTTPException(409, "lượt này còn lệnh chờ duyệt")
+    if not counts["approved"]:
+        raise HTTPException(409, "lượt này không có lệnh nào đã được duyệt để chạy tiếp")
+    if _continued(conn, t.tenant_id, episode_id):
+        raise HTTPException(409, "lượt này đã được chạy tiếp")
+    return episode_id
 
 
 def _own_conversation(conn, t: Tenant, conversation_id: str) -> dict:
@@ -427,6 +450,13 @@ def chat(body: ChatBody, t: Tenant = Depends(current_tenant), conn=Depends(get_c
     if body.env not in gateway.ENVS:
         raise HTTPException(400, "môi trường không hợp lệ")
     message = body.message.strip()
+    continuation_of = None
+    if body.continue_episode:
+        if not body.conversation_id:
+            raise HTTPException(400, "thiếu hội thoại")
+        _own_conversation(conn, t, body.conversation_id)
+        continuation_of = _check_continuable(conn, t, body.conversation_id, body.continue_episode)
+        message = agent_mod.CONTINUE_TASK
     if not message:
         raise HTTPException(400, "nội dung trống")
     if body.conversation_id:
@@ -448,7 +478,7 @@ def chat(body: ChatBody, t: Tenant = Depends(current_tenant), conn=Depends(get_c
         try:
             with db.session() as worker_conn:
                 episode = agent_mod.run_task(worker_conn, t.tenant_id, t.user_id, message, body.env, body.project, conversation_id=conversation_id,
-                                             episode_id=run_id, on_event=events.put, cancelled=cancelled)
+                                             episode_id=run_id, on_event=events.put, cancelled=cancelled, continuation_of=continuation_of)
                 events.put({"type": "done", "conversation_id": conversation_id, "message": _chat_message(worker_conn, t, episode)})
         except agent_mod.QuotaExceeded as exc:
             events.put({"type": "error", "message": str(exc)})
@@ -505,7 +535,7 @@ def _chat_message(conn, t: "Tenant", ep: dict) -> dict:
             "task_type": ep["task_type"], "started_at": ep["started_at"], "tokens": ep["tokens"], "ku_used": len(ep["ku_used"]),
             "edited": ep["human_edit"] is not None, "cancelled": any(s["type"] == "cancelled" for s in ep["trace"]),
             "steps": [s for s in ep["trace"] if s["type"] == "tool_call"], "error": next((s["message"] for s in ep["trace"] if s["type"] == "error"), None),
-            "approvals": approvals}
+            "approvals": approvals, "continuation": bool(ep["input"].get("continuation_of")), "continued": _continued(conn, tenant_id, ep["id"])}
 
 
 @app.get("/api/conversations")
@@ -1005,7 +1035,8 @@ def policy_get(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     r = conn.execute("SELECT policy, auto_promote, change_freeze, self_approve FROM tenant WHERE id=?", (t.tenant_id,)).fetchone()
     overlay = json.loads(r["policy"])
     return {"overlay": overlay, "effective": gateway.merge_policy(overlay), "baseline": gateway.BASELINE,
-            "auto_promote": bool(r["auto_promote"]), "change_freeze": bool(r["change_freeze"]), "self_approve": bool(r["self_approve"])}
+            "auto_promote": bool(r["auto_promote"]), "change_freeze": bool(r["change_freeze"]), "self_approve": bool(r["self_approve"]),
+            "grant_policy": gateway.grant_policy(conn, t.tenant_id), "grant_ttl_minutes": settings.grant_ttl_minutes}
 
 
 class PolicyBody(BaseModel):
@@ -1027,6 +1058,7 @@ class TenantSettings(BaseModel):
     auto_promote: bool | None = None
     change_freeze: bool | None = None
     self_approve: bool | None = None
+    grant_policy: dict | None = None
 
 
 @app.patch("/api/tenant")
@@ -1039,6 +1071,13 @@ def tenant_patch(body: TenantSettings, t: Tenant = Depends(current_tenant), conn
     if body.self_approve is not None:
         conn.execute("UPDATE tenant SET self_approve=? WHERE id=?", (int(body.self_approve), t.tenant_id))
         log.info("tenant %s: %s đặt self_approve=%s", t.tenant_id, t.principal.username, body.self_approve)
+    if body.grant_policy is not None:
+        try:
+            merged = gateway.check_grant_policy(body.grant_policy)
+        except gateway.PolicyError as exc:
+            raise HTTPException(400, f"chính sách grant không hợp lệ: {exc}") from exc
+        conn.execute("UPDATE tenant SET grant_policy=? WHERE id=?", (json.dumps(merged), t.tenant_id))
+        log.info("tenant %s: %s đặt grant_policy=%s", t.tenant_id, t.principal.username, merged)
     return policy_get(t, conn)
 
 

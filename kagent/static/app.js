@@ -451,6 +451,31 @@ function personalSection() {
   return wrap;
 }
 
+const GRANT_MODE = { off: "không phủ", read: "chỉ lệnh đọc", all: "mọi lệnh" };
+
+function grantPolicyCard(p) {
+  const envs = ["dev", "staging", "prod"];
+  const controls = {};
+  const rows = envs.map((e) => {
+    const cur = p.grant_policy[e];
+    const mode = h("select", { "aria-label": `Phạm vi ở ${e}`, disabled: !isAdmin() },
+      Object.entries(GRANT_MODE).filter(([k]) => !(e === "prod" && k === "all")).map(([k, label]) => h("option", { value: k, selected: cur.untrusted === k }, label)));
+    const conf = h("input", { type: "number", min: 0, max: 1, step: 0.05, value: String(cur.min_confidence), "aria-label": `Tin cậy tối thiểu ở ${e}`, disabled: !isAdmin() });
+    controls[e] = { mode, conf };
+    return h("tr", {}, h("td", {}, e), h("td", {}, mode), h("td", {}, conf));
+  });
+  const save = guard(async () => {
+    const grant_policy = Object.fromEntries(envs.map((e) => [e, { untrusted: controls[e].mode.value, min_confidence: Number(controls[e].conf.value) }]));
+    await api("PATCH", "/api/tenant", { grant_policy });
+    toast("Đã lưu");
+    renderShell();
+  });
+  return h("div", { class: "card" },
+    h("p", { class: "small" }, "Khi kế hoạch của agent chịu ảnh hưởng từ nội dung untrusted (log, trang web), mọi lệnh đều phải hỏi. Bảng này quy định quyền \"Cho phép trong 1 giờ\" có được thay cho việc hỏi lại ở từng môi trường không, và điểm tin cậy tối thiểu của lệnh. Không có nội dung untrusted thì quyền này luôn có hiệu lực. Ở prod không cho phủ lệnh ghi."),
+    h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Môi trường"), h("th", {}, "Grant phủ khi có nội dung untrusted"), h("th", {}, "Tin cậy tối thiểu"))), h("tbody", {}, rows)),
+    isAdmin() && h("div", { class: "row" }, h("button", { onclick: save }, "Lưu")));
+}
+
 VIEWS.policy = async (main) => {
   const [tools, p] = await Promise.all([api("GET", "/api/tools"), api("GET", "/api/policy")]);
   const cellText = (c) => (typeof c === "string" ? ({ auto: "tự động", ask: "luôn hỏi", block: "chặn" }[c]) : c.ask_below !== undefined ? `hỏi nếu < ${c.ask_below}` : `hỏi, ${c.ask} người`);
@@ -469,6 +494,7 @@ VIEWS.policy = async (main) => {
     isAdmin() && h("div", { class: "row" }, h("button", { class: "ghost", onclick: setFlag("change_freeze", !p.change_freeze) }, p.change_freeze ? "Tắt change freeze" : "Bật change freeze"), h("button", { class: "ghost", onclick: setFlag("auto_promote", !p.auto_promote) }, p.auto_promote ? "Tắt tự động thăng hạng" : "Bật tự động thăng hạng"),
       h("button", { class: "ghost", onclick: setFlag("self_approve", !p.self_approve) }, p.self_approve ? "Bắt buộc người khác duyệt lệnh" : "Cho người dùng tự duyệt lệnh")),
     h("div", { class: "small" }, p.self_approve ? "Người dùng tự xác nhận lệnh cần duyệt của chính mình. Thay đổi công cụ dùng chung vẫn cần admin." : "Lệnh cần duyệt phải do người có quyền duyệt khác xác nhận; R3 ở prod cần 2 người.")),
+    h("h2", {}, `Cho phép trong ${p.grant_ttl_minutes} phút`), grantPolicyCard(p),
     h("h2", {}, "Thử quyết định"), h("div", { class: "card" }, h("div", { class: "row" }, simTool, simEnv, simConf, h("button", { class: "ghost", onclick: sim }, "Thử")), simOut),
     isAdmin() && h("h2", {}, "Overlay của tenant (chỉ được siết)"), isAdmin() && h("div", { class: "card" }, editor, h("div", { class: "row" }, h("button", { onclick: save }, "Lưu"))),
     h("h2", {}, "Công cụ học được"), learnedToolsSection(false),

@@ -35,7 +35,8 @@ mọi lệnh gọi công cụ đi qua gateway có phân mức rủi ro, multi-te
 | Tách `tenant_id` ở tầng truy vấn thay RLS | SQLite không có RLS; có test cô lập tenant | Bật RLS khi chuyển PostgreSQL |
 | Connector gọi thẳng REST API của từng hệ thống thay vì qua MCP server | Ít thành phần phải vận hành; cùng lớp gateway, audit và phân quyền | Thêm template kiểu `mcp` gọi MCP server qua HTTP |
 | Hai LLM provider: Claude và heuristic | Chạy được khi chưa có API key; provider heuristic cho kết quả xác định để kiểm thử | Đặt `ANTHROPIC_API_KEY` |
-| Sau khi duyệt lệnh, chỉ thực thi lệnh đó; kết quả vào lịch sử của lượt chat sau | Giữ MVP đơn giản, không tiếp tục vòng lặp LLM | Thêm resume theo `approval_request` |
+| Sau khi mọi lệnh chờ của một lượt đã được quyết định, agent tự chạy một lượt tiếp với kết quả đầy đủ của các lệnh đó (không resume giữa vòng lặp LLM) | Dùng lại luồng chat stream, không phải lưu trạng thái giữa chừng của model | Resume đúng vị trí trong vòng lặp tool |
+| Grant "cho phép trong 1 giờ" được vượt qua lý do untrusted theo cấu hình từng môi trường (`off` / `read` / `all` + tin cậy tối thiểu; mặc định dev `read`, staging `read` ≥ 0,5, prod `off`; prod cấm `all`). **Khác tài liệu kiến trúc theo quyết định của chủ dự án (2026-11-11)**: tài liệu ép hỏi mọi lệnh chịu ảnh hưởng từ nội dung untrusted | Đọc log làm cả hội thoại bị đánh dấu, mọi lệnh sau đều phải duyệt lại dù đã cấp grant | — |
 | FastAPI + JS thuần, không bước build | Triển khai đơn giản | — |
 
 ## Giai đoạn và commit

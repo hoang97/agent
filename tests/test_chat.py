@@ -94,7 +94,7 @@ def test_approval_result_visible_in_next_turn_history(users):
     cid = evs[0]["conversation_id"]
     with db.session() as conn:
         content = agent.load_history(conn, alice.tenant, cid)["messages"][1]["content"]
-    assert "[Lệnh k8s.scale: approved" in content
+    assert "[Lệnh k8s.scale {" in content and ": approved {" in content
     assert alice.get(f"/api/conversations/{cid}").json()["messages"][0]["approvals"][0]["status"] == "approved"
 
 

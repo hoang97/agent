@@ -100,6 +100,11 @@ header.top { display: flex; align-items: center; gap: 8px; padding: 8px 16px; mi
 .approval.bad { border-color: var(--bad); }
 .approval.ok { border-color: var(--ok); }
 .approval-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
+.approval-args { margin: 6px 0; display: grid; gap: 2px; font-size: 13px; overflow-wrap: anywhere; }
+.approval-result summary { cursor: pointer; font-size: 13px; color: var(--muted, #888); }
+.approval-result pre { max-height: 320px; overflow: auto; }
+.approval-bulk { margin-bottom: 8px; }
+.continuation-note { text-align: center; color: var(--muted, #888); margin: 4px 0 8px; }
 .typing { display: inline-flex; gap: 4px; padding: 6px 0; }
 .typing i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); animation: blink 1.2s infinite ease-in-out; }
 .typing i:nth-child(2) { animation-delay: .15s; }

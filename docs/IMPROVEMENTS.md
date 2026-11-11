@@ -127,3 +127,14 @@ Dựng MVP theo `docs/PLAN.md`.
 - **An toàn:** kubeconfig được mã hóa như mọi secret, không trả về giao diện. Địa chỉ `server` qua cùng lớp chống SSRF. Chứng chỉ client được ghi tạm với quyền 600 để nạp vào TLS, rồi xóa ngay.
 - **Template:** thêm khóa `validate` để kiểm tra chéo các tham số khi tạo hoặc sửa kết nối, và kiểu field `secret_text`.
 - **Lỗi thấy khi người dùng thử:** tạo kết nối bằng kubeconfig vẫn báo "cần api_url hoặc kubeconfig". File tĩnh trả về không có `Cache-Control` nên trình duyệt vẫn chạy `app.js` cũ: ô kubeconfig hiện thành ô một dòng, và giá trị bị gửi trong `params`, nơi server lặng lẽ bỏ qua secret. Nay file tĩnh trả `Cache-Control: no-cache` (vẫn nhận 304 nhờ ETag), và secret gửi nhầm trong `params` được nhận và lưu như secret.
+
+## Đợt 17 — 2026-11-11: luồng duyệt lệnh
+
+Phát hiện khi người dùng điều tra lỗi 500 qua Kibana thật: 6 lượt chat liên tiếp, lượt nào cũng chờ duyệt.
+
+| Vấn đề | Thay đổi |
+| --- | --- |
+| "Cho phép trong 1 giờ" không có tác dụng: gateway bỏ qua grant khi có lý do ép hỏi, mà log từ `search_logs` làm cả hội thoại bị đánh dấu untrusted | Grant được vượt qua lý do untrusted theo cấu hình từng môi trường ở trang Công cụ & Chính sách (mặc định dev chỉ lệnh đọc, staging lệnh đọc khi tin cậy ≥ 0,5, prod không). Lý do ép hỏi khác (change freeze, đối tượng mới, quota) vẫn luôn phải hỏi |
+| Duyệt xong agent dừng; người dùng gõ "đã duyệt", agent lại đặt truy vấn mới và lại phải chờ duyệt | Khi lượt mới nhất không còn lệnh chờ, agent tự chạy tiếp với kết quả đó; server chặn chạy tiếp hai lần |
+| Kết quả lệnh đã duyệt vào lịch sử chỉ 300 ký tự đầu, agent không đọc được `request_id` | Lượt mới nhất nhận tới 24.000 ký tự kết quả, kèm tham số lệnh, bọc `<untrusted>` khi là log/web |
+| Thẻ duyệt trong chat không hiện tham số; nhiều lệnh song song phải duyệt từng cái | Thẻ hiện tham số, kết quả thu gọn; nút "Chạy tất cả" và "Cho phép tất cả trong 1 giờ"; grant mới cấp chạy luôn các lệnh đọc cùng loại đang chờ |
