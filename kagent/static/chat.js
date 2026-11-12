@@ -342,12 +342,13 @@ function chatView(main) {
     try { await api("POST", `/api/chat/${activeRun.id}/cancel`); } catch (e) { toast(e.message, true); sendBtn.disabled = false; }
   }
 
-  async function send(text, continueEpisode) {
-    if (activeRun) return;
+  // Dựng khung của một lượt (câu hỏi + vùng trả lời đang chạy) và trả về hàm xử lý sự kiện stream; dùng cho lượt mới gửi
+  // và cho lượt đang chạy khi trang vừa tải lại (xem tiếp qua /live).
+  function beginTurn(text, continueEpisode, continuation) {
     const empty = thread.querySelector(".empty");
     if (empty) empty.remove();
-    if (continueEpisode) {
-      blocks.get(continueEpisode)?.querySelector(".resume")?.remove();
+    if (continueEpisode || continuation) {
+      if (continueEpisode) blocks.get(continueEpisode)?.querySelector(".resume")?.remove();
       thread.append(continuationNote());
     }
     else { lastTask = text; thread.append(userBubble(text)); }
@@ -360,8 +361,6 @@ function chatView(main) {
     thread.append(liveEl);
     stick = true;
     scroll();
-    activeRun = { id: null };
-    syncSend();
 
     let frame = 0;
     const paint = () => {
@@ -409,29 +408,38 @@ function chatView(main) {
         if (ev.message.approvals.some((a) => a.status === "pending")) pollApprovals();
       } else if (ev.type === "error") fail(ev.message);
     };
+    return { handle, fail, liveEl, stopPaint: () => { if (frame) cancelAnimationFrame(frame); } };
+  }
 
+  async function readSSE(res, handle) {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let cut;
+      while ((cut = buffer.indexOf("\n\n")) !== -1) {
+        const chunk = buffer.slice(0, cut);
+        buffer = buffer.slice(cut + 2);
+        if (chunk.startsWith("data: ")) handle(JSON.parse(chunk.slice(6)));
+      }
+    }
+  }
+
+  async function send(text, continueEpisode) {
+    if (activeRun) return;
+    const { handle, fail } = beginTurn(text, continueEpisode);
+    activeRun = { id: null };
+    syncSend();
     try {
       const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json", "X-Tenant-Id": state.tenant.id }, credentials: "same-origin", body: JSON.stringify(continueEpisode ? { continue_episode: continueEpisode, conversation_id: state.conversationId, env: env.value }
         : { message: text, conversation_id: state.conversationId, env: env.value }) });
       if (!res.ok) {
         const data = await res.json().catch(() => null);
         fail(typeof (data && data.detail) === "string" ? data.detail : `Lỗi ${res.status}`);
-      } else {
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          let cut;
-          while ((cut = buffer.indexOf("\n\n")) !== -1) {
-            const chunk = buffer.slice(0, cut);
-            buffer = buffer.slice(cut + 2);
-            if (chunk.startsWith("data: ")) handle(JSON.parse(chunk.slice(6)));
-          }
-        }
-      }
+      } else await readSSE(res, handle);
     } catch (e) {
       fail("Mất kết nối. Câu trả lời vẫn có thể được lưu, hãy mở lại hội thoại sau ít phút.");
     } finally {
@@ -441,24 +449,36 @@ function chatView(main) {
     }
   }
 
-  // Trang được tải lại khi agent đang trả lời: lượt đó vẫn chạy trên server, nên chờ rồi hiện câu trả lời khi xong.
-  function waitForRunningTurn(known) {
+  // Trang được tải lại khi agent đang trả lời: phát lại câu hỏi và phần đã sinh của lượt đó, rồi stream tiếp tới khi xong.
+  async function attachLive(known) {
     const conv = state.conversationId;
-    const note = h("div", { class: "msg assistant" }, h("div", { class: "typing", "aria-label": "Agent đang trả lời" }, h("i"), h("i"), h("i")),
-      h("div", { class: "small muted" }, busy("Agent vẫn đang trả lời lượt trước (trang vừa được tải lại); câu trả lời sẽ hiện khi xong.")));
-    thread.append(note);
+    let turn = null;
+    let episodeId = null;
+    activeRun = { id: null };  // không gửi lượt mới chồng lên; lượt của người khác (vd. kagent-alerts) không dừng được từ đây
+    syncSend();
+    try {
+      const res = await fetch(`/api/conversations/${conv}/live`, { headers: { "X-Tenant-Id": state.tenant.id }, credentials: "same-origin" });
+      if (res.ok) {
+        await readSSE(res, (ev) => {
+          if (state.conversationId !== conv) return;
+          if (ev.type === "live_start") turn = beginTurn(ev.task, null, ev.continuation);
+          else if (ev.type === "end") episodeId = ev.episode_id;
+          else if (turn) turn.handle(ev);
+        });
+      }
+    } catch { /* mất kết nối: vẫn tải lại hội thoại bên dưới */ }
+    activeRun = null;
+    syncSend();
+    if (state.conversationId !== conv) return;
+    if (turn) turn.stopPaint();
+    const data = await api("GET", `/api/conversations/${conv}`);
+    for (const m of data.messages.slice(known)) {
+      if (turn && m.id === episodeId) { blocks.set(m.id, turn.liveEl); replaceBlock(m); }
+      else if (!blocks.has(m.id)) addMessage(m);
+    }
+    if (data.messages.some((m) => m.approvals.some((a) => a.status === "pending"))) pollApprovals();
+    if (data.running) return attachLive(data.messages.length);  // lượt kế tiếp đã bắt đầu (vd. chạy tiếp sau khi duyệt)
     scroll();
-    const tick = async () => {
-      if (!document.contains(note) || state.conversationId !== conv) return;
-      let data;
-      try { data = await api("GET", `/api/conversations/${conv}`); } catch { return setTimeout(tick, 4000); }
-      if (data.running) return setTimeout(tick, 3000);
-      note.remove();
-      data.messages.slice(known).forEach(addMessage);
-      if (data.messages.some((m) => m.approvals.some((a) => a.status === "pending"))) pollApprovals();
-      scroll();
-    };
-    setTimeout(tick, 3000);
   }
 
   let polling = false;
@@ -505,7 +525,7 @@ function chatView(main) {
         }
         data.messages.forEach(addMessage);
         if (data.messages.some((m) => m.approvals.some((a) => a.status === "pending"))) pollApprovals();
-        if (data.running) waitForRunningTurn(data.messages.length);
+        if (data.running) attachLive(data.messages.length).catch((e) => toast(e.message, true));
         requestAnimationFrame(scroll);
       } catch (e) {
         state.conversationId = null;

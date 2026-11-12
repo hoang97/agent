@@ -16,7 +16,7 @@ import re
 import threading
 from datetime import timedelta
 
-from . import db
+from . import db, live
 from .tools import ENVS
 
 log = logging.getLogger("kagent.incidents")
@@ -422,7 +422,6 @@ def start_investigation(tenant_id: str, incident_id: str) -> bool:
 
 
 def investigate(conn, tenant_id: str, incident_id: str) -> dict:
-    from . import agent, gateway, llm
     with db.tx(conn):
         inc = conn.execute("SELECT * FROM incident WHERE id=? AND tenant_id=?", (incident_id, tenant_id)).fetchone()
         if inc is None or inc["status"] != "open":
@@ -434,8 +433,18 @@ def investigate(conn, tenant_id: str, incident_id: str) -> dict:
     alerts = [_brief(r) for r in conn.execute("SELECT * FROM alert_event WHERE incident_id=? AND status='firing' ORDER BY starts_at LIMIT 20",
                                                (incident_id,)).fetchall()]
     task = INVESTIGATE_TASK.format(env=inc["env"], alerts=json.dumps(alerts, ensure_ascii=False, indent=1))
+    run = live.start(conversation_id, db.new_id(), task)  # người mở hội thoại thấy agent đang điều tra theo thời gian thực
     try:
-        ep = agent.run_task(conn, tenant_id, user, task, env=inc["env"], agent_id="alert-agent", read_only=True, conversation_id=conversation_id)
+        return _investigate_run(conn, tenant_id, incident_id, inc, user, task, alerts, conversation_id, run)
+    finally:
+        live.finish(run)
+
+
+def _investigate_run(conn, tenant_id: str, incident_id: str, inc, user: str, task: str, alerts: list[dict], conversation_id: str, run) -> dict:
+    from . import agent, gateway, llm
+    try:
+        ep = agent.run_task(conn, tenant_id, user, task, env=inc["env"], agent_id="alert-agent", read_only=True, conversation_id=conversation_id,
+                            episode_id=run.id, on_event=run.emit)
     except agent.QuotaExceeded as exc:
         with db.tx(conn):
             conn.execute("UPDATE incident SET stage='error', updated_at=? WHERE id=?", (db.iso(), incident_id))

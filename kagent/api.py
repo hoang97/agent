@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from . import agent as agent_mod
 from . import compiler, connections, db, entities, gateway, incidents, knowledge, learned, learning, llm, net, proxy, tools, vault
+from . import live
 from .connectors import k8s_rbac
 from .connectors.base import ConnectorError
 from .config import settings
@@ -582,12 +583,17 @@ def chat(body: ChatBody, t: Tenant = Depends(current_tenant), conn=Depends(get_c
         _runs[run_id] = (t.tenant_id, t.user_id, cancelled, conversation_id)
     events: queue.Queue = queue.Queue()
     events.put({"type": "start", "run_id": run_id, "conversation_id": conversation_id})
+    run = live.start(conversation_id, run_id, message, continuation=bool(continuation_of))
+
+    def emit(event: dict) -> None:
+        events.put(event)
+        run.emit(event)
 
     def worker() -> None:
         try:
             with db.session() as worker_conn:
                 episode = agent_mod.run_task(worker_conn, t.tenant_id, t.user_id, message, body.env, body.project, conversation_id=conversation_id,
-                                             episode_id=run_id, on_event=events.put, cancelled=cancelled, continuation_of=continuation_of)
+                                             episode_id=run_id, on_event=emit, cancelled=cancelled, continuation_of=continuation_of)
                 events.put({"type": "done", "conversation_id": conversation_id, "message": _chat_message(worker_conn, t, episode)})
         except agent_mod.QuotaExceeded as exc:
             events.put({"type": "error", "message": str(exc)})
@@ -597,6 +603,7 @@ def chat(body: ChatBody, t: Tenant = Depends(current_tenant), conn=Depends(get_c
         finally:
             with _runs_lock:
                 _runs.pop(run_id, None)
+            live.finish(run)
             events.put(None)
 
     threading.Thread(target=worker, name=f"chat-{run_id[:8]}", daemon=True).start()
@@ -663,8 +670,29 @@ def conversation(conversation_id: str, t: Tenant = Depends(current_tenant), conn
     with _runs_lock:
         # Lượt vẫn chạy trên server sau khi người dùng tải lại trang; giao diện dùng cờ này để chờ câu trả lời.
         running = any(r[0] == t.tenant_id and (r[1] == t.user_id or c.get("incident_id")) and r[3] == conversation_id for r in _runs.values())
-    running = running or bool(c.get("incident_id") and c["incident_id"] in incidents._running)
+    running = running or live.current(conversation_id) is not None
     return {**c, "running": running, "messages": [_chat_message(conn, t, db.row(r, "input", "trace", "ku_used", "human_edit")) for r in rs]}
+
+
+@app.get("/api/conversations/{conversation_id}/live")
+def conversation_live(conversation_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    """Xem tiếp lượt đang chạy sau khi tải lại trang: phát lại câu hỏi, chữ đã sinh, lệnh đã chạy, rồi stream tiếp tới khi xong."""
+    _own_conversation(conn, t, conversation_id)
+    run = live.current(conversation_id)
+
+    def stream():
+        if run is None:
+            yield _sse({"type": "end", "episode_id": None})
+            return
+        yield _sse({"type": "live_start", "run_id": run.id, "task": run.task, "continuation": run.continuation})
+        for event in run.follow():
+            if event is None:
+                yield ": ping\n\n"
+            elif event.get("type") not in ("start", "done"):
+                yield _sse(event)
+        yield _sse({"type": "end", "episode_id": run.id})
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 class ConversationPatch(BaseModel):

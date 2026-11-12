@@ -371,3 +371,22 @@ def test_internal_history_format_never_reaches_the_answer(users):
     message = done(chat(alice, "đếm lỗi"))["message"]
     assert message["output"] == "Lệnh đang chờ duyệt.\n\nKết luận cuối."
     assert agent.clean_answer("a <untrusted>b</untrusted> c") == "a b c"
+
+
+def test_reload_replays_running_turn_then_streams_rest(users):
+    import threading
+    from kagent import live
+    alice, bob = users["alice"], users["bob"]
+    cid = next(e for e in chat(alice, "xem pod") if e["type"] == "done")["conversation_id"]
+    run = live.start(cid, "run-1", "câu hỏi đang chạy")
+    run.emit({"type": "delta", "text": "Đang "})
+    run.emit({"type": "tool_start", "tool": "k8s.kubectl_read", "args": {}})
+    assert alice.get(f"/api/conversations/{cid}").json()["running"] is True
+    threading.Timer(0.3, lambda: (run.emit({"type": "delta", "text": "xem"}), run.emit({"type": "done"}), live.finish(run))).start()
+    got = events(alice.get(f"/api/conversations/{cid}/live"))
+    assert got[0] == {"type": "live_start", "run_id": "run-1", "task": "câu hỏi đang chạy", "continuation": False}
+    assert [e.get("text") for e in got if e["type"] == "delta"] == ["Đang ", "xem"]
+    assert got[-1] == {"type": "end", "episode_id": "run-1"} and not any(e["type"] == "done" for e in got)
+    assert alice.get(f"/api/conversations/{cid}").json()["running"] is False
+    assert events(alice.get(f"/api/conversations/{cid}/live")) == [{"type": "end", "episode_id": None}]
+    assert bob.get(f"/api/conversations/{cid}/live").status_code == 404  # hội thoại riêng của alice
