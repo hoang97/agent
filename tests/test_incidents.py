@@ -39,7 +39,7 @@ def poll(users):
 # ---------- cài đặt và luật gom ----------
 
 @pytest.mark.parametrize("data, message", [
-    ({"poll_seconds": 5}, "poll_seconds"), ({"auto": {"prod": {"min_confidence": 0.2}}}, "0.5-1.0"), ({"auto": {"qa": {}}}, "môi trường"),
+    ({"poll_seconds": 5}, "poll_seconds"), ({"auto_rules": "x"}, "auto_rules"), ({"auto": {"qa": {}}}, "môi trường"),
     ({"sources": ["Bad Name"]}, "sources"), ({"x": 1}, "không hợp lệ"),
 ])
 def test_settings_validation(data, message):
@@ -49,7 +49,8 @@ def test_settings_validation(data, message):
 
 def test_settings_merge_defaults_per_env():
     cfg = incidents.check_settings({"auto": {"staging": {"enabled": True}}})
-    assert cfg["auto"]["staging"] == {"enabled": True, "min_confidence": 0.9} and cfg["auto"]["dev"]["enabled"] is True
+    assert cfg["auto"]["staging"] == {"enabled": True} and cfg["auto"]["dev"]["enabled"] is True
+    assert incidents.check_settings({"auto": {"dev": {"min_confidence": 0.8}}})["auto"]["dev"] == {"enabled": True}  # cài đặt lưu từ trước auto mode
 
 
 @pytest.mark.parametrize("a, b, method", [
@@ -163,8 +164,16 @@ def test_settings_need_tenant_admin_and_valid_sources(flow, users):
 # ---------- điều tra và hành động ----------
 
 class Reporting(llm.HeuristicProvider):
-    def __init__(self, confidence, actions, read="get pods -n default"):
-        self.confidence, self.actions, self.data, self.read = confidence, actions, None, read
+    """verdict: kết quả auto mode cho hành động (None = như chế độ không dùng model)."""
+
+    def __init__(self, confidence, actions, read="get pods -n default", verdict=True):
+        self.confidence, self.actions, self.data, self.read, self.verdict, self.judged = confidence, actions, None, read, verdict, []
+
+    def classify_action(self, data):
+        self.judged.append(data)
+        if self.verdict is None:
+            return super().classify_action(data)
+        return {"allow": self.verdict, "rule": "" if self.verdict else "Vượt phạm vi", "reason": "" if self.verdict else "không có trong luật tự xử lý"}
 
     def run_agent(self, task, context, tool_list, call_tool, **kw):
         step = call_tool("k8s.kubectl_read", {"command": self.read})  # bảng pod: kết quả tin cậy
@@ -185,19 +194,16 @@ def _web_incident(users):
         return conn.execute("SELECT id FROM incident WHERE title='HighCPU · web'").fetchone()["id"]
 
 
-def _allow_r3_in_dev(monkeypatch):
-    """Ô R3/dev mặc định là ask_below 0.8 và tenant không nới được; giả lập gateway đã đủ tiền lệ để tin lệnh này."""
-    monkeypatch.setattr(gateway, "confidence", lambda conn, ctx, meta, args, dry_ok: (0.95, {"skill": 1, "precedent": 1, "dry_run": dry_ok, "independent": 1}))
-
-
 def test_confident_action_runs_then_verified(flow, users, infra, monkeypatch):
-    _allow_r3_in_dev(monkeypatch)
     iid = _web_incident(users)
     provider = Reporting(0.9, [RESTART])
     llm.set_provider(provider)
     with db.session() as conn:
         incidents.investigate(conn, tenant(users), iid)
     assert "k8s.kubectl_write" in provider.tools and all(t["tool"] != "k8s.kubectl_read" for t in provider.data["tools"])
+    # Auto mode xét theo luật tự xử lý và nhãn cảnh báo, không theo báo cáo viết từ dữ liệu điều tra.
+    judged = provider.judged[-1]
+    assert "Được khởi động lại" in judged["user_intent"][0] and "HighCPU" in judged["user_intent"][1] and "image lỗi" not in json.dumps(judged)
     inc = flow.get(f"/api/incidents/{iid}").json()
     assert inc["stage"] == "verifying", inc["actions"][0]["reasons"]
     assert inc["steps"] == [{"tool": "k8s.kubectl_read", "args": {"command": "get pods -n default"}, "status": "ok", "untrusted": False}]
@@ -217,15 +223,16 @@ def test_confident_action_runs_then_verified(flow, users, infra, monkeypatch):
     assert flow.get("/api/incidents?status=all").json()["auto_today"] == 1
 
 
-def test_low_confidence_asks_and_approval_is_followed(flow, users, infra, monkeypatch):
-    _allow_r3_in_dev(monkeypatch)
+def test_auto_mode_block_asks_and_approval_is_followed(flow, users, infra, monkeypatch):
     iid = _web_incident(users)
-    llm.set_provider(Reporting(0.6, [RESTART]))
+    llm.set_provider(Reporting(0.6, [RESTART], verdict=False))
     with db.session() as conn:
         incidents.investigate(conn, tenant(users), iid)
     inc = flow.get(f"/api/incidents/{iid}").json()
     action = inc["actions"][0]
-    assert inc["stage"] == "awaiting_approval" and action["status"] == "pending" and any("0.60 < ngưỡng 0.8" in r for r in action["reasons"])
+    # Luồng sự cố không có agent để thử cách khác: auto mode chặn thì hỏi người luôn.
+    assert inc["stage"] == "awaiting_approval" and action["status"] == "pending"
+    assert action["reasons"] == ["auto mode chặn: Vượt phạm vi: không có trong luật tự xử lý"]
     assert flow.post(f"/api/approvals/{action['approval_id']}/decide", json={"action": "approve_once"}).json()["status"] == "approved"
     with db.session() as conn:
         incidents.follow_up(conn, tenant(users))
@@ -240,19 +247,16 @@ def test_low_confidence_asks_and_approval_is_followed(flow, users, infra, monkey
     assert any("lần tự xử lý trước" in r for r in flow.get(f"/api/incidents/{iid}").json()["actions"][-1]["reasons"])
 
 
-def test_env_disabled_and_untrusted_investigation_never_auto(flow, users, monkeypatch):
-    _allow_r3_in_dev(monkeypatch)
+def test_env_disabled_never_auto(flow, users, monkeypatch):
     flow.put("/api/alert-settings", json={"enabled": True, "sources": ["am"], "investigate": False, "auto": {"dev": {"enabled": False}}})
     iid = _web_incident(users)
+    llm.set_provider(Reporting(0.99, [RESTART]))
     with db.session() as conn:
         user = incidents.bot_user(conn, tenant(users))
         report = {"title": "", "root_cause": "", "confidence": 0.99, "evidence": [], "actions": [RESTART]}
-        incidents.act(conn, tenant(users), iid, report, user, None, tainted=False)
-        flow.put("/api/alert-settings", json={"enabled": True, "sources": ["am"], "investigate": False})
-        incidents.act(conn, tenant(users), iid, report, user, None, tainted=True)
+        incidents.act(conn, tenant(users), iid, report, user, None)
     actions = flow.get(f"/api/incidents/{iid}").json()["actions"]
     assert actions[0]["status"] == "pending" and any("tự xử lý đang tắt ở dev" in r for r in actions[0]["reasons"])
-    assert actions[1]["status"] == "pending" and gateway.UNTRUSTED_REASON in actions[1]["reasons"]
 
 
 def test_no_safe_action_means_reported(flow, users):
@@ -295,24 +299,25 @@ def test_bot_cannot_log_in(flow, users, client):
     assert client.post("/api/auth/login", json={"username": incidents.BOT, "password": "00$disabled"}).status_code == 401
 
 
-def test_gateway_still_asks_without_precedent_even_if_report_is_confident(flow, users):
+def test_without_model_write_actions_ask_even_if_report_is_confident(flow, users):
     iid = _web_incident(users)
-    llm.set_provider(Reporting(0.99, [RESTART]))
+    llm.set_provider(Reporting(0.99, [RESTART], verdict=None))
     with db.session() as conn:
         incidents.investigate(conn, tenant(users), iid)
     action = flow.get(f"/api/incidents/{iid}").json()["actions"][0]
-    assert action["status"] == "pending" and any("tin cậy" in r and "< ngưỡng 0.8" in r for r in action["reasons"])
+    assert action["status"] == "pending" and "không dùng model" in action["reasons"][0]
 
 
-def test_reading_logs_taints_and_blocks_auto(flow, users, monkeypatch):
-    _allow_r3_in_dev(monkeypatch)
+def test_reading_logs_does_not_block_auto_and_logs_never_reach_classifier(flow, users, monkeypatch):
     iid = _web_incident(users)
-    llm.set_provider(Reporting(0.99, [RESTART], read="logs web-0 -n default"))
+    provider = Reporting(0.99, [RESTART], read="logs web-0 -n default")
+    llm.set_provider(provider)
     with db.session() as conn:
         incidents.investigate(conn, tenant(users), iid)
     inc = flow.get(f"/api/incidents/{iid}").json()
-    assert inc["steps"][0]["untrusted"] and inc["actions"][0]["status"] == "pending"
-    assert gateway.UNTRUSTED_REASON in inc["actions"][0]["reasons"]
+    assert inc["steps"][0]["untrusted"] and inc["actions"][0]["status"] == "ok"
+    seen = json.dumps(provider.judged, ensure_ascii=False)
+    assert "IGNORE PREVIOUS" not in seen and '"logs web-0 -n default"' in seen  # thấy lệnh đã gọi, không thấy nội dung log
 
 
 
@@ -330,7 +335,7 @@ def test_dry_run_flag_removed_from_proposed_command(flow, users):
 def test_approval_updates_incident_at_once_and_timeline_shows_fix(flow, users, infra):
     flow.put("/api/alert-settings", json={"enabled": False, "sources": ["am"]})  # luồng tắt vẫn phải theo dõi lệnh đã xin duyệt
     iid = _web_incident(users)
-    llm.set_provider(Reporting(0.6, [RESTART]))
+    llm.set_provider(Reporting(0.6, [RESTART], verdict=False))
     with db.session() as conn:
         incidents.investigate(conn, tenant(users), iid)
     action = flow.get(f"/api/incidents/{iid}").json()["actions"][0]
@@ -349,7 +354,7 @@ def test_approval_updates_incident_at_once_and_timeline_shows_fix(flow, users, i
 
 def test_investigation_lives_in_shared_conversation(flow, users):
     iid = _web_incident(users)
-    llm.set_provider(Reporting(0.6, [RESTART]))
+    llm.set_provider(Reporting(0.6, [RESTART], verdict=False))
     with db.session() as conn:
         incidents.investigate(conn, tenant(users), iid)
         incidents.investigate(conn, tenant(users), iid)  # điều tra lại: lượt mới trong cùng hội thoại

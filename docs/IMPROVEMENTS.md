@@ -272,3 +272,18 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log cmp-backend 
 
 - `prometheus`: query, query_range, list_alerts, list_rules, list_targets, label_values, metric_metadata, đều R0 (chỉ đọc). Dùng được cho Mimir, Thanos, VictoriaMetrics; xác thực bằng Bearer token hoặc basic auth, có header X-Scope-OrgID cho bản đa tenant. Để tiết kiệm token, query_range trả min/max/avg/last của mỗi chuỗi kèm tối đa 30 điểm mẫu; list_targets gom theo job và chỉ liệt kê target đang down.
 - `alertmanager`: list_alerts (gom theo alertname và severity, lọc bằng matcher `=`, `!=`, `=~`, `!~`), list_silences (R0); create_silence và expire_silence ở mức R3, chạy thử trước để biết sẽ chặn bao nhiêu cảnh báo hoặc sẽ gỡ silence nào.
+
+## Đợt 35 — 2026-11-12: auto mode thay điểm tin cậy
+
+Theo cách của auto mode trong Claude Code.
+- **Ma trận:** ô có ngưỡng điểm tin cậy được thay bằng ô auto mode. Một classifier hai bước (lọc nhanh, rồi suy xét kỹ khi bị đánh dấu) xét lệnh theo luật viết bằng chữ của tenant (environment, hard_deny, soft_deny, allow).
+- **Đầu vào của classifier:** chỉ lời người dùng, lệnh họ đã duyệt, và tên, tham số các lệnh agent đã gọi. Vì không đọc kết quả công cụ, nên bỏ cờ untrusted dùng làm cổng chặn, cùng `untrusted_auto` và 3 tham số grant policy theo môi trường.
+- **Bị chặn:** agent nhận lý do và tìm cách khác; chặn 3 lần liên tiếp, hoặc 20 lần trong một lượt, thì hỏi người.
+- **Bỏ:**
+  - điểm tin cậy (skill, precedent, dry_run, independent);
+  - kiểm tra "đối tượng chưa từng thấy";
+  - ngưỡng độ tin trong cài đặt sự cố.
+- **Thêm:**
+  - `auto_rules` cho luồng sự cố: luật tự xử lý đứng ở chỗ lời người dùng;
+  - chạy thử phía server lỗi thì bắt buộc hỏi.
+

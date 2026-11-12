@@ -1,6 +1,8 @@
+import json
+
 import pytest
 
-from kagent import gateway
+from kagent import db, gateway
 from conftest import tool_steps
 
 
@@ -8,55 +10,46 @@ def policy(overlay=None):
     return gateway.merge_policy(overlay)
 
 
-@pytest.mark.parametrize("tier,env,conf,expected", [
-    ("R0", "prod", 0.0, "auto"),
-    ("R1", "prod", 0.79, "ask"),
-    ("R1", "prod", 0.8, "auto"),
-    ("R2", "dev", 0.0, "auto"),
-    ("R2", "staging", 0.69, "ask"),
-    ("R2", "staging", 0.7, "auto"),
-    ("R2", "prod", 1.0, "ask"),
-    ("R3", "dev", 0.79, "ask"),
-    ("R3", "dev", 0.8, "auto"),
-    ("R3", "staging", 1.0, "ask"),
-    ("R3", "prod", 1.0, "ask"),
-    ("R4", "dev", 1.0, "ask"),
-    ("R4", "staging", 1.0, "block"),
-    ("R4", "prod", 1.0, "block"),
+@pytest.mark.parametrize("tier,env,expected", [
+    ("R0", "prod", "auto"), ("R1", "staging", "auto"), ("R1", "prod", "judge"),
+    ("R2", "dev", "judge"), ("R2", "staging", "judge"), ("R2", "prod", "ask"),
+    ("R3", "dev", "judge"), ("R3", "staging", "ask"), ("R3", "prod", "ask"),
+    ("R4", "dev", "ask"), ("R4", "staging", "block"), ("R4", "prod", "block"),
 ])
-def test_baseline_matrix(tier, env, conf, expected):
-    assert gateway.evaluate(policy(), tier, "x.y", env, conf, []).outcome == expected
+def test_baseline_matrix(tier, env, expected):
+    assert gateway.evaluate(policy(), tier, "x.y", env, []).outcome == expected
 
 
 def test_r3_prod_needs_two_approvers():
-    assert gateway.evaluate(policy(), "R3", "x", "prod", 1.0, []).required == 2
+    assert gateway.evaluate(policy(), "R3", "x", "prod", []).required == 2
 
 
 def test_deny_beats_everything():
     p = policy({"deny": [{"tool": "*.delete*", "env": "dev"}]})
-    d = gateway.evaluate(p, "R0", "k8s.delete", "dev", 1.0, [])
+    d = gateway.evaluate(p, "R0", "k8s.delete", "dev", [])
     assert d.outcome == "block" and d.door == "deny"
 
 
-def test_forced_ask_ignores_score():
-    assert gateway.evaluate(policy(), "R0", "x", "dev", 1.0, ["untrusted"]).outcome == "ask"
+def test_forced_reason_always_asks():
+    assert gateway.evaluate(policy(), "R0", "x", "dev", ["đang trong change freeze"]).outcome == "ask"
+    assert gateway.evaluate(policy(), "R2", "x", "dev", ["đang trong change freeze"]).outcome == "ask"
 
 
 def test_read_only_switch():
     p = policy({"environments": {"prod": {"auto_execute": "read_only"}}})
-    assert gateway.evaluate(p, "R0", "x", "prod", 0, []).outcome == "auto"
-    assert gateway.evaluate(p, "R1", "x", "prod", 1.0, []).outcome == "ask"
+    assert gateway.evaluate(p, "R0", "x", "prod", []).outcome == "auto"
+    assert gateway.evaluate(p, "R1", "x", "prod", []).outcome == "ask"
 
 
 def test_off_switch_stops_reads():
     p = policy({"environments": {"dev": {"auto_execute": "off"}}})
-    assert gateway.evaluate(p, "R0", "x", "dev", 1.0, []).outcome == "ask"
+    assert gateway.evaluate(p, "R0", "x", "dev", []).outcome == "ask"
 
 
 @pytest.mark.parametrize("overlay", [
     {"matrix": {"R2": {"prod": "auto"}}},
     {"matrix": {"R4": {"prod": "ask"}}},
-    {"thresholds": {"staging": {"R2": 0.5}}},
+    {"matrix": {"R2": {"prod": "judge"}}},
     {"min_approvers": {"prod": {"R3": 1}}},
     {"unknown": 1},
 ])
@@ -66,9 +59,14 @@ def test_overlay_cannot_loosen(overlay):
 
 
 def test_overlay_can_tighten():
-    p = gateway.merge_policy({"matrix": {"R0": {"dev": "ask"}}, "thresholds": {"staging": {"R2": 0.9}}})
-    assert p["matrix"]["R0"]["dev"] == "ask"
-    assert p["matrix"]["R2"]["staging"] == {"ask_below": 0.9}
+    p = gateway.merge_policy({"matrix": {"R0": {"dev": "ask"}, "R1": {"dev": "judge"}}})
+    assert p["matrix"]["R0"]["dev"] == "ask" and p["matrix"]["R1"]["dev"] == "judge"
+
+
+def test_overlay_saved_before_auto_mode_still_loads():
+    """Ngưỡng điểm tin cậy cũ thành ô judge; overlay đã lưu không làm hỏng chính sách."""
+    p = gateway.merge_policy({"matrix": {"R1": {"staging": {"ask_below": 0.9}}}, "thresholds": {"dev": {"R1": 0.5}}})
+    assert p["matrix"]["R1"]["staging"] == "judge" and p["matrix"]["R1"]["dev"] == "judge"
 
 
 def test_policy_api_rejects_loosening(users):
@@ -206,15 +204,89 @@ def test_prod_delete_blocked_by_tenant_deny(users):
     assert step["decision"] == "blocked" and step["tool"] == "k8s.kubectl_admin" and "k8s.kubectl_admin" in step["reasons"][0]
 
 
-def test_untrusted_output_taints_following_commands(users):
+def test_untrusted_output_no_longer_forces_ask(users):
+    """Auto mode không đọc kết quả công cụ nên không cần cờ nhiễm: đọc log xong, lệnh đọc sau vẫn tự chạy."""
     alice = users["alice"]
-    alice.run("xem pod trong namespace default")
-    ep = alice.run("tìm log lỗi rồi restart deployment web")
-    steps = tool_steps(ep)
-    assert [s["tool"] for s in steps] == ["logs.search_logs", "k8s.kubectl_write"]
-    assert steps[0]["status"] == "ok" and steps[0]["untrusted"] is True
-    assert steps[1]["status"] == "pending"
-    assert any("untrusted" in r for r in steps[1]["reasons"])
+    logs = tool_steps(alice.run("tìm log lỗi"))[0]
+    assert logs["status"] == "ok" and logs["untrusted"] is True
+    with db.session() as conn:
+        uid = conn.execute("SELECT id FROM app_user WHERE username='alice'").fetchone()["id"]
+        ctx = gateway.CallContext(alice.tenant, uid, "dev", "xem pod", intent=["tìm log lỗi", "xem pod"],
+                                  calls=[{"tool": logs["tool"], "args": logs["args"], "status": "ok"}])
+        assert gateway.invoke(conn, ctx, "k8s.kubectl_read", {"command": "get pods -n default"})["status"] == "ok"
+
+
+class FakeJudge:
+    """Classifier giả: trả lần lượt các kết quả cho sẵn, ghi lại đầu vào."""
+
+    def __init__(self, *verdicts):
+        self.verdicts, self.seen = list(verdicts), []
+
+    def classify_action(self, data):
+        self.seen.append(data)
+        allow = self.verdicts.pop(0) if self.verdicts else True
+        return {"allow": allow, "rule": "" if allow else "Đoán đối tượng", "reason": "" if allow else "web không có trong yêu cầu"}
+
+
+def _write(users, judge, monkeypatch, task="scale deployment web lên 4 replica trong namespace default", n=1):
+    from kagent import db, llm
+    monkeypatch.setattr(llm, "get_provider", lambda: judge)
+    alice = users["alice"]
+    with db.session() as conn:
+        uid = conn.execute("SELECT id FROM app_user WHERE username='alice'").fetchone()["id"]
+        ctx = gateway.CallContext(alice.tenant, uid, "dev", task, intent=[task])
+        return [gateway.invoke(conn, ctx, "k8s.kubectl_write", {"command": "scale deployment/web --replicas=4 -n default"}) for _ in range(n)]
+
+
+def test_auto_mode_allows_r3_in_dev(users, monkeypatch):
+    judge = FakeJudge(True)
+    step = _write(users, judge, monkeypatch)[0]
+    assert step["status"] == "ok" and step["reasons"][0].startswith("auto mode cho qua")
+    action = judge.seen[0]["action"]
+    assert action["tool"] == "k8s.kubectl_write" and action["risk_tier"] == "R3" and judge.seen[0]["user_intent"][-1].startswith("scale")
+    assert "dry_run" in action and "result" not in json.dumps(judge.seen[0]["previous_calls"])
+
+
+def test_auto_mode_block_returns_to_agent_then_asks_after_three(users, monkeypatch):
+    steps = _write(users, FakeJudge(False, False, False), monkeypatch, n=3)
+    assert [s["status"] for s in steps] == ["blocked", "blocked", "pending"]
+    assert steps[0]["reasons"] == ["auto mode chặn: Đoán đối tượng: web không có trong yêu cầu"]
+    assert "3 lần liên tiếp" in steps[2]["reasons"][1] and steps[2]["required_approvals"] == 1
+
+
+def test_auto_mode_unavailable_asks(users, monkeypatch):
+    class Broken:
+        def classify_action(self, data):
+            raise RuntimeError("model hỏng")
+    step = _write(users, Broken(), monkeypatch)[0]
+    assert step["status"] == "pending" and "không đánh giá được" in step["reasons"][0]
+
+
+def test_classifier_sees_calls_but_not_results(users, monkeypatch):
+    judge = FakeJudge(True, True)
+    from kagent import db, llm
+    monkeypatch.setattr(llm, "get_provider", lambda: judge)
+    alice = users["alice"]
+    with db.session() as conn:
+        uid = conn.execute("SELECT id FROM app_user WHERE username='alice'").fetchone()["id"]
+        ctx = gateway.CallContext(alice.tenant, uid, "dev", "t", intent=["restart web"])
+        read = gateway.invoke(conn, ctx, "k8s.kubectl_read", {"command": "get pods -n default"})
+        assert read["status"] == "ok" and read["result"]["stdout"]
+        gateway.invoke(conn, ctx, "k8s.kubectl_write", {"command": "rollout restart deployment/web -n default"})
+    assert judge.seen[-1]["previous_calls"] == [{"tool": "k8s.kubectl_read", "args": {"command": "get pods -n default"}, "status": "ok"}]
+
+
+def test_auto_mode_rules_api(users):
+    admin, alice = users["admin"], users["alice"]
+    got = admin.get("/api/policy").json()["auto_mode"]
+    assert got["custom"] == {} and got["effective"]["soft_deny"] == got["defaults"]["soft_deny"]
+    saved = admin.patch("/api/tenant", json={"auto_mode": {"soft_deny": ["$defaults", "Không restart deployment payments"], "allow": ["Được scale web"]}}).json()
+    eff = saved["auto_mode"]["effective"]
+    assert eff["soft_deny"][-1] == "Không restart deployment payments" and len(eff["soft_deny"]) == len(got["defaults"]["soft_deny"]) + 1
+    assert eff["allow"] == ["Được scale web"]  # không có $defaults thì thay hẳn mục đó
+    assert admin.patch("/api/tenant", json={"auto_mode": {"qa": []}}).status_code == 400
+    assert admin.patch("/api/tenant", json={"auto_mode": {"allow": "x"}}).status_code == 400
+    assert alice.patch("/api/tenant", json={"auto_mode": {}}).status_code == 403
 
 
 def test_change_freeze_forces_ask(users):

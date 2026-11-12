@@ -47,10 +47,10 @@ def test_preview_describes_shape():
 
 # ---------- qua gateway ----------
 
-def _ctx(users, name="alice", tainted=False):
+def _ctx(users, name="alice"):
     with db.session() as conn:
         uid = conn.execute("SELECT id FROM app_user WHERE username=?", (name,)).fetchone()["id"]
-    return gateway.CallContext(users[name].tenant, uid, "dev", "tìm log lỗi", tainted=tainted)
+    return gateway.CallContext(users[name].tenant, uid, "dev", "tìm log lỗi", intent=["tìm log lỗi"])
 
 
 def test_inline_filter_is_applied_before_result_reaches_agent(users):
@@ -75,9 +75,9 @@ def test_large_result_is_stored_and_queried(users, monkeypatch):
     assert step["result_chars"] > results.INLINE_LIMIT and step["result"]["result_id"] == step["result_id"]
     assert step["result"]["preview"]["count"] == 300 and len(json.dumps(step["result"])) < results.INLINE_LIMIT
     with db.session() as conn:
-        q = gateway.invoke(conn, _ctx(users, tainted=True), "data.query", {"result_id": step["result_id"], "group_by": "level"})
+        q = gateway.invoke(conn, _ctx(users), "data.query", {"result_id": step["result_id"], "group_by": "level"})
         assert q["status"] == "ok" and q["result"]["groups"] == [{"key": "INFO", "count": 200}, {"key": "ERROR", "count": 100}]
-        assert q["untrusted"] is True and gateway.UNTRUSTED_REASON not in (q.get("reasons") or [])  # local: không bị bắt duyệt vì untrusted
+        assert q["untrusted"] is True  # lọc trên kết quả untrusted vẫn untrusted
         other = gateway.invoke(conn, _ctx(users, "bob"), "data.query", {"result_id": step["result_id"]})
     assert other["status"] == "error" and "không thuộc về bạn" in other["result"]["error"]
 

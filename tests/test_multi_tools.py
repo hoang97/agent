@@ -29,13 +29,14 @@ def test_parallel_reads_run_concurrently(users, monkeypatch):
     assert len({s["parallel"] for s in steps}) == 1
 
 
-def test_parallel_batch_does_not_taint_its_own_members_but_taints_next(users):
+def test_parallel_reads_then_write_waits_for_auto_mode(users):
     alice = users["alice"]
     alice.run("xem pod trong namespace default")
     steps = tool_steps(alice.run("tìm log lỗi rồi xem pod rồi restart deployment web"))
     assert [s["tool"] for s in steps] == ["k8s.kubectl_read", "logs.search_logs", "k8s.kubectl_write"]
     assert steps[0]["status"] == "ok" and steps[1]["status"] == "ok" and steps[0]["parallel"] == steps[1]["parallel"]
-    assert steps[2]["status"] == "pending" and any("untrusted" in r for r in steps[2]["reasons"])
+    # Không có model thì auto mode không xét được lệnh ghi: chuyển sang hỏi người.
+    assert steps[2]["status"] == "pending" and "không dùng model" in steps[2]["reasons"][0]
 
 
 def test_exec_and_sql_in_one_request(users):

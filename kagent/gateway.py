@@ -1,4 +1,4 @@
-"""MCP Gateway: mọi lệnh gọi công cụ qua 3 cửa — chặn cứng → ma trận rủi ro × môi trường → điểm tin cậy."""
+"""MCP Gateway: mọi lệnh gọi công cụ qua 3 cửa — chặn cứng → ma trận rủi ro × môi trường → auto mode (classifier, xem automode.py)."""
 from __future__ import annotations
 
 import copy
@@ -8,7 +8,7 @@ import json
 import shlex
 from dataclasses import dataclass, field
 
-from . import datafilter, db
+from . import automode, datafilter, db
 from .config import settings
 from .retrieval import tokenize
 from . import net
@@ -23,15 +23,15 @@ BASELINE = {
     "environments": {e: {"auto_execute": "on"} for e in ENVS},
     "matrix": {
         "R0": {"dev": "auto", "staging": "auto", "prod": "auto"},
-        "R1": {"dev": "auto", "staging": "auto", "prod": {"ask_below": 0.8}},
-        "R2": {"dev": "auto", "staging": {"ask_below": 0.7}, "prod": "ask"},
-        "R3": {"dev": {"ask_below": 0.8}, "staging": "ask", "prod": {"ask": 2}},
+        "R1": {"dev": "auto", "staging": "auto", "prod": "judge"},
+        "R2": {"dev": "judge", "staging": "judge", "prod": "ask"},
+        "R3": {"dev": "judge", "staging": "ask", "prod": {"ask": 2}},
         "R4": {"dev": "ask", "staging": "block", "prod": "block"},
     },
     "deny": [],
 }
 
-WEIGHTS = {"skill": 0.35, "precedent": 0.25, "dry_run": 0.25, "independent": 0.15}
+DENIAL_STREAK, DENIAL_TOTAL = 3, 20  # auto mode chặn liên tiếp/tổng cộng trong một lượt đến mức này thì chuyển sang hỏi người
 
 
 class PolicyError(ValueError):
@@ -42,15 +42,12 @@ def rank(cell) -> float:
     """Độ chặt của một ô ma trận; số càng lớn càng chặt."""
     if cell == "auto":
         return 0
+    if cell == "judge":
+        return 1
     if cell == "ask":
         return 3
     if cell == "block":
         return 5
-    if isinstance(cell, dict) and "ask_below" in cell:
-        value = cell["ask_below"]
-        if not isinstance(value, (int, float)) or not 0 <= value <= 1:
-            raise PolicyError(f"ngưỡng không hợp lệ: {value}")
-        return 1 + value
     if isinstance(cell, dict) and "ask" in cell:
         if not isinstance(cell["ask"], int) or cell["ask"] < 1:
             raise PolicyError(f"số người duyệt không hợp lệ: {cell['ask']}")
@@ -78,20 +75,18 @@ def merge_policy(overlay: dict | None) -> dict:
         for env, cell in cells.items():
             if env not in ENVS:
                 raise PolicyError(f"môi trường không hợp lệ: {env}")
+            cell = _legacy(cell)
             if rank(cell) < rank(merged["matrix"][tier][env]):
                 raise PolicyError(f"overlay không được nới lỏng {tier}/{env}")
             merged["matrix"][tier][env] = cell
     for env, thresholds in (overlay.get("thresholds") or {}).items():
         if env not in ENVS:
             raise PolicyError(f"môi trường không hợp lệ: {env}")
-        for tier, value in thresholds.items():
+        for tier in thresholds:
             if tier not in TIERS:
                 raise PolicyError(f"mức rủi ro không hợp lệ: {tier}")
-            cell = {"ask_below": value}
-            current = merged["matrix"][tier][env]
-            if rank(cell) < rank(current):
-                raise PolicyError(f"ngưỡng overlay không được thấp hơn baseline ở {tier}/{env}")
-            merged["matrix"][tier][env] = cell
+            if rank("judge") >= rank(merged["matrix"][tier][env]):
+                merged["matrix"][tier][env] = "judge"
     for env, approvers in (overlay.get("min_approvers") or {}).items():
         for tier, n in approvers.items():
             cell = {"ask": n}
@@ -106,15 +101,20 @@ def merge_policy(overlay: dict | None) -> dict:
     return merged
 
 
+def _legacy(cell):
+    """Overlay lưu từ trước auto mode: ngưỡng điểm tin cậy {"ask_below": x} nay là ô judge."""
+    return "judge" if isinstance(cell, dict) and "ask_below" in cell else cell
+
+
 @dataclass
 class Decision:
-    outcome: str  # auto | ask | block
+    outcome: str  # auto | judge | ask | block
     required: int = 0
     reasons: list[str] = field(default_factory=list)
     door: str = ""
 
 
-def evaluate(policy: dict, tier: str, tool: str, env: str, confidence: float, forced: list[str], canonical: str | None = None) -> Decision:
+def evaluate(policy: dict, tier: str, tool: str, env: str, forced: list[str], canonical: str | None = None) -> Decision:
     """canonical là "<template>.<công_cụ>" để luật chặn như "k8s.kubectl_admin" áp cho mọi kết nối Kubernetes."""
     for rule in policy["deny"]:
         names = [tool] + ([canonical] if canonical else [])
@@ -142,10 +142,9 @@ def evaluate(policy: dict, tier: str, tool: str, env: str, confidence: float, fo
         ask = True
         required = cell["ask"]
         reasons.append(f"ma trận luôn hỏi {tier} ở {env}, cần {required} người duyệt")
-    elif isinstance(cell, dict) and confidence < cell["ask_below"]:
-        ask = True
-        reasons.append(f"tin cậy {confidence:.2f} < ngưỡng {cell['ask_below']}")
-    return Decision("ask" if ask else "auto", required if ask else 0, reasons, "matrix" if not forced else "forced")
+    if ask:
+        return Decision("ask", required, reasons, "matrix" if not forced else "forced")
+    return Decision("judge" if cell == "judge" else "auto", 0, reasons, "matrix")
 
 
 @dataclass
@@ -155,8 +154,11 @@ class CallContext:
     env: str
     task: str
     episode_id: str | None = None
-    tainted: bool = False  # kế hoạch đã chịu ảnh hưởng từ nội dung untrusted
-    independent: float = 0.5
+    # Ý của người dùng cho auto mode: tin nhắn của họ, lệnh họ đã duyệt, luật tự xử lý do admin đặt. Không chứa kết quả công cụ.
+    intent: list = field(default_factory=list)
+    calls: list = field(default_factory=list)  # lệnh agent đã gọi trong hội thoại; dùng chung giữa các bản replace() của ctx
+    denials: dict = field(default_factory=lambda: {"streak": 0, "total": 0})  # dùng chung như calls
+    escalate_on_block: bool = False  # không có agent để thử cách khác (luồng sự cố): auto mode chặn thì hỏi người luôn
     tokens: list = field(default_factory=list)
     roles: set | None = None  # vai trò của người yêu cầu trong tenant; None = tra cứu khi gọi
     reviewed: bool = False  # đang chạy bước của công cụ học được đã được người có quyền xem và bật
@@ -178,39 +180,6 @@ def args_hash(args: dict) -> str:
 def get_policy(conn, tenant_id: str) -> dict:
     r = conn.execute("SELECT policy FROM tenant WHERE id=?", (tenant_id,)).fetchone()
     return merge_policy(json.loads(r["policy"]))
-
-
-def _precedent(conn, ctx: CallContext, tool: str, args: dict) -> float:
-    rs = conn.execute(
-        "SELECT args FROM tool_call_audit WHERE tenant_id=? AND tool=? AND env=? AND decision IN ('auto','approved') "
-        "AND result_status='ok' ORDER BY id DESC LIMIT 50", (ctx.tenant_id, tool, ctx.env)).fetchall()
-    if not rs:
-        return 0.0
-    current = {(k, json.dumps(v, sort_keys=True)) for k, v in args.items()}
-    best = 0.0
-    for r in rs:
-        past = {(k, json.dumps(v, sort_keys=True)) for k, v in json.loads(r["args"]).items()}
-        union = current | past
-        best = max(best, len(current & past) / len(union) if union else 1.0)
-    return round(min(1.0, 0.5 * best + 0.5 * min(1.0, len(rs) / 5)), 3)
-
-
-def _skill_score(conn, ctx: CallContext, tool: str) -> float:
-    best = 0.0
-    for r in conn.execute("SELECT tools, success_rate_30d FROM skill WHERE tenant_id=?", (ctx.tenant_id,)).fetchall():
-        if tool in json.loads(r["tools"]):
-            best = max(best, r["success_rate_30d"])
-    return best
-
-
-def confidence(conn, ctx: CallContext, tool_meta: dict, args: dict, dry_ok: float) -> tuple[float, dict]:
-    parts = {
-        "skill": _skill_score(conn, ctx, tool_meta["tool"]),
-        "precedent": _precedent(conn, ctx, tool_meta["tool"], args),
-        "dry_run": dry_ok,
-        "independent": ctx.independent,
-    }
-    return round(sum(WEIGHTS[k] * v for k, v in parts.items()), 3), parts
 
 
 def _command_args(args: dict) -> list[str]:
@@ -240,20 +209,6 @@ def namespace_of(args: dict) -> str | None:
     return None
 
 
-def _unseen_object(conn, ctx: CallContext, args: dict) -> str | None:
-    target = namespace_of(args) or args.get("index")
-    if not target:
-        return None
-    key_args = conn.execute(
-        "SELECT args FROM tool_call_audit WHERE tenant_id=? AND env=? AND result_status='ok' ORDER BY id DESC LIMIT 500",
-        (ctx.tenant_id, ctx.env)).fetchall()
-    for r in key_args:
-        past = json.loads(r["args"])
-        if namespace_of(past) == target or past.get("index") == target:
-            return None
-    return f"đối tượng chưa từng thấy: {target}"
-
-
 def _writes_today(conn, tenant_id: str) -> int:
     start = db.now().date().isoformat()
     return conn.execute(
@@ -261,12 +216,12 @@ def _writes_today(conn, tenant_id: str) -> int:
         "WHERE a.tenant_id=? AND a.at>=? AND a.result_status='ok' AND t.action_class!='read'", (tenant_id, start)).fetchone()["c"]
 
 
-def audit(conn, ctx: CallContext, tool, args, tier, conf, decision, reasons, status) -> None:
+def audit(conn, ctx: CallContext, tool, args, tier, decision, reasons, status) -> None:
     conn.execute(
         "INSERT INTO tool_call_audit(tenant_id,episode_id,user_id,tool,env,args_hash,args,risk_tier,confidence,decision,reasons,"
         "result_status,at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (ctx.tenant_id, ctx.episode_id, ctx.user_id, tool, ctx.env, args_hash(args), json.dumps(args, ensure_ascii=False, sort_keys=True),
-         tier, conf, decision, json.dumps(reasons, ensure_ascii=False), status, db.iso()))
+         tier, None, decision, json.dumps(reasons, ensure_ascii=False), status, db.iso()))  # cột confidence chỉ còn cho dữ liệu cũ
 
 
 def _run(conn, tenant_id: str, tool_name: str, args: dict, check: bool = False, user_id: str | None = None) -> dict:
@@ -322,7 +277,7 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
     meta = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (ctx.tenant_id, tool_name)).fetchone()
     if meta is None:
         # Công cụ chưa phân loại mặc định bị coi là destructive: không chạy.
-        audit(conn, ctx, tool_name, args, "R3", 0.0, "blocked", ["công cụ chưa được đăng ký"], "blocked")
+        audit(conn, ctx, tool_name, args, "R3", "blocked", ["công cụ chưa được đăng ký"], "blocked")
         return {**step, "decision": "blocked", "status": "blocked", "reasons": ["công cụ chưa được đăng ký"]}
     meta = dict(meta)
     tier = meta["risk_tier"]
@@ -330,13 +285,13 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
         ctx.roles = user_roles(conn, ctx.tenant_id, ctx.user_id)
     allowed, why = callable_by(meta, ctx.env, ctx.roles, ctx.user_id)
     if not allowed:
-        audit(conn, ctx, tool_name, args, tier, 0.0, "blocked", [why], "blocked")
+        audit(conn, ctx, tool_name, args, tier, "blocked", [why], "blocked")
         return {**step, "decision": "blocked", "status": "blocked", "risk_tier": tier, "reasons": [why]}
     from .tools import spec_of
     tool = spec_of(meta)
     missing = [f for f in tool.required if f not in args]
     if missing or not isinstance(args, dict):
-        audit(conn, ctx, tool_name, args, tier, 0.0, "blocked", [f"thiếu tham số: {missing}"], "invalid")
+        audit(conn, ctx, tool_name, args, tier, "blocked", [f"thiếu tham số: {missing}"], "invalid")
         return {**step, "decision": "blocked", "status": "invalid", "risk_tier": tier, "reasons": [f"thiếu tham số: {missing}"]}
     if args.get("_filter") is not None:
         try:
@@ -345,11 +300,9 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
             return {**step, "decision": "blocked", "status": "invalid", "risk_tier": tier, "reasons": [f"_filter: {exc}"]}
 
     dry_result = None
-    dry_ok = 0.0
     if tool.check:
         try:
             dry_result = _run(conn, ctx.tenant_id, tool_name, args, check=True, user_id=ctx.user_id)
-            dry_ok = 1.0
         except net.NetError as exc:
             dry_result = {"error": f"kết nối bị chặn: {exc}"}
         except (ConnectorError, ValueError, TypeError) as exc:
@@ -359,38 +312,60 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
 
     tenant = conn.execute("SELECT change_freeze, write_quota_daily, self_approve FROM tenant WHERE id=?", (ctx.tenant_id,)).fetchone()
     forced: list[str] = list(ctx.forced)
-    # Công cụ local chỉ xử lý dữ liệu đã lấy về; nội dung untrusted không lái được nó tác động ra ngoài.
-    if ctx.tainted and not tool.local and not _auto_read_despite_taint(grant_policy(conn, ctx.tenant_id), ctx.env, meta["action_class"], tier):
-        forced.append(UNTRUSTED_REASON)
+    if isinstance(dry_result, dict) and dry_result.get("error"):
+        forced.append("chạy thử phía server lỗi")
     if meta["action_class"] != "read":
-        unseen = _unseen_object(conn, ctx, args)
-        if unseen:
-            forced.append(unseen)
         if tenant["change_freeze"]:
             forced.append("đang trong change freeze")
         if _writes_today(conn, ctx.tenant_id) >= tenant["write_quota_daily"]:
             forced.append("vượt quota ghi trong ngày")
 
     policy = get_policy(conn, ctx.tenant_id)
-    conf, parts = confidence(conn, ctx, meta, args, dry_ok)
     # Công cụ local không chạm môi trường nào, nên dùng cột dev của ma trận (R4 vẫn luôn phải hỏi).
-    decision = evaluate(policy, tier, tool_name, "dev" if tool.local else ctx.env, conf, forced, meta.get("canonical"))
-    step.update(risk_tier=tier, confidence=conf, confidence_parts=parts, reasons=decision.reasons, dry_run=dry_result)
+    decision = evaluate(policy, tier, tool_name, "dev" if tool.local else ctx.env, forced, meta.get("canonical"))
+    step.update(risk_tier=tier, reasons=decision.reasons, dry_run=dry_result)
 
     if decision.outcome == "block":
-        audit(conn, ctx, tool_name, args, tier, conf, "blocked", decision.reasons, "blocked")
-        return {**step, "decision": "blocked", "status": "blocked"}
-    if decision.outcome == "ask" and tool.local and ctx.reviewed and not forced:
+        audit(conn, ctx, tool_name, args, tier, "blocked", decision.reasons, "blocked")
+        return _called(ctx, {**step, "decision": "blocked", "status": "blocked"})
+    if decision.outcome in ("ask", "judge") and tool.local and ctx.reviewed and not forced:
         # Code của data.script nằm cố định trong công cụ đã được duyệt; chỉ dữ liệu đầu vào thay đổi giữa các lần chạy.
         decision = Decision("auto", reasons=["bước của công cụ học được đã được duyệt"])
-        step["reasons"] = decision.reasons
-
+    elif decision.outcome == "judge" and tool.local:
+        # Auto mode canh tác động ra ngoài; công cụ local chỉ xử lý dữ liệu đã lấy về (data.script là R4 nên vẫn luôn hỏi).
+        decision = Decision("auto", reasons=["công cụ local không tác động ra ngoài"])
     # Khi tenant cho tự duyệt, một lần xác nhận của chính người yêu cầu là đủ, kể cả ô ma trận cần 2 người.
     required = 1 if tenant["self_approve"] else decision.required
-    if decision.outcome == "ask" and required == 1 and grant_covers(grant_policy(conn, ctx.tenant_id), ctx.env, meta["action_class"], conf, forced) \
+    if decision.outcome in ("ask", "judge") and (decision.outcome == "judge" or required == 1) and not forced \
             and policy["environments"][ctx.env]["auto_execute"] != "off" and _has_grant(conn, ctx, tool_name, args):
         decision = Decision("auto", reasons=["dùng quyền đã duyệt cho phiên"])
-        step["reasons"] = decision.reasons
+
+    if decision.outcome != "auto":
+        action = {"tool": tool_name, "args": args, "risk_tier": tier, "action_class": meta["action_class"], "env": ctx.env,
+                  **({"dry_run": dry_result} if dry_result is not None else {})}
+        verdict = automode.classify(conn, ctx.tenant_id, ctx.intent, ctx.calls, action)
+        step["judge"] = verdict
+        said = f"{verdict['rule']}: {verdict['reason']}" if verdict["rule"] else verdict["reason"]
+        if decision.outcome == "ask":
+            if verdict["allow"] is not None:  # ô luôn hỏi: classifier chỉ nhận xét cho người duyệt xem
+                decision.reasons.append("nhận xét auto mode: " + ("khớp yêu cầu của người dùng" if verdict["allow"] else said))
+        elif verdict["allow"]:
+            ctx.denials["streak"] = 0
+            decision = Decision("auto", reasons=["auto mode cho qua" + (f": {verdict['reason']}" if verdict["reason"] else "")])
+        elif verdict["allow"] is None:
+            decision = Decision("ask", 1, [said or "auto mode không đánh giá được"])
+            required = 1
+        else:
+            ctx.denials["streak"] += 1
+            ctx.denials["total"] += 1
+            reason = f"auto mode chặn: {said}"
+            if not (ctx.escalate_on_block or ctx.denials["streak"] >= DENIAL_STREAK or ctx.denials["total"] >= DENIAL_TOTAL):
+                audit(conn, ctx, tool_name, args, tier, "blocked", [reason], "blocked")
+                return _called(ctx, {**step, "decision": "blocked", "status": "blocked", "reasons": [reason]})
+            more = [] if ctx.escalate_on_block else [f"auto mode đã chặn {ctx.denials['streak']} lần liên tiếp, {ctx.denials['total']} lần trong lượt"]
+            decision = Decision("ask", 1, [reason, *more])
+            required = 1
+    step["reasons"] = decision.reasons
 
     if decision.outcome == "ask":
         approval_id = db.new_id()
@@ -398,14 +373,20 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
             "INSERT INTO approval_request(id,tenant_id,episode_id,requester_id,original_request,tool,env,args,dry_run,risk_tier,confidence,"
             "reasons,rollback_hint,required_approvals,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (approval_id, ctx.tenant_id, ctx.episode_id, ctx.user_id, ctx.task, tool_name, ctx.env, json.dumps(args, ensure_ascii=False),
-             json.dumps(dry_result, ensure_ascii=False), tier, conf, json.dumps(decision.reasons, ensure_ascii=False), tool.rollback_hint,
-             required, db.iso(), db.later(minutes=settings.approval_ttl_minutes)))
-        audit(conn, ctx, tool_name, args, tier, conf, "pending", decision.reasons, "pending")
-        return {**step, "decision": "pending", "status": "pending", "approval_id": approval_id, "required_approvals": required}
+             json.dumps(dry_result, ensure_ascii=False), tier, 0, json.dumps(decision.reasons, ensure_ascii=False), tool.rollback_hint,
+             required, db.iso(), db.later(minutes=settings.approval_ttl_minutes)))  # confidence = 0: cột chỉ còn cho dữ liệu cũ
+        audit(conn, ctx, tool_name, args, tier, "pending", decision.reasons, "pending")
+        return _called(ctx, {**step, "decision": "pending", "status": "pending", "approval_id": approval_id, "required_approvals": required})
 
     status, result = _execute(conn, ctx.tenant_id, ctx.env, tool_name, args, ctx.user_id)
-    audit(conn, ctx, tool_name, args, tier, conf, "auto", decision.reasons, status)
+    audit(conn, ctx, tool_name, args, tier, "auto", decision.reasons, status)
     step.update(decision="auto", status=status, result=result, untrusted=tool.untrusted(args))
+    return _called(ctx, step)
+
+
+def _called(ctx: CallContext, step: dict) -> dict:
+    """Ghi lại lệnh agent vừa gọi cho các lần classify sau trong hội thoại; chỉ tên, tham số, trạng thái, không có kết quả."""
+    ctx.calls.append({"tool": step["tool"], "args": step["args"], "status": step["status"]})
     return step
 
 
@@ -422,65 +403,6 @@ def can_approve(roles: set[str], env: str, is_org_admin: bool) -> bool:
 def self_approve_enabled(conn, tenant_id: str) -> bool:
     r = conn.execute("SELECT self_approve FROM tenant WHERE id=?", (tenant_id,)).fetchone()
     return bool(r and r["self_approve"])
-
-
-UNTRUSTED_REASON = "kế hoạch chịu ảnh hưởng từ nội dung untrusted"
-GRANT_MODES = ("off", "read", "all")
-# Grant "cho phép trong 1 giờ" có được vượt qua lý do untrusted không, theo môi trường. Tenant admin chỉnh được.
-# untrusted_auto: mức cao nhất của lệnh đọc vẫn tự chạy khi kế hoạch chịu ảnh hưởng từ nội dung untrusted (none | R0 | R1).
-AUTO_READ_TIERS = ("none", "R0", "R1")
-DEFAULT_GRANT_POLICY = {"dev": {"untrusted": "read", "min_confidence": 0.0, "untrusted_auto": "R0"},
-                        "staging": {"untrusted": "read", "min_confidence": 0.5, "untrusted_auto": "none"},
-                        "prod": {"untrusted": "off", "min_confidence": 0.8, "untrusted_auto": "none"}}
-
-
-def check_grant_policy(policy: dict) -> dict:
-    """Gộp với mặc định và kiểm tra. 'all' ở prod bị cấm: log độc hại có thể lái agent gọi lệnh ghi mà không ai xác nhận."""
-    if not isinstance(policy, dict) or set(policy) - set(ENVS):
-        raise PolicyError(f"chính sách grant phải là object theo môi trường {list(ENVS)}")
-    merged = copy.deepcopy(DEFAULT_GRANT_POLICY)
-    for env, conf in policy.items():
-        if not isinstance(conf, dict) or set(conf) - {"untrusted", "min_confidence", "untrusted_auto"}:
-            raise PolicyError(f"{env}: chỉ gồm untrusted, min_confidence và untrusted_auto")
-        mode = conf.get("untrusted", merged[env]["untrusted"])
-        value = conf.get("min_confidence", merged[env]["min_confidence"])
-        auto = conf.get("untrusted_auto", merged[env]["untrusted_auto"])
-        if auto not in AUTO_READ_TIERS:
-            raise PolicyError(f"{env}: untrusted_auto phải thuộc {list(AUTO_READ_TIERS)}")
-        if env == "prod" and auto == "R1":
-            raise PolicyError("prod chỉ cho lệnh đọc R0 tự chạy khi có nội dung untrusted")
-        if mode not in GRANT_MODES:
-            raise PolicyError(f"{env}: untrusted phải thuộc {list(GRANT_MODES)}")
-        if env == "prod" and mode == "all":
-            raise PolicyError("prod không được cho grant phủ lệnh ghi khi kế hoạch chịu ảnh hưởng từ nội dung untrusted")
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
-            raise PolicyError(f"{env}: min_confidence phải nằm trong 0..1")
-        merged[env] = {"untrusted": mode, "min_confidence": float(value), "untrusted_auto": auto}
-    return merged
-
-
-def grant_policy(conn, tenant_id: str) -> dict:
-    r = conn.execute("SELECT grant_policy FROM tenant WHERE id=?", (tenant_id,)).fetchone()
-    try:
-        return check_grant_policy(json.loads(r["grant_policy"]) if r and r["grant_policy"] else {})
-    except (PolicyError, ValueError):
-        return copy.deepcopy(DEFAULT_GRANT_POLICY)
-
-
-def _auto_read_despite_taint(policy: dict, env: str, action_class: str, tier: str) -> bool:
-    limit = (policy.get(env) or {}).get("untrusted_auto", "none")
-    return action_class == "read" and limit != "none" and TIERS.index(tier) <= TIERS.index(limit)
-
-
-def grant_covers(policy: dict, env: str, action_class: str, confidence: float, forced: list[str]) -> bool:
-    """Grant phiên có thay được việc hỏi lại không. Chỉ lý do untrusted mới có thể được grant vượt qua."""
-    if not forced:
-        return True
-    if any(reason != UNTRUSTED_REASON for reason in forced):
-        return False
-    rule = policy.get(env) or {"untrusted": "off", "min_confidence": 1.0}
-    allowed = rule["untrusted"] == "all" or (rule["untrusted"] == "read" and action_class == "read")
-    return allowed and confidence >= rule["min_confidence"]
 
 
 def can_decide(req: dict, user_id: str, roles: set[str], is_org_admin: bool, self_approve: bool) -> bool:
@@ -533,7 +455,7 @@ def decide(conn, tenant_id: str, approval_id: str, user_id: str, roles: set[str]
                 raise ApprovalError("phải nêu lý do từ chối")
             conn.execute("UPDATE approval_request SET status='denied', deny_reason=?, decided_by=?, decided_at=? WHERE id=?",
                          (reason.strip(), json.dumps(req["decided_by"] + [user_id]), db.iso(), approval_id))
-            audit(conn, ctx, req["tool"], req["args"], req["risk_tier"], req["confidence"], "denied", [reason], "denied")
+            audit(conn, ctx, req["tool"], req["args"], req["risk_tier"], "denied", [reason], "denied")
         else:
             decided = req["decided_by"] + [user_id]
             if len(decided) < req["required_approvals"]:
@@ -543,7 +465,7 @@ def decide(conn, tenant_id: str, approval_id: str, user_id: str, roles: set[str]
                 result = _compact(conn, tenant_id, req, meta, result)
                 conn.execute("UPDATE approval_request SET status='approved', decided_by=?, decided_at=?, result=? WHERE id=?",
                              (json.dumps(decided), db.iso(), json.dumps({"status": status, "result": result}, ensure_ascii=False), approval_id))
-                audit(conn, ctx, req["tool"], req["args"], req["risk_tier"], req["confidence"], "approved", decided, status)
+                audit(conn, ctx, req["tool"], req["args"], req["risk_tier"], "approved", decided, status)
                 if action == "approve_session" and req["required_approvals"] == 1:
                     conn.execute("INSERT INTO approval_grant(id,tenant_id,user_id,tool,env,namespace,expires_at) VALUES (?,?,?,?,?,?,?)",
                                  (db.new_id(), tenant_id, req["requester_id"], req["tool"], req["env"], namespace_of(req["args"]),
@@ -568,7 +490,6 @@ def _run_covered_siblings(conn, tenant_id: str, req: dict, meta, user_id: str) -
     """Grant vừa cấp phủ luôn các lệnh đọc cùng loại đang chờ của cùng người yêu cầu, để không phải bấm duyệt từng lệnh."""
     if meta["action_class"] != "read":
         return []
-    policy = grant_policy(conn, tenant_id)
     done = []
     rows = conn.execute("SELECT * FROM approval_request WHERE tenant_id=? AND requester_id=? AND tool=? AND env=? AND status='pending' "
                         "AND required_approvals=1 AND id!=? ORDER BY created_at", (tenant_id, req["requester_id"], req["tool"], req["env"], req["id"])).fetchall()
@@ -576,16 +497,13 @@ def _run_covered_siblings(conn, tenant_id: str, req: dict, meta, user_id: str) -
         other = db.row(r, "args", "decided_by", "reasons")
         if other["args"].get("namespace") != req["args"].get("namespace"):
             continue
-        forced = [x for x in other["reasons"] if x == UNTRUSTED_REASON]
-        if not grant_covers(policy, other["env"], meta["action_class"], other["confidence"], forced):
-            continue
         status, result = _execute(conn, tenant_id, other["env"], other["tool"], other["args"], other["requester_id"])
         result = _compact(conn, tenant_id, other, meta, result)
         decided = other["decided_by"] + [user_id]
         conn.execute("UPDATE approval_request SET status='approved', decided_by=?, decided_at=?, result=? WHERE id=?",
                      (json.dumps(decided), db.iso(), json.dumps({"status": status, "result": result}, ensure_ascii=False), other["id"]))
         ctx = CallContext(tenant_id, other["requester_id"], other["env"], other["original_request"], other["episode_id"])
-        audit(conn, ctx, other["tool"], other["args"], other["risk_tier"], other["confidence"], "approved", ["dùng quyền đã duyệt cho phiên"], status)
+        audit(conn, ctx, other["tool"], other["args"], other["risk_tier"], "approved", ["dùng quyền đã duyệt cho phiên"], status)
         done.append(other["id"])
     return done
 

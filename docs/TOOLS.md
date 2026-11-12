@@ -33,7 +33,7 @@ Agent chỉ dùng công cụ thật. Mỗi công cụ được tạo từ một 
 | Cho kết nối vào mạng nội bộ (`allow_private`) | org_admin | org_admin |
 | Duyệt lệnh cần duyệt | người yêu cầu tự duyệt (khi tenant bật tự duyệt) hoặc người có vai trò duyệt | như bên trái |
 
-Khi tạo kết nối, công cụ đọc được bật ngay; công cụ ghi, xóa và exec mặc định tắt, chủ kết nối phải bật. Mọi lệnh vẫn qua gateway: luật chặn, ma trận mức rủi ro × môi trường, điểm tin cậy, audit.
+Khi tạo kết nối, công cụ đọc được bật ngay; công cụ ghi, xóa và exec mặc định tắt, chủ kết nối phải bật. Mọi lệnh vẫn qua gateway: luật chặn, ma trận mức rủi ro × môi trường, auto mode, audit (xem [Gateway quyết định thế nào](#gateway-quyết-định-thế-nào)).
 
 ## An toàn khi gọi hệ thống thật
 
@@ -56,8 +56,41 @@ Khi tạo kết nối, công cụ đọc được bật ngay; công cụ ghi, x�
   - Phản hồi tối đa 2 MB, timeout 20 giây.
   - SQL đọc chạy trong giao dịch chỉ đọc.
   - Namespace Kubernetes có thể bị giới hạn theo kết nối; đường dẫn HTTP API có thể bị giới hạn theo tiền tố.
-- **Nội dung chưa tin cậy:** log, trang web, kết quả SQL, HTTP API và exec được đánh dấu chưa tin cậy. Lệnh chạy sau chúng trong cùng hội thoại bị ép hỏi.
+- **Nội dung chưa tin cậy:** log, trang web, kết quả SQL, HTTP API và exec được đánh dấu chưa tin cậy và bọc trong thẻ `<untrusted>` khi đưa vào prompt của agent. Auto mode không đọc kết quả công cụ, nên nội dung này không lái được quyết định cho chạy. Chuỗi bước chạy sau nội dung chưa tin cậy không được học thành công cụ.
 - **Quyền tối thiểu:** nên cấp cho token của kết nối quyền nhỏ nhất cần thiết (RBAC Kubernetes, role Grafana Viewer/Editor, tài khoản CSDL chỉ đọc). Đó là lớp giới hạn ngoài cùng, giữ an toàn kể cả khi chính sách bị cấu hình sai.
+
+## Gateway quyết định thế nào
+
+Theo cách của auto mode trong Claude Code. Lệnh dừng ở bước đầu tiên khớp:
+
+1. **Chặn cố định:** luật `deny` theo tên công cụ, ô `block` của ma trận.
+2. **Bắt buộc hỏi:** change freeze, vượt quota ghi trong ngày (chỉ lệnh ghi), chạy thử phía server lỗi, công tắc `auto_execute` (`off`: mọi lệnh; `read_only`: trừ R0), lý do của luồng sự cố. Grant không vượt qua được các lý do này.
+3. **Ma trận:**
+
+   | | dev | staging | prod |
+   | --- | --- | --- | --- |
+   | R0 | tự chạy | tự chạy | tự chạy |
+   | R1 | tự chạy | tự chạy | auto mode |
+   | R2 | auto mode | auto mode | luôn hỏi |
+   | R3 | auto mode | luôn hỏi | 2 người duyệt |
+   | R4 | luôn hỏi | chặn | chặn |
+
+   Overlay của tenant chỉ được siết (tự chạy → auto mode → hỏi → chặn). Overlay cũ có ngưỡng `ask_below` được đọc thành ô auto mode.
+4. **Auto mode:** một model xét lệnh thay người duyệt.
+   - **Đầu vào:** lời người dùng trong hội thoại, các lệnh họ đã duyệt, và tên, tham số, trạng thái các lệnh agent đã gọi. Không có kết quả công cụ, không có lời của agent.
+   - **Luật** ở trang Chính sách, viết bằng chữ, mỗi tenant tự thêm. Dòng `$defaults` chèn luật mặc định; mục không có `$defaults` thay hẳn luật mặc định của mục đó.
+     - `environment`: mô tả hạ tầng.
+     - `hard_deny`: chặn kể cả khi người dùng yêu cầu.
+     - `soft_deny`: chặn, trừ khi người dùng yêu cầu đích danh đúng hành động và đối tượng, hoặc khớp `allow`.
+     - `allow`: ngoại lệ của `soft_deny`.
+   - **Hai bước:** bước nhanh chỉ trả có/không và nghiêng về chặn. Chỉ khi bị đánh dấu thì bước suy xét kỹ mới chạy và nêu luật bị vi phạm.
+   - **Kết quả:**
+     - Cho qua thì lệnh chạy.
+     - Chặn thì agent nhận lý do (`auto mode chặn: <luật>: <lý do>`) và tìm cách khác. Chặn 3 lần liên tiếp, hoặc 20 lần trong một lượt, thì thành yêu cầu duyệt.
+     - Model lỗi hoặc chưa cấu hình LLM thì hỏi người. Chế độ heuristic chỉ cho qua lệnh đọc mà mọi đối tượng có trong lời người dùng.
+   - **Công cụ local** (`data.*`) ở ô auto mode thì chạy luôn, vì không tác động ra ngoài. `data.script` là R4 nên vẫn luôn hỏi.
+   - **Ô luôn hỏi:** classifier vẫn chạy, nhưng chỉ ghi nhận xét vào lý do cho người duyệt xem.
+5. **Grant "cho phép trong 1 giờ":** cùng người, cùng công cụ, cùng môi trường và namespace thì tự chạy, trừ khi có lý do ở bước 2.
 
 ## Quyền Kubernetes và công cụ kubectl
 
@@ -85,7 +118,7 @@ Quy tắc:
 - API group `*` là mọi group. Resource `*` (cả `pods/*`, `*/scale`) ở nhóm quản trị được ghi nguyên vào Role. Ở nhóm đọc và ghi, kagent đọc API discovery của cụm rồi đổi `*` thành danh sách resource cụ thể, khớp như RBAC (gồm cả subresource), bỏ các loại nhạy cảm ở trên. Danh sách chỉ giữ resource có verb đã chọn, và chỉ giữ resource cấp namespace khi quy tắc không phải namespace `*`. Cài CRD mới thì lần Xem trước sau báo lệch, bấm Áp dụng để cập nhật. API tổng hợp đang lỗi (ví dụ metrics-server hỏng) bị bỏ qua kèm cảnh báo.
 - Khi quy tắc ghi chạm tới workload, hệ thống cảnh báo: ai tạo được pod thì chạy được pod với ServiceAccount bất kỳ trong namespace đó.
 - Chưa áp dụng quyền thì các công cụ kubectl_* báo lỗi, không bao giờ chạy bằng tài khoản quản trị. Nút **Kiểm tra** cho biết danh tính của từng SA.
-- **Kết quả tin cậy theo lệnh:** kubectl_* khai `untrusted_output` nhưng có `trusted_when`. Lệnh chỉ trả dữ liệu có cấu trúc được coi là tin cậy, nên không ép duyệt các lệnh sau và không chặn việc học tri thức. Đó là: `get` các loại có sẵn (pods, deploy, svc, nodes, ns, jobs, pvc, ingress, hpa...) dạng bảng, `-o wide` hoặc `-o name`; `top`; `version`; `api-resources`; `auth can-i/whoami`; `rollout status`; và xác nhận của lệnh ghi khi không có `-o`. Còn lại là chưa tin cậy, gồm `logs`, `describe`, `events`, `-o yaml/json/jsonpath`, configmap, CRD (cột in tùy ý), `explain`, `exec`, `--raw`.
+- **Kết quả tin cậy theo lệnh:** kubectl_* khai `untrusted_output` nhưng có `trusted_when`. Lệnh chỉ trả dữ liệu có cấu trúc được coi là tin cậy, nên không chặn việc học tri thức và công cụ học được. Đó là: `get` các loại có sẵn (pods, deploy, svc, nodes, ns, jobs, pvc, ingress, hpa...) dạng bảng, `-o wide` hoặc `-o name`; `top`; `version`; `api-resources`; `auth can-i/whoami`; `rollout status`; và xác nhận của lệnh ghi khi không có `-o`. Còn lại là chưa tin cậy, gồm `logs`, `describe`, `events`, `-o yaml/json/jsonpath`, configmap, CRD (cột in tùy ý), `explain`, `exec`, `--raw`.
 - **Gỡ khỏi cụm** xóa mọi object có nhãn của kết nối, nhưng giữ namespace. Gỡ kết nối cũng tự gỡ các object đó; nếu không gỡ được, giao diện báo nhãn để xóa tay.
 
 kagent vẫn chặn những gì RBAC không chặn được:
@@ -135,11 +168,10 @@ Bật ở **Cài đặt → Cảnh báo** (tenant admin). Nguồn là các kết
 3. **Điều tra:** sau `debounce_seconds`, agent chạy bằng tài khoản `kagent-alerts` (vai trò member) và chỉ được dùng công cụ đọc. Công cụ ghi bị chặn ngay cả khi model tự gọi tên. Kết quả là báo cáo gồm tiêu đề, nguyên nhân, độ tin, bằng chứng và tối đa 2 hành động.
 4. **Hành động:** đi qua gateway như mọi lệnh khác. Bị ép hỏi khi:
    - tự xử lý đang tắt ở môi trường đó;
-   - độ tin của báo cáo dưới `auto.<env>.min_confidence`;
    - đã vượt `max_auto_actions_per_hour`;
    - lần tự xử lý trước không làm hết cảnh báo.
 
-   Ngoài ra gateway vẫn tự áp chính sách của nó: ma trận rủi ro, độ tin từ tiền lệ/kỹ năng, nội dung chưa tin cậy trong lượt điều tra, change freeze. Ngưỡng của luồng cảnh báo chỉ thêm điều kiện, không nới chính sách. Với ô mặc định R3/dev (`ask_below 0.8`), `kubectl_write` chỉ tự chạy khi đã có tiền lệ.
+   Không bị ép hỏi thì gateway áp ma trận như mọi lệnh. Ô auto mode (ví dụ R3 ở dev) được classifier xét theo `auto_rules`, tức luật tự xử lý do admin viết. Luật này đứng ở chỗ lời người dùng, kèm tên và nhãn của cảnh báo. Classifier không đọc báo cáo, log hay kết quả điều tra, vì những thứ đó viết từ dữ liệu người ngoài ghi được. Luồng này không có agent để thử cách khác, nên classifier chặn thì chuyển ngay thành yêu cầu duyệt. Độ tin của báo cáo chỉ để tham khảo, không còn quyết định tự chạy.
 5. **Xác minh:** lệnh chạy xong (tự động hoặc sau khi duyệt), sau `verify_minutes` kagent xem cảnh báo của sự cố đã hết chưa. Hết thì "đã xử lý"; còn thì "cần người xử lý", và lần sau không tự chạy nữa.
 
 Màn **Sự cố** gồm danh sách (lọc theo trạng thái, tự làm mới 15 giây) và trang chi tiết: nguyên nhân, bằng chứng, các lệnh đã đọc, cảnh báo kèm lý do được gộp (nút Tách), hành động kèm lý do không tự chạy (nút Duyệt/Từ chối), dòng thời gian, nút Gộp/Đóng/Điều tra lại.
@@ -191,7 +223,7 @@ Mức rủi ro tối thiểu được tính từ metadata; template khai `risk_t
 
 ## Chạy nhiều công cụ cùng lúc và công cụ học được
 
-- **Chạy song song:** các lệnh model gọi trong cùng một lượt chạy song song, tối đa 4 lệnh. Kết quả chưa tin cậy chỉ ảnh hưởng các lượt sau. Ở chế độ heuristic, lệnh đọc chạy trước, lệnh ghi chạy sau.
+- **Chạy song song:** các lệnh model gọi trong cùng một lượt chạy song song, tối đa 4 lệnh. Ở chế độ heuristic, lệnh đọc chạy trước, lệnh ghi chạy sau.
 - **Công cụ học được** (`learned.<tên>`) là chuỗi bước gọi các công cụ ở trên, sinh từ thao tác lặp lại hoặc lưu từ chat:
   - Mỗi bước vẫn qua gateway với quyền của người gọi.
   - Nếu kết nối của một bước bị gỡ hoặc tắt, công cụ học được bị chặn theo.

@@ -112,12 +112,10 @@ def test_chat_approval_card_lets_requester_decide(users):
     assert after["status"] == "approved" and after["can_decide"] is False
 
 
-def test_untrusted_content_taints_following_turns(users):
-    alice = users["alice"]  # staging: lệnh đọc R0 không được tự chạy khi có nội dung untrusted (dev thì được, xem test_approval_flow)
+def test_untrusted_content_does_not_force_ask_in_following_turns(users):
+    alice = users["alice"]  # auto mode không đọc kết quả công cụ, nên đọc log xong lệnh đọc sau vẫn theo ma trận
     cid = chat(alice, "tìm log lỗi", env="staging")[0]["conversation_id"]
-    message = done(chat(alice, "xem pod", cid, env="staging"))["message"]
-    assert message["steps"][0]["status"] == "pending"
-    assert any("untrusted" in r for r in message["steps"][0]["reasons"])
+    assert done(chat(alice, "xem pod", cid, env="staging"))["message"]["steps"][0]["status"] == "ok"
 
 
 def test_new_conversation_is_not_tainted(users):

@@ -77,8 +77,6 @@ def test_skill_requires_three_procedures_and_review(users):
     with db.session() as conn:
         row = conn.execute("SELECT * FROM skill WHERE tenant_id=?", (a.tenant,)).fetchone()
         assert json.loads(row["tools"]) == ["k8s.kubectl_read"]
-    step = next(s for s in alice.run("xem pod trong namespace default")["trace"] if s["type"] == "tool_call")
-    assert step["confidence_parts"]["skill"] == 1.0
 
 
 def test_file_read_blocks_traversal(users):

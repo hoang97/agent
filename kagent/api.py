@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import agent as agent_mod
-from . import compiler, connections, db, entities, gateway, incidents, knowledge, learned, learning, llm, net, proxy, tools, vault
+from . import automode, compiler, connections, db, entities, gateway, incidents, knowledge, learned, learning, llm, net, proxy, tools, vault
 from . import live
 from .connectors import k8s_rbac
 from .connectors.base import ConnectorError
@@ -1636,7 +1636,9 @@ def policy_get(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     overlay = json.loads(r["policy"])
     return {"overlay": overlay, "effective": gateway.merge_policy(overlay), "baseline": gateway.BASELINE,
             "auto_promote": bool(r["auto_promote"]), "change_freeze": bool(r["change_freeze"]), "self_approve": bool(r["self_approve"]),
-            "grant_policy": gateway.grant_policy(conn, t.tenant_id), "grant_ttl_minutes": settings.grant_ttl_minutes,
+            "auto_mode": {"custom": automode.tenant_config(conn, t.tenant_id), "effective": automode.effective(automode.tenant_config(conn, t.tenant_id)),
+                          "defaults": automode.defaults()},
+            "grant_ttl_minutes": settings.grant_ttl_minutes,
             "rule_autopublish": compiler.autopublish_policy(conn, t.tenant_id)}
 
 
@@ -1659,7 +1661,7 @@ class TenantSettings(BaseModel):
     auto_promote: bool | None = None
     change_freeze: bool | None = None
     self_approve: bool | None = None
-    grant_policy: dict | None = None
+    auto_mode: dict | None = None
     rule_autopublish: dict | None = None
 
 
@@ -1680,20 +1682,19 @@ def tenant_patch(body: TenantSettings, t: Tenant = Depends(current_tenant), conn
             raise HTTPException(400, f"cấu hình tự publish quy ước không hợp lệ: {exc}") from exc
         conn.execute("UPDATE tenant SET rule_autopublish=? WHERE id=?", (json.dumps(merged), t.tenant_id))
         log.info("tenant %s: %s đặt rule_autopublish=%s", t.tenant_id, t.principal.username, merged)
-    if body.grant_policy is not None:
+    if body.auto_mode is not None:
         try:
-            merged = gateway.check_grant_policy(body.grant_policy)
-        except gateway.PolicyError as exc:
-            raise HTTPException(400, f"chính sách grant không hợp lệ: {exc}") from exc
-        conn.execute("UPDATE tenant SET grant_policy=? WHERE id=?", (json.dumps(merged), t.tenant_id))
-        log.info("tenant %s: %s đặt grant_policy=%s", t.tenant_id, t.principal.username, merged)
+            cfg = automode.check(body.auto_mode)
+        except automode.AutoModeError as exc:
+            raise HTTPException(400, f"luật auto mode không hợp lệ: {exc}") from exc
+        conn.execute("UPDATE tenant SET auto_mode=? WHERE id=?", (json.dumps(cfg, ensure_ascii=False), t.tenant_id))
+        log.info("tenant %s: %s đặt auto_mode=%s", t.tenant_id, t.principal.username, cfg)
     return policy_get(t, conn)
 
 
 class Simulate(BaseModel):
     tool: str
     env: str
-    confidence: float = Field(ge=0, le=1)
 
 
 @app.post("/api/policy/simulate")
@@ -1701,7 +1702,7 @@ def policy_simulate(body: Simulate, t: Tenant = Depends(current_tenant), conn=De
     meta = conn.execute("SELECT risk_tier, canonical FROM tool_registry WHERE tenant_id=? AND tool=?", (t.tenant_id, body.tool)).fetchone()
     if meta is None or body.env not in gateway.ENVS:
         raise HTTPException(400, "công cụ hoặc môi trường không hợp lệ")
-    decision = gateway.evaluate(gateway.get_policy(conn, t.tenant_id), meta["risk_tier"], body.tool, body.env, body.confidence, [], meta["canonical"])
+    decision = gateway.evaluate(gateway.get_policy(conn, t.tenant_id), meta["risk_tier"], body.tool, body.env, [], meta["canonical"])
     return {"risk_tier": meta["risk_tier"], "outcome": decision.outcome, "required": decision.required, "reasons": decision.reasons}
 
 

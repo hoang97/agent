@@ -45,11 +45,11 @@ def test_relay_rejecting_cache_control_falls_back_without_cache(monkeypatch):
 
 
 def test_purpose_tags_structured_calls():
-    p, _ = provider([msg([text(json.dumps({"task_type": "k8s_ops", "entities": []}))]), msg([text(json.dumps({"score": 0.5}))])])
+    p, _ = provider([msg([text(json.dumps({"task_type": "k8s_ops", "entities": []}))]), msg([text(json.dumps({"block": False}))])])
     with llm.collect_usage() as got:
         p.route("xem pod")
-        p.check_plan("xem pod", "k8s.kubectl_read", {})
-    assert [u["purpose"] for u in got] == ["route", "check_plan"]
+        assert p.classify_action({"action": {}})["allow"] is True
+    assert [u["purpose"] for u in got] == ["route", "auto_mode"]
 
 
 def test_openai_cached_tokens_are_split_out():

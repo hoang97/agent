@@ -308,6 +308,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE llm_call ADD COLUMN llm TEXT")  # tên cấu hình LLM đã dùng
     if "grant_policy" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
         conn.execute("ALTER TABLE tenant ADD COLUMN grant_policy TEXT NOT NULL DEFAULT '{}'")
+    if "auto_mode" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
+        conn.execute("ALTER TABLE tenant ADD COLUMN auto_mode TEXT NOT NULL DEFAULT '{}'")  # luật của classifier (automode.py); grant_policy cũ không còn dùng
     if "incident_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(conversation)")}:
         conn.execute("ALTER TABLE conversation ADD COLUMN incident_id TEXT")  # hội thoại điều tra của sự cố: mọi thành viên tenant mở được
     if "conversation_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(incident)")}:

@@ -32,9 +32,14 @@ DEFAULTS = {
     "group_labels": ["cluster", "namespace"],
     "ai_grouping": True, "ai_min_score": 0.8,
     "investigate": True, "debounce_seconds": 30,
-    # Tự xử lý theo môi trường: chỉ tự chạy khi bật và độ tin của báo cáo đạt ngưỡng; gateway vẫn có thể bắt hỏi theo chính sách.
-    "auto": {"dev": {"enabled": True, "min_confidence": 0.8}, "staging": {"enabled": False, "min_confidence": 0.9},
-             "prod": {"enabled": False, "min_confidence": 0.95}},
+    # Tự xử lý theo môi trường. Bật rồi thì hành động vẫn qua gateway: ma trận rủi ro, rồi auto mode xét theo auto_rules dưới đây.
+    "auto": {"dev": {"enabled": True}, "staging": {"enabled": False}, "prod": {"enabled": False}},
+    # Đứng ở chỗ lời người dùng khi auto mode xét hành động của sự cố: chỉ những việc này được tự làm.
+    "auto_rules": [
+        "Được khởi động lại (rollout restart) hoặc scale tăng số replica của workload đang bị cảnh báo, trong đúng namespace của cảnh báo.",
+        "Được tạo silence ngắn (tối đa 2 giờ) cho đúng cảnh báo của sự cố.",
+        "Không xóa tài nguyên, không sửa cấu hình (image, biến môi trường, resource, manifest), không đụng tới đối tượng không có trong cảnh báo.",
+    ],
     "max_auto_actions_per_hour": 1, "verify_minutes": 5,
 }
 
@@ -83,16 +88,16 @@ def check_settings(data) -> dict:
     if not isinstance(auto, dict) or set(auto) - set(ENVS):
         raise IncidentError(f"auto theo môi trường {list(ENVS)}")
     for env, conf in auto.items():
-        if not isinstance(conf, dict) or set(conf) - {"enabled", "min_confidence"}:
-            raise IncidentError(f"auto.{env} chỉ gồm enabled, min_confidence")
-        merged = {**out["auto"][env], **conf}
-        try:
-            merged["min_confidence"] = float(merged["min_confidence"])
-        except (TypeError, ValueError) as exc:
-            raise IncidentError(f"auto.{env}.min_confidence phải là số") from exc
-        if not 0.5 <= merged["min_confidence"] <= 1.0:
-            raise IncidentError(f"auto.{env}.min_confidence phải nằm trong 0.5-1.0")
-        out["auto"][env] = {"enabled": bool(merged["enabled"]), "min_confidence": merged["min_confidence"]}
+        if not isinstance(conf, dict) or set(conf) - {"enabled", "min_confidence"}:  # min_confidence: cài đặt lưu từ trước auto mode, bỏ qua
+            raise IncidentError(f"auto.{env} chỉ gồm enabled")
+        out["auto"][env] = {"enabled": bool(conf.get("enabled", out["auto"][env]["enabled"]))}
+    rules = data.get("auto_rules", out["auto_rules"])
+    if not isinstance(rules, list) or not all(isinstance(r, str) for r in rules):
+        raise IncidentError("auto_rules là danh sách câu")
+    rules = [r.strip() for r in rules if r.strip()]
+    if len(rules) > 20 or any(len(r) > 600 for r in rules):
+        raise IncidentError("auto_rules: tối đa 20 luật, mỗi luật 600 ký tự")
+    out["auto_rules"] = rules
     out["max_auto_actions_per_hour"] = num("max_auto_actions_per_hour", 0, 10)
     out["verify_minutes"] = num("verify_minutes", 1, 60)
     return out
@@ -458,7 +463,6 @@ def _investigate_run(conn, tenant_id: str, incident_id: str, inc, user: str, tas
             _event(conn, tenant_id, incident_id, "stopped", f"điều tra bị dừng bởi {who['username'] if who else 'người dùng'} sau {len(steps)} lệnh đọc",
                    {"by": run.stop.by, "episode_id": ep["id"]})
         return {}
-    tainted = any(s.get("untrusted") for s in steps)
     roles = gateway.user_roles(conn, tenant_id, user)
     tools = _write_tools(conn, tenant_id, user, inc["env"], roles)
     data = {"alerts": alerts, "investigation": ep["output"], "tools": tools,
@@ -472,8 +476,8 @@ def _investigate_run(conn, tenant_id: str, incident_id: str, inc, user: str, tas
                      (report["title"], report["root_cause"], report["confidence"], json.dumps(report["evidence"], ensure_ascii=False), ep["id"], db.iso(), incident_id))
         _event(conn, tenant_id, incident_id, "investigated",
                f"nhận định: {report['title'] or inc['title']} (độ tin {report['confidence']:.2f})",
-               {"episode_id": ep["id"], "steps": len(steps), "tainted": tainted})
-    return act(conn, tenant_id, incident_id, report, user, ep["id"], tainted)
+               {"episode_id": ep["id"], "steps": len(steps)})
+    return act(conn, tenant_id, incident_id, report, user, ep["id"], alerts, steps)
 
 
 def strip_dry_run(args: dict) -> dict:
@@ -493,8 +497,13 @@ def _auto_count(actions: list[dict], since: str) -> int:
     return sum(1 for a in actions if a.get("auto") and (a.get("at") or "") >= since)
 
 
-def act(conn, tenant_id: str, incident_id: str, report: dict, user: str, episode_id: str | None, tainted: bool) -> dict:
-    """Đưa hành động đề xuất qua gateway. Độ tin dưới ngưỡng, tự xử lý đang tắt hay đã quá số lần thì ép hỏi người duyệt."""
+def act(conn, tenant_id: str, incident_id: str, report: dict, user: str, episode_id: str | None, alerts: list[dict] | None = None,
+        steps: list[dict] | None = None) -> dict:
+    """Đưa hành động đề xuất qua gateway. Tự xử lý đang tắt hay đã quá số lần thì ép hỏi người duyệt.
+
+    Auto mode xét hành động theo luật tự xử lý của admin cùng tên và nhãn cảnh báo, không theo báo cáo hay kết quả điều tra
+    vì cả hai được viết từ log và dữ liệu người ngoài ghi được.
+    """
     from . import gateway
     cfg = settings(conn, tenant_id)
     inc = db.row(conn.execute("SELECT * FROM incident WHERE id=?", (incident_id,)).fetchone(), "actions")
@@ -508,14 +517,16 @@ def act(conn, tenant_id: str, incident_id: str, report: dict, user: str, episode
     reasons = []
     if not rule["enabled"]:
         reasons.append(f"tự xử lý đang tắt ở {env}")
-    if report["confidence"] < rule["min_confidence"]:
-        reasons.append(f"độ tin {report['confidence']:.2f} < ngưỡng {rule['min_confidence']} ở {env}")
     hour_ago = (db.now() - timedelta(hours=1)).isoformat(timespec="seconds")
     if _auto_count(inc["actions"], hour_ago) >= cfg["max_auto_actions_per_hour"]:
         reasons.append(f"đã tự xử lý {cfg['max_auto_actions_per_hour']} lần trong 1 giờ cho sự cố này")
     if any(a.get("verified") is False for a in inc["actions"]):
         reasons.append("lần tự xử lý trước không làm hết cảnh báo")
-    ctx = gateway.CallContext(tenant_id, user, env, f"Xử lý sự cố: {inc['title']}", episode_id, tainted=tainted,
+    intent = [f"Tự xử lý sự cố ở môi trường {env}, chỉ trong phạm vi các luật sau của admin:\n" + "\n".join(f"- {r}" for r in cfg["auto_rules"]),
+              "Cảnh báo của sự cố (tên và nhãn): " + json.dumps([{"alertname": a.get("alertname"), "labels": a.get("labels")} for a in alerts or []],
+                                                               ensure_ascii=False)[:3000]]
+    calls = [{"tool": s["tool"], "args": s.get("args"), "status": s.get("status")} for s in steps or []]
+    ctx = gateway.CallContext(tenant_id, user, env, f"Xử lý sự cố: {inc['title']}", episode_id, intent=intent, calls=calls, escalate_on_block=True,
                               roles=gateway.user_roles(conn, tenant_id, user), forced=reasons)
     done = []
     for a in report["actions"]:

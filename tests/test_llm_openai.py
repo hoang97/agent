@@ -102,10 +102,11 @@ def test_api_errors_mapped(status, text):
 def test_malformed_model_output_is_filtered():
     good = {"kind": "lesson", "title": "t", "content": "c", "applies_when": "a", "entities": [], "evidence": "e", "source": "tool", "blame_ku": None}
     items = [good, {**good, "kind": "khac"}, {"kind": "lesson"}, "sai"]
-    p, _ = provider(completion(json.dumps({"items": items})), completion(json.dumps({"task_type": "khac"})), completion(json.dumps({"score": "abc"})), completion("không phải json"))
+    p, _ = provider(completion(json.dumps({"items": items})), completion(json.dumps({"task_type": "khac"})), completion(json.dumps({"block": "abc"})), completion(json.dumps({"block": "x"})), completion("không phải json"))
     assert p.reflect({"input": {}}) == [{**good, "scope": "tenant"}]
     assert p.route("x")["task_type"] == "general"
-    assert p.check_plan("t", "k", {}) == 0.0
+    with pytest.raises(llm.LLMError):  # auto mode không đọc được kết quả thì gateway coi như không đánh giá được
+        p.classify_action({"action": {}})
     with pytest.raises(llm.LLMError):
         p.route("x")
 
@@ -169,3 +170,12 @@ def test_legacy_stored_credential_still_decrypts(users, auto_provider):
         profiles = vault.profiles(conn)
         assert [(p["name"], p["active"]) for p in profiles] == [("Mặc định", True)] and cred.profile == "Mặc định"
         assert conn.execute("SELECT 1 FROM app_secret WHERE name=?", (vault.LEGACY_NAME,)).fetchone() is None
+
+
+def test_low_effort_turns_off_thinking_and_falls_back_once():
+    """vLLM/SGLang nhận chat_template_kwargs để tắt suy luận; dịch vụ báo lỗi tham số này thì gửi lại không có nó và nhớ luôn."""
+    route = completion(json.dumps({"task_type": "k8s_ops", "entities": []}))
+    p, seen = provider((400, {"error": {"message": "Unrecognized request argument supplied: chat_template_kwargs"}}), route, route)
+    assert p.route("xem pod")["task_type"] == "k8s_ops" and p.route("xem pod")["task_type"] == "k8s_ops"
+    assert seen[0]["body"]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "chat_template_kwargs" not in seen[1]["body"] and "chat_template_kwargs" not in seen[2]["body"] and len(seen) == 3

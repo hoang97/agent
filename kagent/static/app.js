@@ -211,7 +211,7 @@ function traceView(trace) {
     const cls = s.status === "ok" ? "ok" : s.status === "pending" ? "pending" : "bad";
     return h("div", { class: "step " + cls },
       h("div", {}, h("b", {}, s.tool), " ", s.risk_tier && h("span", { class: "badge" }, s.risk_tier), " ", h("span", { class: "badge" }, s.env), " ", badge(s.decision), " ", badge(s.status),
-        s.confidence !== undefined && h("span", { class: "small" }, " tin cậy " + s.confidence), s.untrusted && h("span", { class: "badge warn" }, "untrusted")),
+        s.untrusted && h("span", { class: "badge warn" }, "untrusted")),
       s.reasons && s.reasons.length > 0 && h("div", { class: "small" }, s.reasons.join("; ")),
       h("pre", {}, JSON.stringify(s.args)), s.result && h("pre", {}, JSON.stringify(s.result, null, 1)));
   });
@@ -369,13 +369,13 @@ async function alertSettingsView(main) {
     : h("div", { class: "small muted" }, "Chưa có kết nối Alertmanager/Prometheus dùng chung. Tạo ở Công cụ → Kết nối.");
   const labels = h("input", { class: "wide", value: cfg.group_labels.join(", "), disabled: dis, "aria-label": "Nhãn dùng để gom", oninput: (e) => { cfg.group_labels = csv(e.target.value); } });
   const envRows = ["dev", "staging", "prod"].map((env) => h("tr", {}, h("td", {}, env),
-    h("td", {}, h("input", { type: "checkbox", checked: cfg.auto[env].enabled, disabled: dis, "aria-label": `Tự xử lý ở ${env}`, onchange: (e) => { cfg.auto[env].enabled = e.target.checked; } })),
-    h("td", {}, h("input", { type: "number", min: "0.5", max: "1", step: "0.05", value: cfg.auto[env].min_confidence, disabled: dis, "aria-label": `Ngưỡng độ tin ở ${env}`,
-      oninput: (e) => { cfg.auto[env].min_confidence = Number(e.target.value); } }))));
+    h("td", {}, h("input", { type: "checkbox", checked: cfg.auto[env].enabled, disabled: dis, "aria-label": `Tự xử lý ở ${env}`, onchange: (e) => { cfg.auto[env].enabled = e.target.checked; } }))));
+  const autoRules = h("textarea", { class: "code", rows: 5, disabled: dis, "aria-label": "Luật tự xử lý", value: cfg.auto_rules.join("\n"),
+    oninput: (e) => { cfg.auto_rules = e.target.value.split("\n").map((x) => x.trim()).filter(Boolean); } });
   const save = guard(async () => { await api("PUT", "/api/alert-settings", cfg); toast("Đã lưu cài đặt cảnh báo"); renderShell(); });
   const pollNow = guard(async () => { const r = await api("POST", "/api/alert-settings/poll"); toast(`Đã lấy: ${r.new} cảnh báo mới, ${r.resolved} đã hết`); renderShell(); });
   main.append(h("div", { class: "card" }, h("h3", {}, "Tự xử lý cảnh báo"),
-    h("p", { class: "small" }, "kagent định kỳ lấy cảnh báo đang bắn, gom các cảnh báo liên quan thành sự cố (luật nhãn → quan hệ k8s → AI), điều tra bằng lệnh chỉ đọc rồi đề xuất hành động. Hành động chỉ tự chạy khi tự xử lý bật ở môi trường đó, độ tin của báo cáo đạt ngưỡng, và gateway cũng cho tự chạy theo chính sách (ma trận rủi ro, tiền lệ, nội dung chưa tin cậy). Không đạt thì thành yêu cầu duyệt. Lệnh chạy bằng tài khoản kagent-alerts (vai trò member), có audit như mọi lệnh khác."),
+    h("p", { class: "small" }, "kagent định kỳ lấy cảnh báo đang bắn, gom các cảnh báo liên quan thành sự cố (luật nhãn → quan hệ k8s → AI), điều tra bằng lệnh chỉ đọc rồi đề xuất hành động. Hành động chỉ tự chạy khi tự xử lý bật ở môi trường đó và gateway cho tự chạy: ma trận rủi ro, rồi auto mode xét hành động theo luật tự xử lý bên dưới. Auto mode chỉ đọc luật và nhãn cảnh báo, không đọc báo cáo hay log điều tra. Không đạt thì thành yêu cầu duyệt. Lệnh chạy bằng tài khoản kagent-alerts (vai trò member), có audit như mọi lệnh khác."),
     check(cfg, "enabled", "Bật luồng tự xử lý cảnh báo"),
     h("h3", {}, "Nguồn cảnh báo"), sources,
     h("h3", {}, "Gom nhóm"),
@@ -384,7 +384,8 @@ async function alertSettingsView(main) {
     check(cfg, "ai_grouping", "Dùng AI gom khi luật không quyết được"), num("ai_min_score", "Điểm tối thiểu để AI gộp (0.5–1)", "0.05"),
     h("h3", {}, "Điều tra và tự xử lý"),
     check(cfg, "investigate", "Tự điều tra sự cố mới (agent chỉ dùng công cụ đọc)"),
-    h("table", { class: "incident-table" }, h("thead", {}, h("tr", {}, h("th", {}, "Môi trường"), h("th", {}, "Tự xử lý"), h("th", {}, "Độ tin tối thiểu"))), h("tbody", {}, envRows)),
+    h("table", { class: "incident-table" }, h("thead", {}, h("tr", {}, h("th", {}, "Môi trường"), h("th", {}, "Tự xử lý"))), h("tbody", {}, envRows)),
+    h("label", { class: "field" }, "Luật tự xử lý (mỗi dòng một luật). Auto mode coi các luật này như lời người dùng khi xét hành động đề xuất: chỉ việc nằm trong luật mới được tự chạy", autoRules),
     h("div", { class: "row" }, num("max_auto_actions_per_hour", "Số lần tự xử lý tối đa mỗi sự cố mỗi giờ"), num("verify_minutes", "Xác minh sau (phút)")),
     info.can_manage ? h("div", { class: "row" }, h("button", { type: "button", onclick: save }, "Lưu"), h("button", { type: "button", class: "ghost", onclick: pollNow }, "Lấy cảnh báo ngay"))
       : h("div", { class: "small muted" }, "Chỉ tenant admin được đổi cài đặt này.")));
@@ -573,7 +574,7 @@ VIEWS.approvals = async (main) => {
   const card = (a) => {
     const reason = h("input", { placeholder: "Lý do từ chối", "aria-label": "Lý do từ chối" });
     const act = (action) => guard(async () => { const r = await api("POST", `/api/approvals/${a.id}/decide`, { action, reason: reason.value || null }); toast(r.status === "pending" ? "Đã ghi nhận, cần thêm người duyệt" : "Đã xử lý: " + (LABEL[r.status] || r.status)); renderShell(); });
-    return h("div", { class: "card" }, h("div", { class: "row spread" }, h("h3", {}, a.tool), h("div", {}, h("span", { class: "badge" }, a.risk_tier), h("span", { class: "badge" }, a.env), h("span", { class: "badge info" }, `tin cậy ${a.confidence}`), h("span", { class: "badge" }, `${a.decided_by.length}/${a.required_approvals} duyệt`))),
+    return h("div", { class: "card" }, h("div", { class: "row spread" }, h("h3", {}, a.tool), h("div", {}, h("span", { class: "badge" }, a.risk_tier), h("span", { class: "badge" }, a.env), h("span", { class: "badge" }, `${a.decided_by.length}/${a.required_approvals} duyệt`))),
       h("div", {}, "Yêu cầu gốc: ", a.original_request), h("div", { class: "small" }, `Người yêu cầu: ${a.requester} · hết hạn ${fmtTime(a.expires_at)}`), h("div", { class: "small" }, "Lý do cần duyệt: " + a.reasons.join("; ")),
       h("pre", {}, JSON.stringify(a.args, null, 1)), a.dry_run && h("pre", {}, "Dry-run: " + JSON.stringify(a.dry_run)), a.rollback_hint && h("div", { class: "small" }, "Cách hoàn tác: " + a.rollback_hint),
       a.can_decide ? h("div", { class: "row" }, h("button", { onclick: act("approve_once") }, a.mine ? "Chạy lệnh" : "Duyệt một lần"), h("button", { class: "ghost", onclick: act("approve_session") }, "Cho phép trong 1 giờ"), reason, h("button", { class: "danger", onclick: act("deny") }, "Từ chối"))
@@ -982,7 +983,6 @@ function personalSection() {
   return wrap;
 }
 
-const GRANT_MODE = { off: "không phủ", read: "chỉ lệnh đọc", all: "mọi lệnh" };
 
 function ruleAutopublishCard(p) {
   const c = p.rule_autopublish;
@@ -1002,43 +1002,46 @@ function ruleAutopublishCard(p) {
     isAdmin() && h("div", { class: "row" }, h("button", { onclick: save }, "Lưu")));
 }
 
-function grantPolicyCard(p) {
-  const envs = ["dev", "staging", "prod"];
-  const controls = {};
-  const rows = envs.map((e) => {
-    const cur = p.grant_policy[e];
-    const mode = h("select", { "aria-label": `Phạm vi ở ${e}`, disabled: !isAdmin() },
-      Object.entries(GRANT_MODE).filter(([k]) => !(e === "prod" && k === "all")).map(([k, label]) => h("option", { value: k, selected: cur.untrusted === k }, label)));
-    const conf = h("input", { type: "number", min: 0, max: 1, step: 0.05, value: String(cur.min_confidence), "aria-label": `Tin cậy tối thiểu ở ${e}`, disabled: !isAdmin() });
-    const auto = h("select", { "aria-label": `Lệnh đọc tự chạy ở ${e}`, disabled: !isAdmin() },
-      [["none", "không"], ["R0", "R0 (đọc thường)"], ["R1", "R0, R1 (cả đọc nhạy cảm)"]].filter(([k]) => !(e === "prod" && k === "R1"))
-        .map(([k, label]) => h("option", { value: k, selected: cur.untrusted_auto === k }, label)));
-    controls[e] = { mode, conf, auto };
-    return h("tr", {}, h("td", {}, e), h("td", {}, auto), h("td", {}, mode), h("td", {}, conf));
+const AUTO_SECTIONS = [
+  ["environment", "Môi trường", "Mô tả hạ tầng: cụm, namespace, project nào là prod, đích nào tin cậy."],
+  ["hard_deny", "Cấm luôn", "Chặn kể cả khi người dùng yêu cầu."],
+  ["soft_deny", "Chặn trừ khi được yêu cầu đích danh", "Chặn, trừ khi người dùng nêu đúng hành động và đối tượng, hoặc khớp một luật cho phép."],
+  ["allow", "Cho phép", "Ngoại lệ của mục trên."],
+];
+
+function autoModeCard(p) {
+  const am = p.auto_mode;
+  const boxes = {};
+  const rows = AUTO_SECTIONS.map(([key, title, hint]) => {
+    const custom = am.custom[key];
+    boxes[key] = h("textarea", { class: "code", rows: 6, disabled: !isAdmin(), "aria-label": title,
+      value: (custom || ["$defaults"]).join("\n") });
+    return h("div", {}, h("h3", {}, title), h("div", { class: "small" }, hint),
+      boxes[key],
+      h("details", {}, h("summary", { class: "small" }, `Đang áp dụng (${am.effective[key].length} luật)`), h("ul", { class: "small" }, am.effective[key].map((r) => h("li", {}, r)))));
   });
   const save = guard(async () => {
-    const grant_policy = Object.fromEntries(envs.map((e) => [e, { untrusted: controls[e].mode.value, min_confidence: Number(controls[e].conf.value), untrusted_auto: controls[e].auto.value }]));
-    await api("PATCH", "/api/tenant", { grant_policy });
+    const auto_mode = Object.fromEntries(AUTO_SECTIONS.map(([key]) => [key, boxes[key].value.split("\n").map((x) => x.trim()).filter(Boolean)]));
+    await api("PATCH", "/api/tenant", { auto_mode });
     toast("Đã lưu");
     renderShell();
   });
   return h("div", { class: "card" },
-    h("p", { class: "small" }, "Khi kế hoạch của agent chịu ảnh hưởng từ nội dung untrusted (log, trang web), mọi lệnh đều phải hỏi. Bảng này quy định, ở từng môi trường: lệnh đọc mức nào vẫn tự chạy; và quyền \"Cho phép trong 1 giờ\" có được thay cho việc hỏi lại không, với điểm tin cậy tối thiểu của lệnh. Không có nội dung untrusted thì quyền này luôn có hiệu lực. Ở prod không cho phủ lệnh ghi."),
-    h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Môi trường"), h("th", {}, "Lệnh đọc tự chạy, không cần grant"), h("th", {}, "Grant phủ thêm"), h("th", {}, "Tin cậy tối thiểu của grant"))), h("tbody", {}, rows)),
+    h("p", { class: "small" }, "Lệnh rơi vào ô \"auto mode\" của ma trận được một model xét thay người duyệt. Model chỉ đọc lời người dùng, các lệnh họ đã duyệt và các lệnh agent đã gọi; không đọc kết quả công cụ, nên log hay trang web độc hại không lái được nó. Cho qua thì lệnh chạy; chặn thì agent nhận lý do và tìm cách khác; chặn 3 lần liên tiếp (hoặc 20 lần trong một lượt) thì chuyển sang hỏi người. Model lỗi hoặc chưa cấu hình LLM thì hỏi người. Mỗi dòng là một luật viết bằng chữ; dòng $defaults chèn các luật mặc định."),
+    rows,
     isAdmin() && h("div", { class: "row" }, h("button", { onclick: save }, "Lưu")));
 }
 
 async function policyView(main) {
   const [tools, p] = await Promise.all([api("GET", "/api/tools"), api("GET", "/api/policy")]);
-  const cellText = (c) => (typeof c === "string" ? ({ auto: "tự động", ask: "luôn hỏi", block: "chặn" }[c]) : c.ask_below !== undefined ? `hỏi nếu < ${c.ask_below}` : `hỏi, ${c.ask} người`);
+  const cellText = (c) => (typeof c === "string" ? ({ auto: "tự động", judge: "auto mode", ask: "luôn hỏi", block: "chặn" }[c]) : `hỏi, ${c.ask} người`);
   const editor = persist(h("textarea", { class: "code", value: JSON.stringify(p.overlay, null, 2), "aria-label": "Overlay chính sách" }), "policy:overlay");
   const save = guard(async () => { let overlay; try { overlay = JSON.parse(editor.value); } catch { throw new Error("JSON không hợp lệ"); } await api("PUT", "/api/policy", { overlay }); store.set("policy:overlay", null); toast("Đã lưu chính sách"); renderShell(); });
   const setFlag = (key, value) => guard(async () => { await api("PATCH", "/api/tenant", { [key]: value }); renderShell(); });
   const simTool = h("select", { "aria-label": "Công cụ" }, tools.map((t) => h("option", {}, t.tool)));
   const simEnv = h("select", { "aria-label": "Môi trường" }, ["dev", "staging", "prod"].map((x) => h("option", {}, x)));
-  const simConf = h("input", { type: "number", min: 0, max: 1, step: 0.05, value: "0.9", "aria-label": "Điểm tin cậy" });
   const simOut = h("div", { class: "small" });
-  const sim = guard(async () => { const r = await api("POST", "/api/policy/simulate", { tool: simTool.value, env: simEnv.value, confidence: Number(simConf.value) }); simOut.textContent = `${r.risk_tier} → ${LABEL[r.outcome] || r.outcome}${r.required ? `, ${r.required} người duyệt` : ""}. ${r.reasons.join("; ")}`; });
+  const sim = guard(async () => { const r = await api("POST", "/api/policy/simulate", { tool: simTool.value, env: simEnv.value }); simOut.textContent = `${r.risk_tier} → ${r.outcome === "judge" ? "auto mode xét" : LABEL[r.outcome] || r.outcome}${r.required ? `, ${r.required} người duyệt` : ""}. ${r.reasons.join("; ")}`; });
   const tiers = ["R0", "R1", "R2", "R3", "R4"];
   main.append(h("h2", {}, "Chính sách hiệu lực"), h("div", { class: "card scroll" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Mức"), ["dev", "staging", "prod"].map((e) => h("th", {}, `${e} (${p.effective.environments[e].auto_execute})`)))),
     h("tbody", {}, tiers.map((t) => h("tr", {}, h("td", {}, t), ["dev", "staging", "prod"].map((e) => h("td", {}, cellText(p.effective.matrix[t][e]))))))),
@@ -1046,9 +1049,10 @@ async function policyView(main) {
     isAdmin() && h("div", { class: "row" }, h("button", { class: "ghost", onclick: setFlag("change_freeze", !p.change_freeze) }, p.change_freeze ? "Tắt change freeze" : "Bật change freeze"), h("button", { class: "ghost", onclick: setFlag("auto_promote", !p.auto_promote) }, p.auto_promote ? "Tắt tự động thăng hạng" : "Bật tự động thăng hạng"),
       h("button", { class: "ghost", onclick: setFlag("self_approve", !p.self_approve) }, p.self_approve ? "Bắt buộc người khác duyệt lệnh" : "Cho người dùng tự duyệt lệnh")),
     h("div", { class: "small" }, p.self_approve ? "Người dùng tự xác nhận lệnh cần duyệt của chính mình. Thay đổi công cụ dùng chung vẫn cần admin." : "Lệnh cần duyệt phải do người có quyền duyệt khác xác nhận; R3 ở prod cần 2 người.")),
-    h("h2", {}, `Cho phép trong ${p.grant_ttl_minutes} phút`), grantPolicyCard(p),
+    h("div", { class: "small" }, `"Cho phép trong ${p.grant_ttl_minutes} phút" khi duyệt: cùng công cụ, cùng namespace thì tự chạy, trừ khi có lý do bắt buộc hỏi (change freeze, quota ghi, chạy thử lỗi).`),
+    h("h2", {}, "Luật auto mode"), autoModeCard(p),
     h("h2", {}, "Tự publish quy ước core"), ruleAutopublishCard(p),
-    h("h2", {}, "Thử quyết định"), h("div", { class: "card" }, h("div", { class: "row" }, simTool, simEnv, simConf, h("button", { class: "ghost", onclick: sim }, "Thử")), simOut),
+    h("h2", {}, "Thử quyết định"), h("div", { class: "card" }, h("div", { class: "row" }, simTool, simEnv, h("button", { class: "ghost", onclick: sim }, "Thử")), simOut),
     isAdmin() && h("h2", {}, "Overlay của tenant (chỉ được siết)"), isAdmin() && h("div", { class: "card" }, editor, h("div", { class: "row" }, h("button", { onclick: save }, "Lưu"))));
 }
 

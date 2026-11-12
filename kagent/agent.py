@@ -179,13 +179,14 @@ def clean_answer(text: str) -> str:
 
 def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
     """Các lượt gần nhất trong ngân sách cố định, gồm kết quả các lệnh đã được duyệt sau đó."""
-    empty = {"messages": [], "tainted": False, "last_task": ""}
+    empty = {"messages": [], "intent": [], "calls": [], "last_task": ""}
     if not conversation_id:
         return empty
     rs = conn.execute("SELECT * FROM episode WHERE tenant_id=? AND conversation_id=? ORDER BY started_at DESC, rowid DESC LIMIT 12",
                       (tenant_id, conversation_id)).fetchall()
     turns: list[tuple[str, str, str]] = []
-    tainted = False
+    intent: list[str] = []
+    calls: list[dict] = []
     used, limit = 0, settings.budget_history * 4
     for i, r in enumerate(rs):
         ep = db.row(r, "input", "trace")
@@ -209,15 +210,16 @@ def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
             break
         used += size
         turns.insert(0, (ep["input"]["task"], answer, note))
-        # Nội dung untrusted nằm trong lịch sử vẫn có thể lái kế hoạch của lượt sau.
-        tainted = tainted or any(s.get("untrusted") for s in ep["trace"]) or any(
-            a["status"] == "approved" and _untrusted_tool(conn, tenant_id, a["tool"], a["args"]) for a in approvals)
+        # Cho auto mode: lời người dùng và lệnh họ đã duyệt là ý của họ; lệnh agent đã gọi chỉ gồm tên, tham số, trạng thái.
+        approved = [f"[người dùng đã duyệt lệnh] {a['tool']} {json.dumps(a['args'], ensure_ascii=False)}" for a in approvals if a["status"] == "approved"]
+        intent[:0] = [ep["input"]["task"], *approved]
+        calls[:0] = [{"tool": s["tool"], "args": s.get("args"), "status": s.get("status")} for s in ep["trace"] if s.get("type") == "tool_call"]
     messages = []
     for task, answer, note in turns:
         messages += [{"role": "user", "content": task}, {"role": "assistant", "content": answer}]
         if note:
             messages.append({"role": "user", "content": note})
-    return {"messages": messages, "tainted": tainted, "last_task": turns[-1][0] if turns else ""}
+    return {"messages": messages, "intent": intent, "calls": calls, "last_task": turns[-1][0] if turns else ""}
 
 
 def run_task(conn, tenant_id: str, user_id: str, task: str, env: str = "dev", project: str | None = None, agent_id: str = "ops-agent",
@@ -257,7 +259,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
 
     live.current_stop.set(cancelled)
     roles = gateway.user_roles(conn, tenant_id, user_id)
-    ctx = gateway.CallContext(tenant_id, user_id, env, task, episode_id, tainted=history["tainted"], roles=roles)
+    ctx = gateway.CallContext(tenant_id, user_id, env, task, episode_id, intent=[*history["intent"], task], calls=list(history["calls"]), roles=roles)
 
     def on_text(text: str) -> None:
         partial.append(text)
@@ -273,7 +275,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
                     "reasons": ["lượt này chỉ được dùng công cụ đọc"]}
             emit({"type": "tool_end", "step": step})
             return step
-        local = replace(ctx, independent=provider.check_plan(task, name, args), roles=set(ctx.roles))
+        local = replace(ctx, roles=set(ctx.roles))
         step = gateway.invoke(c, local, name, args)
         emit({"type": "tool_end", "step": step})
         return step
@@ -306,7 +308,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
             wait(futures, timeout=0.2, return_when=FIRST_COMPLETED)
 
     def batch(calls: list[tuple[str, dict]]) -> list[dict]:
-        """Các lệnh trong một lượt được lập kế hoạch cùng lúc nên chạy song song; kết quả untrusted chỉ ảnh hưởng các lượt sau."""
+        """Các lệnh trong một lượt được lập kế hoạch cùng lúc nên chạy song song."""
         llm.check_cancelled(cancelled)
         calls = [(name, args if isinstance(args, dict) else {}) for name, args in calls]
         for name, args in calls:
@@ -319,7 +321,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
             # Mỗi lệnh chạy ở luồng riêng để nút dừng có tác dụng ngay. Không dùng with: dừng thì không đợi luồng đã bỏ.
             pool = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, len(calls)), thread_name_prefix="tool")
             try:
-                # copy_context để lần gọi LLM kiểm tra độc lập trong luồng con vẫn được đo vào lượt này.
+                # copy_context để lần gọi auto mode trong luồng con vẫn được đo vào lượt này.
                 futures = [pool.submit(contextvars.copy_context().run, run_isolated, *call) for call in calls]
                 steps = wait_or_stop(futures, calls)
             finally:
@@ -334,8 +336,6 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
                 step["result"], step["result_id"] = small, small["result_id"]
             trace.append(step)
             statuses.append(step["status"])
-        if any(step.get("untrusted") for step in steps):
-            ctx.tainted = True
         llm.check_cancelled(cancelled)  # lệnh ghi đã chạy xong và được ghi lại; giờ mới dừng
         return steps
 

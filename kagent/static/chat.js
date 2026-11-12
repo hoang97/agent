@@ -139,7 +139,7 @@ function approvalCard(a, onDecide, streaming) {
   const heading = failed ? "Lệnh đã duyệt nhưng chạy lỗi" : done ? `Lệnh ${LABEL[a.status] || a.status}` : "Lệnh đang chờ duyệt";
   return h("div", { class: "approval " + (failed ? "bad" : CLASS[a.status] || "") },
     h("div", { class: "approval-head" }, h("strong", {}, heading), badge(failed ? "error" : a.status)),
-    h("div", {}, h("code", {}, a.tool), ` ở ${a.env} · ${a.risk_tier} · tin cậy ${a.confidence}`),
+    h("div", {}, h("code", {}, a.tool), ` ở ${a.env} · ${a.risk_tier}`),
     a.args && Object.keys(a.args).length > 0 && h("div", { class: "approval-args" },
       Object.entries(a.args).map(([k, v]) => typeof v === "string" && v.includes("\n")
         ? h("div", {}, h("span", { class: "muted" }, k + ":"), h("pre", { class: "approval-code" }, v))  // code của data.script: giữ xuống dòng để người duyệt đọc được
