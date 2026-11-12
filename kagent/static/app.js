@@ -239,7 +239,7 @@ function episodeCard(ep, onDone) {
 
 // ---------- Sự cố: cảnh báo được gom, điều tra, xử lý tự động ----------
 const SEV_CLASS = { critical: "bad", error: "bad", high: "bad", warning: "warn", medium: "warn" };
-const STAGE_CLASS = { handled: "ok", verifying: "info", investigating: "info", awaiting_approval: "warn", reported: "warn", needs_human: "bad", error: "bad" };
+const STAGE_CLASS = { handled: "ok", verifying: "info", investigating: "info", awaiting_approval: "warn", reported: "warn", needs_human: "bad", error: "bad", cleared: "ok" };
 const STEP_STATUS = { ok: "đã chạy", dry_run_only: "chỉ chạy thử", pending: "chờ duyệt", approved: "đã duyệt", denied: "bị từ chối", expired: "hết hạn duyệt", blocked: "bị chặn", error: "lỗi", invalid: "sai tham số" };
 function ago(iso) {
   if (!iso) return "—";

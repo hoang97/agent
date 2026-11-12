@@ -631,7 +631,16 @@ def tick(conn) -> None:
 # ---------- xem và chỉnh tay ----------
 
 STAGE_LABEL = {"new": "mới", "investigating": "đang điều tra", "reported": "đã báo cáo, cần người xem", "awaiting_approval": "chờ duyệt",
-               "verifying": "đang xác minh", "handled": "đã xử lý", "needs_human": "cần người xử lý", "error": "lỗi"}
+               "verifying": "đang xác minh", "handled": "đã xử lý", "needs_human": "cần người xử lý", "error": "lỗi",
+               "cleared": "cảnh báo đã hết", "closed": "đã đóng"}
+WAITING_ON_HUMAN = ("new", "reported", "needs_human", "error")
+
+
+def _shown_stage(d: dict) -> str:
+    """Sự cố không còn mở thì không còn chờ ai. Tính lúc đọc vì stage còn bị ghi sau khi hết cảnh báo (điều tra đang chạy, lệnh bị từ chối)."""
+    if d["status"] != "open" and d["stage"] in WAITING_ON_HUMAN:
+        return "cleared" if d["status"] == "resolved" else "closed"
+    return d["stage"]
 
 
 def list_incidents(conn, tenant_id: str, status: str = "open", limit: int = 100) -> list[dict]:
@@ -643,6 +652,7 @@ def list_incidents(conn, tenant_id: str, status: str = "open", limit: int = 100)
         d = db.row(r, "evidence", "actions")
         counts = conn.execute("SELECT count(*) n, sum(status='firing') f, group_concat(DISTINCT source) s FROM alert_event WHERE incident_id=?", (r["id"],)).fetchone()
         last_action = d["actions"][-1] if d["actions"] else None
+        d["stage"] = _shown_stage(d)
         out.append({**{k: d[k] for k in ("id", "env", "title", "severity", "status", "stage", "confidence", "created_at", "last_alert_at", "resolved_at")},
                     "stage_label": STAGE_LABEL.get(d["stage"], d["stage"]), "alerts": counts["n"], "firing": counts["f"] or 0,
                     "sources": (counts["s"] or "").split(",") if counts["s"] else [], "investigating": r["id"] in _running,
@@ -703,6 +713,7 @@ def get(conn, tenant_id: str, incident_id: str) -> dict:
     if r is None:
         raise IncidentError("không tìm thấy sự cố", 404)
     d = db.row(r, "evidence", "actions")
+    d["stage"] = _shown_stage(d)
     d["stage_label"] = STAGE_LABEL.get(d["stage"], d["stage"])
     d["investigating"] = incident_id in _running
     d["alerts"] = [{**db.row(a, "labels"), "join_label": _method_label(a["join_method"] or "")} for a in conn.execute(

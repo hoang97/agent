@@ -267,6 +267,20 @@ def test_no_safe_action_means_reported(flow, users):
     assert inc["stage"] == "reported" and any(e["kind"] == "no_action" for e in inc["timeline"])
 
 
+def test_resolved_or_closed_incident_no_longer_waits_on_human(flow, users, infra):
+    iid = _web_incident(users)
+    with db.session() as conn:
+        conn.execute("UPDATE incident SET stage='needs_human' WHERE id=?", (iid,))  # vd lệnh khắc phục bị từ chối
+    infra.am_alerts[:] = infra.am_alerts[:1]
+    poll(users)
+    inc = flow.get(f"/api/incidents/{iid}").json()
+    assert inc["status"] == "resolved" and (inc["stage"], inc["stage_label"]) == ("cleared", "cảnh báo đã hết")
+    assert next(i for i in flow.get("/api/incidents?status=all").json()["items"] if i["id"] == iid)["stage"] == "cleared"
+    other = next(i["id"] for i in flow.get("/api/incidents").json()["items"])
+    flow.post(f"/api/incidents/{other}/close", json={"note": ""})
+    assert flow.get(f"/api/incidents/{other}").json()["stage"] == "closed"
+
+
 def test_read_only_run_blocks_write_tools_even_if_model_calls_them(users):
     class Rogue(llm.HeuristicProvider):
         def run_agent(self, task, context, tool_list, call_tool, **kw):
