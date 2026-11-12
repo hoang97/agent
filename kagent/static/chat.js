@@ -743,8 +743,9 @@ function chatView(main) {
         const data = await api("GET", `/api/conversations/${state.conversationId}`);
         if (data.incident_id) {
           // Hội thoại điều tra của sự cố: dùng chung trong tenant, lượt đầu do kagent-alerts chạy.
-          thread.append(h("div", { class: "card incident-banner" }, h("strong", {}, data.title), " ",
-            h("span", { class: "small" }, "Hội thoại điều tra dùng chung của sự cố; hỏi thêm hoặc yêu cầu khắc phục ngay tại đây. "),
+          thread.append(h("div", { class: "card incident-banner" },
+            h("div", { class: "incident-banner-text", title: data.title }, h("strong", {}, data.title), " ",
+              h("span", { class: "small" }, "Hội thoại điều tra dùng chung của sự cố; hỏi thêm hoặc yêu cầu khắc phục ngay tại đây.")),
             h("button", { type: "button", class: "ghost small-btn", onclick: () => go("incidents", undefined, data.incident_id) }, "Xem sự cố")));
         }
         data.messages.forEach(addMessage);
