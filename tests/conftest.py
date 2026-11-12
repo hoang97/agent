@@ -69,7 +69,8 @@ class Session:
 def infra(monkeypatch, tmp_path):
     """Mọi test chạy connector thật trên hạ tầng giả: không DNS, không mạng, không CSDL thật."""
     from kagent import net
-    from kagent.connectors import kubectl, sql as sql_connector
+    from kagent.connectors import kubectl, openstack, sql as sql_connector
+    openstack._cache.clear()
     fake = fakes.Infra()
     monkeypatch.setattr(net, "resolve", fakes.resolve)
     monkeypatch.setattr(net, "transport_override", fake.transport)

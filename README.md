@@ -4,7 +4,7 @@ Agent tự tích lũy tri thức, có gateway phân quyền công cụ và giao 
 `Kiến trúc tích lũy tri thức tự động cho AI Agent.md`; phạm vi MVP và các điểm khác thiết kế ở `docs/PLAN.md`;
 lịch sử cải tiến ở `docs/IMPROVEMENTS.md`.
 
-Agent dùng công cụ thật (Kubernetes, Grafana, Prometheus, Alertmanager, Elasticsearch/Kibana, Web, HTTP API, PostgreSQL, MySQL). Admin hoặc user tạo **kết nối** từ template
+Agent dùng công cụ thật (Kubernetes, OpenStack, Grafana, Prometheus, Alertmanager, Elasticsearch/Kibana, Web, HTTP API, PostgreSQL, MySQL). Admin hoặc user tạo **kết nối** từ template
 bằng tham số của riêng mình ở trang **Kết nối công cụ**; chi tiết ở `docs/TOOLS.md`.
 
 ## Chạy cục bộ

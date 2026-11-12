@@ -1,0 +1,85 @@
+template: openstack
+title: OpenStack
+description: "Gọi REST API của các dịch vụ OpenStack (Nova, Neutron, Cinder, Glance, Heat, Octavia, Keystone...) theo service catalog. Xác thực Keystone v3 bằng clouds.yaml hoặc openrc; quyền thật là role của tài khoản trong project."
+ping: openstack:ping
+validate: openstack:validate_params
+fields:
+  - {name: config, type: secret_text, required: true, description: "Nội dung clouds.yaml hoặc file openrc (export OS_AUTH_URL=...). Hỗ trợ password, application credential, token"}
+  - {name: cloud, type: string, description: "Tên cloud trong clouds.yaml; để trống nếu file chỉ có một cloud"}
+  - {name: password, type: secret, description: "Mật khẩu, khi config không chứa (openrc tải từ Horizon hỏi mật khẩu lúc chạy); điền thì thay mật khẩu trong config"}
+  - {name: region, type: string, description: "Region; để trống thì theo config hoặc lấy endpoint đầu tiên"}
+  - {name: interface, type: string, description: "Loại endpoint: public, internal hoặc admin; để trống thì theo config, mặc định public"}
+  - {name: ca_cert, type: text, description: "Chứng chỉ CA dạng PEM nếu Keystone và các endpoint dùng CA riêng (cacert trong clouds.yaml là đường dẫn file nên không đọc được)"}
+  - {name: verify_tls, type: boolean, default: true, description: "Kiểm tra chứng chỉ TLS (verify: false trong clouds.yaml không có tác dụng)"}
+  - {name: proxy, type: string, default: auto, description: "auto = theo file PAC ở Cài đặt → Proxy; none = đi thẳng; hoặc http://host:port"}
+tools:
+  # Chia theo việc gọi làm gì, không theo dịch vụ, để agent gọi được hầu hết API mà mức rủi ro vẫn đúng. Role trong project là giới hạn thật.
+  - name: list_services
+    description: "Liệt kê dịch vụ trong service catalog (type, URL endpoint), cùng user, project và role đang dùng. Gọi trước để biết path tính từ đâu"
+    handler: openstack:list_services
+    action_class: read
+    data_sensitivity: internal
+    input_schema:
+      properties: {}
+
+  - name: api_read
+    description: >-
+      Gọi GET tới API của một dịch vụ OpenStack (và POST os-getConsoleOutput để xem log console máy ảo). service là type trong catalog hoặc tên quen
+      (nova, neutron, cinder, glance, heat, octavia, keystone...). path tính từ URL endpoint trong catalog, ví dụ compute: /servers/detail?status=ERROR,
+      /os-hypervisors/detail; network: /v2.0/ports?device_id=...; image: /v2/images; block-storage: /volumes/detail; orchestration: /stacks;
+      load-balancer: /v2/lbaas/loadbalancers. Không đọc được payload của secret, credential EC2, mật khẩu máy ảo
+    handler: openstack:api_read
+    action_class: read
+    blast_radius: object
+    data_sensitivity: personal
+    untrusted_output: true
+    input_schema:
+      properties:
+        service: {type: string, description: "Service type hoặc tên: compute/nova, network/neutron, block-storage/cinder, image/glance..."}
+        path: {type: string, description: "Đường dẫn tính từ endpoint, bắt đầu bằng /"}
+        method: {type: string, description: "GET (mặc định), HEAD, hoặc POST cho action os-getConsoleOutput"}
+        query: {type: object, description: "Tham số query, ví dụ {\"all_tenants\": 1, \"limit\": 50}"}
+        body: {type: object, description: "Chỉ dùng với POST os-getConsoleOutput, ví dụ {\"os-getConsoleOutput\": {\"length\": 100}}"}
+        microversion: {type: string, description: "Microversion của API, ví dụ 2.79 hoặc latest"}
+      required: [service, path]
+
+  - name: api_write
+    description: >-
+      Gọi POST, PUT, PATCH tới API OpenStack: tạo hoặc sửa tài nguyên, action máy ảo (os-start, os-stop, reboot, resize, confirmResize, migrate...),
+      gắn volume, sửa port, security group... bằng role của tài khoản. Không xóa (DELETE), không gọi action phá dữ liệu (rebuild, forceDelete,
+      evacuate, reset state, revert volume), không sửa Keystone; những việc đó dùng api_admin
+    handler: openstack:api_write
+    action_class: write
+    reversible: partial
+    blast_radius: namespace
+    data_sensitivity: internal
+    untrusted_output: true
+    rollback_hint: "Gọi action ngược (os-start sau os-stop, revertResize sau resize), hoặc PUT lại giá trị cũ đã đọc trước khi sửa"
+    input_schema:
+      properties:
+        service: {type: string}
+        path: {type: string, description: "Ví dụ /servers/<id>/action"}
+        method: {type: string, description: "POST, PUT hoặc PATCH"}
+        query: {type: object}
+        body: {type: object, description: "Thân JSON, ví dụ {\"reboot\": {\"type\": \"SOFT\"}}"}
+        microversion: {type: string}
+      required: [service, path, method]
+
+  - name: api_admin
+    description: "Gọi API OpenStack bất kỳ, kể cả DELETE, action phá dữ liệu, thay đổi Keystone và đọc secret, trong phạm vi role của tài khoản. Luôn cần duyệt"
+    handler: openstack:api_admin
+    action_class: destructive
+    reversible: "no"
+    blast_radius: cluster
+    data_sensitivity: secret
+    untrusted_output: true
+    rollback_hint: "Tài nguyên đã xóa không tự khôi phục; tạo lại từ thông tin đã đọc trước đó, hoặc từ snapshot/backup"
+    input_schema:
+      properties:
+        service: {type: string}
+        path: {type: string}
+        method: {type: string, description: "GET, HEAD, POST, PUT, PATCH hoặc DELETE"}
+        query: {type: object}
+        body: {type: object}
+        microversion: {type: string}
+      required: [service, path, method]

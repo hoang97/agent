@@ -18,6 +18,7 @@ Agent chỉ dùng công cụ thật. Mỗi công cụ được tạo từ một 
 | `web` | fetch_page R0 | allowed_domains, max_chars |
 | `data` (nội bộ, tự có ở mọi tenant) | query R0 (lọc kết quả đã lưu theo result_id), script R4 (Python trong sandbox, luôn cần duyệt) | — |
 | `http_api` | get R1, post R3 | base_url, auth_header, auth_value, allowed_paths |
+| `openstack` | list_services R0, api_read R1, api_write R3, api_admin R4 (xem [OpenStack](#openstack)) | config (clouds.yaml hoặc openrc), cloud, password, region, interface, ca_cert |
 | `postgres`, `mysql` | query R1 (chỉ đọc, 15 giây, 200 dòng), execute R3 (có chạy thử rồi rollback) | host, port, database, user, password |
 
 `python -m kagent.tools` in danh sách template, công cụ và mức rủi ro.
@@ -101,6 +102,26 @@ Cách chạy kubectl:
 - Mỗi lần chạy, kagent tạo kubeconfig tạm (quyền 600) trỏ thẳng vào IP đã được lớp mạng kiểm tra, kèm `tls-server-name` là tên máy gốc. Nhờ vậy vẫn chặn mạng nội bộ khi chưa được phép và chống DNS rebinding.
 - kubectl chạy với env sạch, `HOME` tạm, timeout 1-120 giây (mặc định 30).
 - Image cài kubectl từ `KUBECTL_URL` (build arg, mặc định trỏ Nexus nội bộ). Ngoài mạng nội bộ, đặt `KAGENT_KUBECTL_URL` cho docker compose, hoặc cài kubectl vào PATH (biến `KAGENT_KUBECTL` để chỉ đường dẫn khác).
+
+## OpenStack
+
+Kết nối dán nguyên clouds.yaml hoặc file openrc, rồi đăng nhập Keystone v3 bằng password, application credential hoặc token.
+- **Mật khẩu:** openrc tải từ Horizon không chứa mật khẩu (dòng `OS_PASSWORD=$OS_PASSWORD_INPUT`), nên điền vào ô `password`.
+- **File nhiều cloud:** clouds.yaml có nhiều cloud thì điền ô `cloud`.
+- **Token:** lưu trong bộ nhớ tới gần lúc hết hạn. Gặp 401 thì kagent đăng nhập lại một lần.
+- **TLS:** `cacert` và `verify` trong clouds.yaml không có tác dụng, vì `cacert` là đường dẫn file trên máy khác. Dùng ô `ca_cert` và `verify_tls` của kết nối.
+- **Endpoint:** lấy từ service catalog theo `interface` (mặc định public) và `region`. Mỗi endpoint vẫn qua kiểm tra mạng như mọi đích khác. Endpoint nằm trong mạng nội bộ thì org_admin phải bật `allow_private` cho kết nối.
+
+Agent gọi API bằng `service` (type trong catalog, hoặc tên quen như nova, neutron, cinder, glance), `path` tính từ URL endpoint, `query`, `body` và `microversion`.
+Công cụ chia theo việc lệnh gọi làm gì. Role của tài khoản trong project vẫn là giới hạn thật, nên nên dùng application credential với role `reader` hoặc `member`.
+
+| Công cụ | Gọi được |
+| --- | --- |
+| api_read R1 | GET, HEAD; POST action `os-getConsoleOutput` (log console máy ảo) |
+| api_write R3 | POST, PUT, PATCH: tạo hoặc sửa tài nguyên, action máy ảo (os-start, os-stop, reboot, resize, migrate...) |
+| api_admin R4 | Mọi lệnh, gồm: DELETE; action phá dữ liệu (rebuild, forceDelete, evacuate, reset state, revert volume, khôi phục backup đè volume); mọi thay đổi Keystone; đọc bí mật (payload Barbican, credential EC2, mật khẩu máy ảo) |
+
+OpenStack không có chế độ chạy thử phía server, nên api_write và api_admin không có bước kiểm tra trước. Kết quả đều bị coi là chưa tin cậy, vì tên và mô tả tài nguyên do người dùng tự ghi.
 
 ## Tự xử lý cảnh báo (tab Sự cố)
 
