@@ -684,7 +684,8 @@ function k8sRbacPanel(c) {
     }) }, "Gỡ khỏi cụm");
     const saNs = h("input", { value: cfg.sa_namespace, disabled: !info.can_manage, "aria-label": "Namespace chứa ServiceAccount",
       oninput: (e) => { cfg.sa_namespace = e.target.value.trim(); save(); } });
-    box.replaceChildren(
+    box.replaceChildren();
+    appendKids(box, [
       h("p", { class: "small" }, info.applied ? `Đã áp dụng ${fmtTime(info.applied_at)}. ` : "Chưa áp dụng: công cụ kubectl_* chưa chạy được, các công cụ cũ đang dùng tài khoản của kết nối. ",
         "Mỗi nhóm có quy tắc thì được một ServiceAccount riêng, tên ", h("code", {}, info.base_name + "-<nhóm>"), ", nhãn ", h("code", {}, info.label),
         ". Nhóm ghi có thêm quyền của nhóm đọc, nhóm quản trị có thêm quyền của cả hai. Sau khi áp dụng, các công cụ cũ (list_pods, scale, delete_pod...) cũng chạy bằng ServiceAccount của nhóm tương ứng."),
@@ -698,7 +699,7 @@ function k8sRbacPanel(c) {
       info.can_manage && h("div", { class: "row" }, h("button", { type: "button", onclick: preview }, "Xem trước"), h("button", { type: "button", onclick: apply }, "Áp dụng"),
         h("button", { type: "button", class: "ghost", onclick: () => { store.set(draftKey, null); cfg = JSON.parse(JSON.stringify(info.config)); result.replaceChildren(); paint(); } }, "Bỏ thay đổi"),
         info.applied && remove),
-      result);
+      result]);
   }
   load().catch((e) => box.replaceChildren(h("div", { class: "warn-text small" }, e.message)));
   return box;
