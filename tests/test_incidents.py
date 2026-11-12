@@ -267,6 +267,17 @@ def test_no_safe_action_means_reported(flow, users):
     assert inc["stage"] == "reported" and any(e["kind"] == "no_action" for e in inc["timeline"])
 
 
+def test_reinvestigate_creates_conversation_before_background_run(flow, users):
+    iid = _web_incident(users)
+    assert not flow.get(f"/api/incidents/{iid}").json()["conversation_id"]
+    with db.session() as conn, db.tx(conn):
+        incidents.reinvestigate(conn, tenant(users), iid)
+    cid = flow.get(f"/api/incidents/{iid}").json()["conversation_id"]
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+    assert cid and flow.get(f"/api/incidents/{iid}").json()["conversation_id"] == cid
+
+
 def test_resolved_or_closed_incident_no_longer_waits_on_human(flow, users, infra):
     iid = _web_incident(users)
     with db.session() as conn:

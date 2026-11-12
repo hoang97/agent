@@ -786,6 +786,7 @@ def reinvestigate(conn, tenant_id: str, incident_id: str) -> None:
     if incident_id in _running or inc["stage"] in ("investigating", "verifying"):
         raise IncidentError("sự cố đang được điều tra hoặc xác minh", 409)
     conn.execute("UPDATE incident SET investigate_after=?, updated_at=? WHERE id=?", (db.iso(), db.iso(), incident_id))
+    ensure_conversation(conn, tenant_id, incident_id, bot_user(conn, tenant_id))  # trang tải lại ngay sau khi bấm, trước khi luồng nền kịp tạo hội thoại
 
 
 def source_status(tenant_id: str) -> dict:
