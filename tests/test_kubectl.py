@@ -160,7 +160,7 @@ def test_check_runs_server_dry_run(calls):
     (config(write=[rule(verbs=["delete"])]), "delete thuộc nhóm cao hơn"),
     (config(read=[rule(resources=["secrets"])]), "secrets lộ bí mật"),
     (config(write=[rule(resources=["pods/exec"], verbs=["create"])]), "pods/exec"),
-    (config(read=[rule(resources=["*"])]), "resource \\*"),
+    (config(write=[rule(resources=["pods/eviction"], verbs=["create"])]), "pods/eviction"),
     (config(read=[rule(ns="Bad_NS")]), "namespaces không hợp lệ"),
     (config(read=[{**rule(), "namespaces": ["*", "app"]}]), "namespace \\*"),
     (config(read=[{**rule(), "resources": []}]), "ít nhất một"),
@@ -290,3 +290,31 @@ def test_error_text_drops_kubectl_internal_logs():
     assert kubectl._error_text(noisy) == "error: You must be logged in to the server (Unauthorized)"
     only_klog = "E1112 06:09:51.887074      19 memcache.go:265] couldn't get current server API group list\n"
     assert kubectl._error_text(only_klog) == "couldn't get current server API group list"
+
+
+def test_wildcard_expands_without_sensitive_resources(infra):
+    cfg = config(read=[rule(resources=["*"], groups=["*"], verbs=["get", "list", "watch"])],
+                 write=[rule(ns="*", resources=["*"], groups=["*"], verbs=["create", "update", "patch"])],
+                 admin=[rule(resources=["*"], groups=["*"], verbs=["*"])])
+    plan = k8s_rbac.plan(ADMIN_P, CID, CNAME, cfg)
+    assert not plan["errors"] and any("metrics.k8s.io/v1beta1" in w for w in plan["warnings"])
+    assert any("resource * được đổi thành mọi resource" in w for w in plan["warnings"])
+    k8s_rbac.apply(ADMIN_P, CID, CNAME, cfg)
+    objs = infra.k8s_objects
+    read = {g: r["resources"] for r in objs[("Role", "default", f"{BASE}-read")]["rules"] for g in r["apiGroups"]}
+    assert read == {"": ["configmaps", "pods", "pods/log"], "apps": ["deployments", "deployments/scale"]}  # không có nodes vì Role trong namespace
+    write = {g: r["resources"] for r in objs[("ClusterRole", None, f"{BASE}-write")]["rules"] for g in r["apiGroups"]}
+    assert write == {"": ["bindings", "configmaps", "nodes", "pods"], "apps": ["deployments", "deployments/scale"]}
+    assert objs[("Role", "default", f"{BASE}-admin")]["rules"] == [{"apiGroups": ["*"], "resources": ["*"], "verbs": ["*"]}]
+    assert k8s_rbac.plan(ADMIN_P, CID, CNAME, cfg)["changes"] == 0
+    # CRD mới cài vào cụm thì lần xem trước sau báo lệch
+    infra.K8S_DISCOVERY = {**infra.K8S_DISCOVERY, "/apis/apps/v1": {"resources": [
+        *infra.K8S_DISCOVERY["/apis/apps/v1"]["resources"], {"name": "statefulsets", "namespaced": True, "verbs": fakes.Infra.RW}]}}
+    changed = [i for i in k8s_rbac.plan(ADMIN_P, CID, CNAME, cfg)["items"] if i["action"] == "update"]
+    assert {i["name"] for i in changed} == {f"{BASE}-read", f"{BASE}-write"}
+
+
+def test_subresource_wildcard():
+    rules = k8s_rbac._k8s_rules({"api_groups": [""], "resources": ["pods/*"], "verbs": ["get"]}, "read", False,
+                                {"": fakes.Infra.K8S_DISCOVERY["/api/v1"]["resources"]})
+    assert rules == [{"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]}]

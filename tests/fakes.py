@@ -124,11 +124,29 @@ class Infra:
     RBAC_KINDS = {"serviceaccounts": "ServiceAccount", "secrets": "Secret", "roles": "Role", "rolebindings": "RoleBinding",
                   "clusterroles": "ClusterRole", "clusterrolebindings": "ClusterRoleBinding"}
 
+    RW = ["get", "list", "watch", "create", "update", "patch", "delete"]
+    K8S_DISCOVERY = {
+        "/api/v1": {"resources": [
+            {"name": "pods", "namespaced": True, "verbs": RW}, {"name": "pods/log", "namespaced": True, "verbs": ["get"]},
+            {"name": "pods/exec", "namespaced": True, "verbs": ["create", "get"]}, {"name": "pods/eviction", "namespaced": True, "verbs": ["create"]},
+            {"name": "secrets", "namespaced": True, "verbs": RW}, {"name": "configmaps", "namespaced": True, "verbs": RW},
+            {"name": "nodes", "namespaced": False, "verbs": RW}, {"name": "nodes/proxy", "namespaced": False, "verbs": ["get", "create"]},
+            {"name": "serviceaccounts/token", "namespaced": True, "verbs": ["create"]}, {"name": "bindings", "namespaced": True, "verbs": ["create"]}]},
+        "/apis": {"groups": [{"name": "apps", "preferredVersion": {"groupVersion": "apps/v1"}},
+                             {"name": "metrics.k8s.io", "preferredVersion": {"groupVersion": "metrics.k8s.io/v1beta1"}}]},
+        "/apis/apps/v1": {"resources": [{"name": "deployments", "namespaced": True, "verbs": RW},
+                                        {"name": "deployments/scale", "namespaced": True, "verbs": ["get", "update", "patch"]}]},
+        "/apis/metrics.k8s.io/v1beta1": None,  # API tổng hợp đang hỏng
+    }
+
     def k8s_rbac(self, r: httpx.Request, path: str, sa: str | None):
         if path == "/apis/authentication.k8s.io/v1/selfsubjectreviews":
             return self._json({"status": {"userInfo": {"username": f"system:serviceaccount:kagent-system:{sa}" if sa else "admin"}}}, 201)
         if sa is not None and not path.startswith("/api/v1/namespaces/default/pods"):
             return self._json({"message": "forbidden"}, 403)
+        if path in self.K8S_DISCOVERY and r.method == "GET":
+            body = self.K8S_DISCOVERY[path]
+            return self._json({"message": "service unavailable"}, 503) if body is None else self._json(body)
         if path == "/api/v1/namespaces" and r.method == "POST":
             self.k8s_namespaces.add(json.loads(r.content)["metadata"]["name"])
             return self._json({}, 201)

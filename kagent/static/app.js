@@ -641,10 +641,14 @@ function k8sRbacPanel(c) {
     return h("div", { class: "rbac-rule" },
       h("div", { class: "row" },
         field("Namespace (* = toàn cụm)", rule.namespaces.join(", "), (v) => { rule.namespaces = csv(v); }, "app-a, app-b"),
-        field("API group (core = nhóm lõi)", groupsOut(rule.api_groups), (v) => { rule.api_groups = groupsIn(v); }, "core, apps"),
+        field("API group (core = nhóm lõi, * = mọi group)", groupsOut(rule.api_groups), (v) => { rule.api_groups = groupsIn(v); }, "core, apps"),
         info.can_manage && h("button", { type: "button", class: "ghost small-btn", "aria-label": "Xóa quy tắc",
           onclick: () => { cfg.profiles[profile].splice(idx, 1); save(); paint(); } }, "Xóa")),
-      field("Resource", rule.resources.join(", "), (v) => { rule.resources = csv(v); }, "pods, pods/log, deployments"),
+      field("Resource (* = mọi resource)", rule.resources.join(", "), (v) => { rule.resources = csv(v); }, "pods, pods/log, deployments"),
+      info.can_manage && h("div", { class: "row small" },
+        h("button", { type: "button", class: "chip" + (rule.api_groups.includes("*") ? " on" : ""), onclick: () => { rule.api_groups = ["*"]; save(); paint(); } }, "* mọi API group"),
+        h("button", { type: "button", class: "chip" + (rule.resources.includes("*") ? " on" : ""), onclick: () => { rule.resources = ["*"]; save(); paint(); } }, "* mọi resource"),
+        profile !== "admin" && (rule.resources.some((r) => r.includes("*"))) && h("span", {}, "kagent đổi * thành mọi resource đang có trong cụm, bỏ secrets, */exec, */attach, */portforward, */proxy, serviceaccounts/token" + (profile === "write" ? ", pods/eviction" : "") + ". Cài CRD mới thì bấm Áp dụng lại.")),
       h("div", { class: "row small" }, "Verb", chips));
   }
   function paintPlan(r, applied) {

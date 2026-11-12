@@ -23,6 +23,8 @@ VERBS = {"read": ("get", "list", "watch"), "write": ("get", "list", "watch", "cr
 # Đọc được những thứ này là lấy được bí mật hoặc chạy lệnh trong pod, nên chỉ nhóm quản trị (R4) được cấp.
 SENSITIVE = ("secrets", "pods/exec", "pods/attach", "pods/portforward", "pods/proxy", "services/proxy", "nodes/proxy", "serviceaccounts/token",
              "certificatesigningrequests/approval")
+SENSITIVE_SUB = {"exec", "attach", "portforward", "proxy", "token", "approval"}  # subresource mở rộng từ * cũng bị bỏ
+WRITE_SENSITIVE = ("pods/eviction",)  # create eviction là xóa pod, nhóm ghi không được xóa
 CLUSTER_SCOPED = {"nodes", "namespaces", "persistentvolumes", "storageclasses", "clusterroles", "clusterrolebindings", "customresourcedefinitions",
                   "priorityclasses", "ingressclasses", "csidrivers", "csinodes", "volumeattachments", "mutatingwebhookconfigurations",
                   "validatingwebhookconfigurations", "apiservices", "certificatesigningrequests", "runtimeclasses"}
@@ -96,20 +98,20 @@ def check_config(config) -> tuple[dict, list[str]]:
                 if extra:
                     raise ConnectorError(f"{where}: nhóm {LABEL[profile]} chỉ được các verb {', '.join(allowed)}; "
                                          f"{', '.join(extra)} thuộc nhóm cao hơn")
-                wild = [r for r in resources if "*" in r]
-                if wild:
-                    raise ConnectorError(f"{where}: resource * gồm cả secrets và pods/exec, chỉ nhóm quản trị được dùng; hãy liệt kê resource cụ thể")
-                secret = [r for r in resources if r in SENSITIVE]
+                secret = [r for r in resources if r in SENSITIVE or (profile == "write" and r in WRITE_SENSITIVE)]
                 if secret:
                     raise ConnectorError(f"{where}: {', '.join(secret)} lộ bí mật hoặc chạy lệnh trong pod, chỉ nhóm quản trị được cấp")
             scoped = [r for r in resources if r.split("/")[0] in CLUSTER_SCOPED]
             if scoped and "*" not in namespaces:
                 warnings.append(f"{where}: {', '.join(scoped)} là tài nguyên cấp cụm, chỉ có hiệu lực khi namespace là *")
-            if profile == "write" and set(verbs) & {"create", "update", "patch"} and {r.split("/")[0] for r in resources} & WORKLOADS:
+            if profile == "write" and set(verbs) & {"create", "update", "patch"} and ({r.split("/")[0] for r in resources} & WORKLOADS or "*" in resources):
                 warnings.append(f"{where}: tạo hoặc sửa workload cho phép chạy pod với ServiceAccount bất kỳ trong namespace đó, "
                                 "tức gần ngang quyền của các ServiceAccount ấy")
             if ("rbac.authorization.k8s.io" in groups or "*" in groups) and profile != "read":
                 warnings.append(f"{where}: có thể chạm tới Role/RoleBinding; Kubernetes vẫn chặn cấp quyền vượt quá quyền đang có")
+            if profile != "admin" and any("*" in r for r in resources):
+                warnings.append(f"{where}: resource * được đổi thành mọi resource đang có trong cụm (trừ {', '.join(SENSITIVE[:2])}, */exec, */proxy"
+                                f"{', pods/eviction' if profile == 'write' else ''}...); CRD cài thêm sau cần bấm Áp dụng lại")
             if profile == "admin" and ("*" in resources or "*" in verbs):
                 warnings.append(f"{where}: nhóm quản trị có toàn quyền trên {', '.join(namespaces)}")
             out.append({"namespaces": namespaces, "api_groups": groups, "resources": resources, "verbs": verbs})
@@ -127,11 +129,62 @@ def _meta(name: str, connection_id: str, profile: str | None = None, namespace: 
     return {"name": name, **({"namespace": namespace} if namespace else {}), "labels": labels, **({"annotations": annotations} if annotations else {})}
 
 
-def _k8s_rule(rule: dict) -> dict:
-    return {"apiGroups": rule["api_groups"], "resources": rule["resources"], "verbs": rule["verbs"]}
+def discover(c) -> tuple[dict[str, list[dict]], list[str]]:
+    """Resource của cụm theo API group (bản preferred), qua API discovery. Group lỗi (API tổng hợp đang hỏng) bị bỏ qua kèm cảnh báo."""
+    out, warnings = {"": call(c, "GET", "/api/v1").get("resources") or []}, []
+    for g in call(c, "GET", "/apis").get("groups") or []:
+        version = (g.get("preferredVersion") or {}).get("groupVersion") or ((g.get("versions") or [{}])[0]).get("groupVersion")
+        if not version:
+            continue
+        try:
+            out[g["name"]] = call(c, "GET", f"/apis/{version}").get("resources") or []
+        except ConnectorError as exc:
+            warnings.append(f"không đọc được danh sách resource của {version} ({exc}); resource * bỏ qua group này")
+    return out, warnings
 
 
-def desired(connection_id: str, connection_name: str, cfg: dict) -> list[dict]:
+def _sensitive(resource: str, profile: str) -> bool:
+    return resource in SENSITIVE or ("/" in resource and resource.split("/")[-1] in SENSITIVE_SUB) or (profile == "write" and resource in WRITE_SENSITIVE)
+
+
+def _matches(pattern: str, name: str) -> bool:
+    """Theo authorizer RBAC: * khớp mọi resource kể cả subresource; */x là subresource x của mọi resource; pods/* là mọi subresource của pods."""
+    if pattern == "*":
+        return True
+    pb, _, ps = pattern.partition("/")
+    nb, _, ns = name.partition("/")
+    if not ps or not ns:
+        return pattern == name
+    return pb in ("*", nb) and ps in ("*", ns)
+
+
+def _k8s_rules(rule: dict, profile: str, cluster: bool, discovery: dict | None) -> list[dict]:
+    """Quy tắc RBAC thật. Nhóm quản trị giữ nguyên *; nhóm đọc, ghi đổi * thành danh sách resource cụ thể (trừ loại nhạy cảm)."""
+    plain = {"apiGroups": rule["api_groups"], "resources": rule["resources"], "verbs": rule["verbs"]}
+    wild = [r for r in rule["resources"] if "*" in r]
+    if profile == "admin" or not wild:
+        return [plain]
+    if discovery is None:
+        raise ConnectorError("cần đọc danh sách resource của cụm để mở rộng resource *")
+    groups = sorted(discovery) if "*" in rule["api_groups"] else rule["api_groups"]
+    rules = []
+    for g in groups:
+        names = set()
+        for res in discovery.get(g, []):
+            name = res.get("name", "")
+            if not cluster and not res.get("namespaced", True):
+                continue
+            if not set(rule["verbs"]) & set(res.get("verbs") or []) or _sensitive(name, profile):
+                continue
+            if any(_matches(w, name) for w in wild):
+                names.add(name)
+        names |= {r for r in rule["resources"] if "*" not in r}
+        if names:
+            rules.append({"apiGroups": [g], "resources": sorted(names), "verbs": rule["verbs"]})
+    return rules
+
+
+def desired(connection_id: str, connection_name: str, cfg: dict, discovery: dict | None = None) -> list[dict]:
     """Các object cần có trong cụm, theo thứ tự tạo: SA, Secret token, Role/ClusterRole, Binding."""
     base, sa_ns = base_name(connection_id, connection_name), cfg["sa_namespace"]
     active = [p for p in PROFILES if cfg["profiles"][p]]
@@ -148,7 +201,7 @@ def desired(connection_id: str, connection_name: str, cfg: dict) -> list[dict]:
         by_ns: dict[str, list[dict]] = {}
         for rule in cfg["profiles"][p]:
             for ns in rule["namespaces"]:
-                by_ns.setdefault(ns, []).append(_k8s_rule(rule))
+                by_ns.setdefault(ns, []).extend(_k8s_rules(rule, p, ns == "*", discovery))
         name = f"{base}-{p}"
         for ns, rules in sorted(by_ns.items()):
             cluster = ns == "*"
@@ -214,8 +267,11 @@ def _differs(want: dict, have: dict) -> bool:
 def _summary(obj: dict) -> str:
     kind = obj["kind"]
     if kind in ("Role", "ClusterRole"):
-        return "; ".join(f"{','.join(r['verbs'])} {','.join(r['resources'])}" + (f" ({','.join(g or 'core' for g in r['apiGroups'])})")
-                         for r in obj.get("rules") or [])
+        def short(names):
+            return ",".join(names[:8]) + (f" +{len(names) - 8}" if len(names) > 8 else "")
+        rules = obj.get("rules") or []
+        text = "; ".join(f"{','.join(r['verbs'])} {short(r['resources'])} ({','.join(g or 'core' for g in r['apiGroups'])})" for r in rules[:6])
+        return text + (f"; +{len(rules) - 6} quy tắc khác" if len(rules) > 6 else "")
     if kind.endswith("Binding"):
         return f"{obj['roleRef']['name']} → " + ", ".join(s["name"] for s in obj.get("subjects") or [])
     return ""
@@ -243,35 +299,43 @@ def _namespace_exists(c, ns: str) -> bool:
 
 def plan(p: dict, connection_id: str, connection_name: str, config, validate: bool = True) -> dict:
     """So sánh cấu hình với cụm. validate=True chạy thử từng thay đổi (dryRun=All) để bắt lỗi như cấp quyền vượt quyền đang có."""
-    cfg, warnings = check_config(config)
-    want = desired(connection_id, connection_name, cfg)
-    items, errors = [], []
     with k8s._client(p) as c:
-        have = existing(c, connection_id)
-        namespaces = sorted({o["metadata"]["namespace"] for o in want if o["metadata"].get("namespace")})
-        missing = {ns for ns in namespaces if not _namespace_exists(c, ns)}
-        if cfg["sa_namespace"] in missing and want:
-            items.append({"action": "create", "kind": "Namespace", "name": cfg["sa_namespace"], "namespace": None, "summary": "chứa ServiceAccount của kagent"})
-        for obj in want:
-            key = _key(obj)
-            cur = have.pop(key, None)
-            action = "create" if cur is None else "update" if _differs(obj, cur) else "unchanged"
-            item = {"action": action, "kind": key[0], "namespace": key[1], "name": key[2], "summary": _summary(obj)}
-            ns = key[1]
-            if ns in missing and ns != cfg["sa_namespace"]:
-                item["error"] = f"namespace {ns} không tồn tại"
-            elif validate and action != "unchanged" and ns not in missing:
-                try:
-                    _apply(c, obj, dry_run=True)
-                except ConnectorError as exc:
-                    item["error"] = str(exc)
-            items.append(item)
-        for (kind, ns, name), obj in sorted(have.items(), key=lambda kv: str(kv[0])):
-            items.append({"action": "delete", "kind": kind, "namespace": ns, "name": name, "summary": _summary(obj)})
+        return _plan(c, connection_id, connection_name, config, validate)[0]
+
+
+def _plan(c, connection_id: str, connection_name: str, config, validate: bool) -> tuple[dict, list[dict]]:
+    cfg, warnings = check_config(config)
+    discovery = None
+    if any("*" in r for q in ("read", "write") for rule in cfg["profiles"][q] for r in rule["resources"]):
+        discovery, more = discover(c)
+        warnings += more
+    want = desired(connection_id, connection_name, cfg, discovery)
+    items = []
+    have = existing(c, connection_id)
+    namespaces = sorted({o["metadata"]["namespace"] for o in want if o["metadata"].get("namespace")})
+    missing = {ns for ns in namespaces if not _namespace_exists(c, ns)}
+    if cfg["sa_namespace"] in missing and want:
+        items.append({"action": "create", "kind": "Namespace", "name": cfg["sa_namespace"], "namespace": None, "summary": "chứa ServiceAccount của kagent"})
+    for obj in want:
+        key = _key(obj)
+        cur = have.pop(key, None)
+        action = "create" if cur is None else "update" if _differs(obj, cur) else "unchanged"
+        item = {"action": action, "kind": key[0], "namespace": key[1], "name": key[2], "summary": _summary(obj)}
+        ns = key[1]
+        if ns in missing and ns != cfg["sa_namespace"]:
+            item["error"] = f"namespace {ns} không tồn tại"
+        elif validate and action != "unchanged" and ns not in missing:
+            try:
+                _apply(c, obj, dry_run=True)
+            except ConnectorError as exc:
+                item["error"] = str(exc)
+        items.append(item)
+    for (kind, ns, name), obj in sorted(have.items(), key=lambda kv: str(kv[0])):
+        items.append({"action": "delete", "kind": kind, "namespace": ns, "name": name, "summary": _summary(obj)})
     errors = [f"{i['kind']} {(i['namespace'] + '/') if i['namespace'] else ''}{i['name']}: {i['error']}" for i in items if i.get("error")]
     return {"config": cfg, "items": items, "warnings": warnings, "errors": errors,
             "changes": sum(1 for i in items if i["action"] != "unchanged"),
-            "profiles": {q: bool(cfg["profiles"][q]) for q in PROFILES}}
+            "profiles": {q: bool(cfg["profiles"][q]) for q in PROFILES}}, want
 
 
 def _token(c, namespace: str, name: str) -> str:
@@ -286,13 +350,12 @@ def _token(c, namespace: str, name: str) -> str:
 
 def apply(p: dict, connection_id: str, connection_name: str, config) -> tuple[dict, dict]:
     """Áp cấu hình vào cụm. Trả về (kết quả, token theo nhóm); nhóm không còn quy tắc có token None."""
-    result = plan(p, connection_id, connection_name, config, validate=False)
-    if result["errors"]:
-        raise ConnectorError("không áp dụng được: " + "; ".join(result["errors"]))
-    cfg = result["config"]
-    want = desired(connection_id, connection_name, cfg)
     tokens: dict[str, str | None] = {q: None for q in PROFILES}
     with k8s._client(p) as c:
+        result, want = _plan(c, connection_id, connection_name, config, validate=False)
+        if result["errors"]:
+            raise ConnectorError("không áp dụng được: " + "; ".join(result["errors"]))
+        cfg = result["config"]
         if any(i["kind"] == "Namespace" for i in result["items"]):
             call(c, "POST", "/api/v1/namespaces", json_body={"apiVersion": "v1", "kind": "Namespace",
                                                              "metadata": {"name": cfg["sa_namespace"], "labels": {LABEL_MANAGED: "kagent"}}},

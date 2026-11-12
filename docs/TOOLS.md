@@ -71,7 +71,8 @@ Quy tắc:
 
 - Nhóm cao hơn được thừa hưởng quyền của nhóm thấp hơn: RoleBinding của nhóm đọc gắn cả SA ghi và SA quản trị.
 - Namespace cụ thể tạo Role + RoleBinding trong namespace đó; `*` tạo ClusterRole + ClusterRoleBinding.
-- Nhóm đọc và ghi không được cấp `secrets`, `pods/exec`, `pods/attach`, `pods/portforward`, các `*/proxy`, `serviceaccounts/token`, cũng không được dùng resource `*`. Những quyền này chỉ cấp được cho nhóm quản trị (R4).
+- Nhóm đọc và ghi không được cấp `secrets`, `pods/exec`, `pods/attach`, `pods/portforward`, các `*/proxy`, `serviceaccounts/token`; nhóm ghi thêm `pods/eviction` (tạo eviction là xóa pod). Những quyền này chỉ cấp được cho nhóm quản trị (R4).
+- API group `*` là mọi group. Resource `*` (cả `pods/*`, `*/scale`) ở nhóm quản trị được ghi nguyên vào Role. Ở nhóm đọc và ghi, kagent đọc API discovery của cụm rồi đổi `*` thành danh sách resource cụ thể, khớp như RBAC (gồm cả subresource), bỏ các loại nhạy cảm ở trên. Danh sách chỉ giữ resource có verb đã chọn, và chỉ giữ resource cấp namespace khi quy tắc không phải namespace `*`. Cài CRD mới thì lần Xem trước sau báo lệch, bấm Áp dụng để cập nhật. API tổng hợp đang lỗi (ví dụ metrics-server hỏng) bị bỏ qua kèm cảnh báo.
 - Khi quy tắc ghi chạm tới workload, hệ thống cảnh báo: ai tạo được pod thì chạy được pod với ServiceAccount bất kỳ trong namespace đó.
 - Sau khi áp dụng, các công cụ cũ cũng chạy bằng SA của nhóm thấp nhất đủ cho chúng: list_pods, list_deployments, pod_logs dùng nhóm đọc; scale, rollout_restart dùng nhóm ghi; delete_pod, exec dùng nhóm quản trị. Nút **Kiểm tra** cho biết danh tính của từng SA.
 - **Gỡ khỏi cụm** xóa mọi object có nhãn của kết nối, nhưng giữ namespace. Gỡ kết nối cũng tự gỡ các object đó; nếu không gỡ được, giao diện báo nhãn để xóa tay.
