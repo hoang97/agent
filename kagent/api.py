@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import agent as agent_mod
-from . import compiler, connections, db, entities, gateway, knowledge, learned, learning, llm, net, proxy, tools, vault
+from . import compiler, connections, db, entities, gateway, incidents, knowledge, learned, learning, llm, net, proxy, tools, vault
 from .connectors import k8s_rbac
 from .connectors.base import ConnectorError
 from .config import settings
@@ -1427,6 +1427,103 @@ def k8s_rbac_remove(connection_id: str, t: Tenant = Depends(current_tenant), con
         connections.set_internal(conn, row, params={"_rbac": None}, secrets={k8s_rbac.TOKEN_KEY[p]: None for p in k8s_rbac.PROFILES})
     log.info("tenant %s: %s gỡ quyền Kubernetes của kết nối %s (%d object)", t.tenant_id, t.user_id, row["name"], removed)
     return {"ok": True, "removed": removed}
+
+
+def _incident_call(fn):
+    try:
+        return fn()
+    except incidents.IncidentError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+
+@app.get("/api/incidents")
+def incident_list(status: str = "open", t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    if status not in ("open", "resolved", "closed", "all"):
+        raise HTTPException(400, "status phải là open, resolved, closed hoặc all")
+    cfg = incidents.settings(conn, t.tenant_id)
+    return {"items": incidents.list_incidents(conn, t.tenant_id, status), "enabled": cfg["enabled"], "source_names": cfg["sources"],
+            **incidents.source_status(t.tenant_id),
+            "counts": {r["status"]: r["n"] for r in conn.execute("SELECT status, count(*) n FROM incident WHERE tenant_id=? GROUP BY status", (t.tenant_id,))},
+            "auto_today": conn.execute("SELECT count(*) n FROM incident_event WHERE tenant_id=? AND kind='action' AND text LIKE '%: đã tự chạy%' AND at>=?",
+                                       (t.tenant_id, db.now().date().isoformat())).fetchone()["n"]}
+
+
+@app.get("/api/incidents/{incident_id}")
+def incident_get(incident_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    return _incident_call(lambda: incidents.get(conn, t.tenant_id, incident_id))
+
+
+class IncidentMerge(BaseModel):
+    into: str
+
+
+class IncidentSplit(BaseModel):
+    alert_id: str
+
+
+class IncidentClose(BaseModel):
+    note: str = Field(default="", max_length=500)
+
+
+@app.post("/api/incidents/{incident_id}/merge")
+def incident_merge(incident_id: str, body: IncidentMerge, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_writer()
+    with db.tx(conn):
+        _incident_call(lambda: incidents.merge(conn, t.tenant_id, incident_id, body.into, t.user_id))
+    return incidents.get(conn, t.tenant_id, body.into)
+
+
+@app.post("/api/incidents/{incident_id}/split")
+def incident_split(incident_id: str, body: IncidentSplit, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_writer()
+    with db.tx(conn):
+        new_id = _incident_call(lambda: incidents.split(conn, t.tenant_id, incident_id, body.alert_id, t.user_id))
+    return {"id": new_id}
+
+
+@app.post("/api/incidents/{incident_id}/close")
+def incident_close(incident_id: str, body: IncidentClose, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_writer()
+    with db.tx(conn):
+        _incident_call(lambda: incidents.close(conn, t.tenant_id, incident_id, t.user_id, body.note))
+    return {"ok": True}
+
+
+@app.post("/api/incidents/{incident_id}/investigate")
+def incident_investigate(incident_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_writer()
+    with db.tx(conn):
+        _incident_call(lambda: incidents.reinvestigate(conn, t.tenant_id, incident_id))
+    incidents.start_investigation(t.tenant_id, incident_id)
+    return {"ok": True}
+
+
+@app.get("/api/alert-settings")
+def alert_settings_get(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    available = [{"name": r["name"], "template": r["template"], "envs": json.loads(r["envs"])} for r in conn.execute(
+        "SELECT name, template, envs FROM connection WHERE tenant_id=? AND status='active' AND scope='tenant' AND template IN (%s) ORDER BY name"
+        % ",".join("?" * len(incidents.SOURCE_TEMPLATES)), (t.tenant_id, *incidents.SOURCE_TEMPLATES)).fetchall()]
+    return {"settings": incidents.settings(conn, t.tenant_id), "defaults": incidents.DEFAULTS, "available_sources": available,
+            "can_manage": t.is_admin, **incidents.source_status(t.tenant_id)}
+
+
+@app.put("/api/alert-settings")
+def alert_settings_put(body: dict, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_admin()
+    with db.tx(conn):
+        cfg = _incident_call(lambda: incidents.save_settings(conn, t.tenant_id, body))
+        if cfg["enabled"]:
+            incidents.bot_user(conn, t.tenant_id)
+    log.info("tenant %s: %s đổi cài đặt luồng cảnh báo (bật=%s, nguồn=%s)", t.tenant_id, t.user_id, cfg["enabled"], cfg["sources"])
+    return cfg
+
+
+@app.post("/api/alert-settings/poll")
+def alert_poll_now(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_admin()
+    result = incidents.poll(conn, t.tenant_id)
+    incidents.follow_up(conn, t.tenant_id)
+    return result
 
 
 def _learned_view(conn, t: Tenant, row: dict) -> dict:

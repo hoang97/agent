@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import threading
 
-from . import compiler, db, gateway, learning, results
+from . import compiler, db, gateway, incidents, learning, results
 from .config import settings
 
 log = logging.getLogger("kagent.scheduler")
@@ -21,14 +21,33 @@ def tick() -> None:
                 compiler.compile_tenant(conn, t["id"], "scheduler")
 
 
+ALERT_TICK = 15  # giây; mỗi tenant tự poll theo poll_seconds của mình
+
+
+def alert_tick() -> None:
+    with db.session() as conn:
+        incidents.tick(conn)
+
+
 class Scheduler:
     def __init__(self) -> None:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._alerts: threading.Thread | None = None
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._loop, name="kagent-scheduler", daemon=True)
         self._thread.start()
+        # Luồng riêng: vòng học có thể chạy lâu (gọi LLM), không được làm trễ việc lấy cảnh báo.
+        self._alerts = threading.Thread(target=self._alert_loop, name="kagent-alerts", daemon=True)
+        self._alerts.start()
+
+    def _alert_loop(self) -> None:
+        while not self._stop.wait(ALERT_TICK):
+            try:
+                alert_tick()
+            except Exception:
+                log.exception("lỗi vòng cảnh báo")
 
     def _loop(self) -> None:
         while not self._stop.wait(settings.scheduler_interval):

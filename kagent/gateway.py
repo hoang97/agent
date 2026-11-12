@@ -160,6 +160,7 @@ class CallContext:
     tokens: list = field(default_factory=list)
     roles: set | None = None  # vai trò của người yêu cầu trong tenant; None = tra cứu khi gọi
     reviewed: bool = False  # đang chạy bước của công cụ học được đã được người có quyền xem và bật
+    forced: list = field(default_factory=list)  # lý do bên gọi buộc phải hỏi (vd. luồng cảnh báo: độ tin dưới ngưỡng cài đặt)
 
 
 def user_roles(conn, tenant_id: str, user_id: str) -> set[str]:
@@ -357,7 +358,7 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
             dry_result = {"error": f"chạy thử lỗi ({exc.__class__.__name__})"}
 
     tenant = conn.execute("SELECT change_freeze, write_quota_daily, self_approve FROM tenant WHERE id=?", (ctx.tenant_id,)).fetchone()
-    forced: list[str] = []
+    forced: list[str] = list(ctx.forced)
     # Công cụ local chỉ xử lý dữ liệu đã lấy về; nội dung untrusted không lái được nó tác động ra ngoài.
     if ctx.tainted and not tool.local and not _auto_read_despite_taint(grant_policy(conn, ctx.tenant_id), ctx.env, meta["action_class"], tier):
         forced.append(UNTRUSTED_REASON)

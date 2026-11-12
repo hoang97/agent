@@ -46,6 +46,10 @@ class Infra:
         self.k8s_objects: dict[tuple, dict] = {}  # (kind, namespace, name) → object, cho ServiceAccount/Secret/RBAC
         self.k8s_namespaces = {"default", "payments"}
         self.k8s_forbid_grant = False  # giả lập tài khoản quản trị thiếu quyền nên không cấp được Role
+        self.am_alerts = [{"labels": {"alertname": "HighCPU", "severity": "warning", "namespace": "payments"}, "status": {"state": "active", "silencedBy": []},
+                           "startsAt": "2026-11-11T00:00:00Z", "annotations": {"summary": "CPU cao"}, "fingerprint": "f1"},
+                          {"labels": {"alertname": "HighCPU", "severity": "warning", "namespace": "web"}, "status": {"state": "active"}, "fingerprint": "f2"},
+                          {"labels": {"alertname": "Down", "severity": "critical", "namespace": "web"}, "status": {"state": "active"}, "fingerprint": "f3"}]
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -246,10 +250,7 @@ class Infra:
             return self._json({"versionInfo": {"version": "0.27.0"}, "cluster": {"status": "ready"}})
         if path == "/api/v2/alerts":
             self.am_filters.append(r.url.params.get_list("filter"))
-            return self._json([{"labels": {"alertname": "HighCPU", "severity": "warning", "namespace": "payments"}, "status": {"state": "active", "silencedBy": []},
-                                "startsAt": "2026-11-11T00:00:00Z", "annotations": {"summary": "CPU cao"}, "fingerprint": "f1"},
-                               {"labels": {"alertname": "HighCPU", "severity": "warning", "namespace": "web"}, "status": {"state": "active"}, "fingerprint": "f2"},
-                               {"labels": {"alertname": "Down", "severity": "critical", "namespace": "web"}, "status": {"state": "active"}, "fingerprint": "f3"}])
+            return self._json(self.am_alerts)
         if path == "/api/v2/silences" and r.method == "POST":
             self.silences.append(json.loads(r.content))
             return self._json({"silenceID": f"am{len(self.silences)}"})

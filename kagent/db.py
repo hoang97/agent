@@ -207,6 +207,33 @@ CREATE TABLE IF NOT EXISTS compile_run (
   score_before REAL, score_after REAL, commit_sha TEXT, actor TEXT NOT NULL, reason TEXT,
   created_at TEXT NOT NULL, decided_at TEXT, decided_by TEXT
 );
+
+-- Cảnh báo lấy về từ Alertmanager/Prometheus (incidents.py). Một lần bắn = một dòng; bắn lại sau khi hết là dòng mới (starts_at khác).
+CREATE TABLE IF NOT EXISTS alert_event (
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, source TEXT NOT NULL, fingerprint TEXT NOT NULL, starts_at TEXT NOT NULL,
+  alertname TEXT, severity TEXT, labels TEXT NOT NULL, summary TEXT, env TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'firing', first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, resolved_at TEXT,
+  incident_id TEXT, join_method TEXT, join_score REAL, join_reason TEXT,
+  UNIQUE(tenant_id, source, fingerprint, starts_at)
+);
+CREATE INDEX IF NOT EXISTS ix_alert_incident ON alert_event(incident_id);
+CREATE INDEX IF NOT EXISTS ix_alert_firing ON alert_event(tenant_id, source, status);
+
+CREATE TABLE IF NOT EXISTS incident (
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, env TEXT NOT NULL, title TEXT NOT NULL, severity TEXT,
+  status TEXT NOT NULL DEFAULT 'open',
+  stage TEXT NOT NULL DEFAULT 'new',
+  root_cause TEXT, confidence REAL, evidence TEXT NOT NULL DEFAULT '[]', actions TEXT NOT NULL DEFAULT '[]', episode_id TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_alert_at TEXT NOT NULL, resolved_at TEXT, closed_by TEXT,
+  investigate_after TEXT, verify_due TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_incident_open ON incident(tenant_id, status, last_alert_at);
+
+CREATE TABLE IF NOT EXISTS incident_event (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT NOT NULL, incident_id TEXT NOT NULL, at TEXT NOT NULL,
+  kind TEXT NOT NULL, text TEXT NOT NULL, data TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_incident_event ON incident_event(incident_id, id);
 """
 
 
@@ -281,6 +308,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE llm_call ADD COLUMN llm TEXT")  # tên cấu hình LLM đã dùng
     if "grant_policy" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
         conn.execute("ALTER TABLE tenant ADD COLUMN grant_policy TEXT NOT NULL DEFAULT '{}'")
+    if "alert_settings" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
+        conn.execute("ALTER TABLE tenant ADD COLUMN alert_settings TEXT NOT NULL DEFAULT '{}'")  # luồng tự xử lý cảnh báo (incidents.py)
     registry = {r["name"] for r in conn.execute("PRAGMA table_info(tool_registry)")}
     for column, ddl in (("catalog_tier", "TEXT"), ("risk_floor", "TEXT"), ("roles", "TEXT NOT NULL DEFAULT '[\"member\"]'"),
                         ("status", "TEXT NOT NULL DEFAULT 'active'"), ("synced_at", "TEXT"), ("connection_id", "TEXT"),

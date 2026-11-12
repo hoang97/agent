@@ -102,6 +102,27 @@ Cách chạy kubectl:
 - kubectl chạy với env sạch, `HOME` tạm, timeout 1-120 giây (mặc định 30).
 - Image cài kubectl từ `KUBECTL_URL` (build arg, mặc định trỏ Nexus nội bộ). Ngoài mạng nội bộ, đặt `KAGENT_KUBECTL_URL` cho docker compose, hoặc cài kubectl vào PATH (biến `KAGENT_KUBECTL` để chỉ đường dẫn khác).
 
+## Tự xử lý cảnh báo (tab Sự cố)
+
+Bật ở **Cài đặt → Cảnh báo** (tenant admin). Nguồn là các kết nối Alertmanager/Prometheus dùng chung. Chỉ nên chọn một trong hai cho cùng một cụm, vì cảnh báo của Prometheus chính là cảnh báo gửi sang Alertmanager, chọn cả hai sẽ bị đếm đôi.
+
+1. **Lấy cảnh báo:** vòng nền 15 giây; mỗi tenant poll theo `poll_seconds` (mặc định 60). Một lần bắn của cảnh báo = (nguồn, fingerprint, startsAt). Cảnh báo không còn trong danh sách thì được đánh dấu đã hết; mọi cảnh báo của sự cố hết thì sự cố chuyển sang "đã hết".
+2. **Gom nhóm**, xét trong khung `window_minutes` (mặc định 10 phút) và cùng môi trường:
+   - **Luật nhãn:** mọi nhãn trong `group_labels` mà hai cảnh báo cùng có phải bằng nhau. Mặc định là `cluster`, `namespace`, nên kết quả không phụ thuộc thứ tự cảnh báo đến.
+   - **Quan hệ k8s:** cùng node, hoặc cùng workload (suy từ tên pod hay nhãn deployment/statefulset). Nhãn pod/service/instance của exporter kube-state-metrics bị bỏ qua.
+   - **AI:** chỉ dùng khi hai cách trên không quyết được; gộp nếu điểm ≥ `ai_min_score`. Lần Gộp/Tách gần nhất của người dùng được đưa vào làm ví dụ.
+3. **Điều tra:** sau `debounce_seconds`, agent chạy bằng tài khoản `kagent-alerts` (vai trò member) và chỉ được dùng công cụ đọc. Công cụ ghi bị chặn ngay cả khi model tự gọi tên. Kết quả là báo cáo gồm tiêu đề, nguyên nhân, độ tin, bằng chứng và tối đa 2 hành động.
+4. **Hành động:** đi qua gateway như mọi lệnh khác. Bị ép hỏi khi:
+   - tự xử lý đang tắt ở môi trường đó;
+   - độ tin của báo cáo dưới `auto.<env>.min_confidence`;
+   - đã vượt `max_auto_actions_per_hour`;
+   - lần tự xử lý trước không làm hết cảnh báo.
+
+   Ngoài ra gateway vẫn tự áp chính sách của nó: ma trận rủi ro, độ tin từ tiền lệ/kỹ năng, nội dung chưa tin cậy trong lượt điều tra, change freeze. Ngưỡng của luồng cảnh báo chỉ thêm điều kiện, không nới chính sách. Với ô mặc định R3/dev (`ask_below 0.8`), `kubectl_write` chỉ tự chạy khi đã có tiền lệ.
+5. **Xác minh:** lệnh chạy xong (tự động hoặc sau khi duyệt), sau `verify_minutes` kagent xem cảnh báo của sự cố đã hết chưa. Hết thì "đã xử lý"; còn thì "cần người xử lý", và lần sau không tự chạy nữa.
+
+Màn **Sự cố** gồm danh sách (lọc theo trạng thái, tự làm mới 15 giây) và trang chi tiết: nguyên nhân, bằng chứng, các lệnh đã đọc, cảnh báo kèm lý do được gộp (nút Tách), hành động kèm lý do không tự chạy (nút Duyệt/Từ chối), dòng thời gian, nút Gộp/Đóng/Điều tra lại.
+
 ## Thêm một template mới
 
 1. Viết handler trong `kagent/connectors/<module>.py`. Mỗi handler nhận `(params, args)`, trong đó `params` là tham số kết nối đã giải mã secret, có thêm `_allow_private`. Dùng `connectors.base.http()` hoặc `net.client()` để mọi lệnh gọi đều qua lớp mạng an toàn. Lỗi nghiệp vụ báo bằng `ConnectorError`.

@@ -78,7 +78,7 @@ function renderLogin() {
   user.focus();
 }
 
-const TABS = [["knowledge", "Tri thức"], ["tools", "Công cụ"], ["approvals", "Duyệt lệnh"], ["episodes", "Nhật ký"], ["metrics", "Đo lường"], ["audit", "Audit"], ["settings", "Cài đặt"], ["account", "Tài khoản"]];
+const TABS = [["incidents", "Sự cố"], ["knowledge", "Tri thức"], ["tools", "Công cụ"], ["approvals", "Duyệt lệnh"], ["episodes", "Nhật ký"], ["metrics", "Đo lường"], ["audit", "Audit"], ["settings", "Cài đặt"], ["account", "Tài khoản"]];
 // Link và localStorage cũ còn trỏ tới các mục đã gộp.
 const OLD_TABS = { connections: ["tools", "connections"], compile: ["knowledge", "compiled"], policy: ["settings", "policy"] };
 const VIEWS = {};
@@ -231,6 +231,162 @@ function episodeCard(ep, onDone) {
   return h("div", { class: "card" }, h("div", { class: "row spread" }, h("h3", {}, ep.input.task), h("div", {}, badge(ep.outcome), h("span", { class: "badge" }, ep.task_type || "?"), h("span", { class: "badge" }, ep.env))),
     h("pre", {}, ep.output || ""), traceView(ep.trace),
     h("div", { class: "small" }, `KU đã nạp: ${ep.ku_used.length} · Token: ${ep.tokens}`), feedbackBox(ep, onDone));
+}
+
+
+// ---------- Sự cố: cảnh báo được gom, điều tra, xử lý tự động ----------
+const SEV_CLASS = { critical: "bad", error: "bad", high: "bad", warning: "warn", medium: "warn" };
+const STAGE_CLASS = { handled: "ok", verifying: "info", investigating: "info", awaiting_approval: "warn", reported: "warn", needs_human: "bad", error: "bad" };
+const STEP_STATUS = { ok: "đã chạy", pending: "chờ duyệt", approved: "đã duyệt", denied: "bị từ chối", expired: "hết hạn duyệt", blocked: "bị chặn", error: "lỗi", invalid: "sai tham số" };
+function ago(iso) {
+  if (!iso) return "—";
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  return s < 60 ? `${Math.round(s)} giây trước` : s < 3600 ? `${Math.round(s / 60)} phút trước` : s < 86400 ? `${Math.round(s / 3600)} giờ trước` : fmtTime(iso);
+}
+function sevBadge(sev) { return h("span", { class: "badge " + (SEV_CLASS[sev] || "") }, sev || "không rõ"); }
+function actionText(a) { return a.args && a.args.command ? `${a.tool.split(".").pop()} ${a.args.command}` : `${a.tool} ${JSON.stringify(a.args || {})}`; }
+// Tự làm mới khi còn đứng ở màn này; mỗi lần render tạo token mới nên vòng cũ tự dừng.
+let incidentTimer = 0;
+function refreshLater(ms, token, fn) { setTimeout(() => { if (incidentTimer === token && state.tab === "incidents") fn().catch(() => {}); }, ms); }
+
+VIEWS.incidents = (main) => (state.sub ? incidentDetail(main, state.sub) : incidentList(main));
+
+async function incidentList(main) {
+  const token = ++incidentTimer;
+  let status = store.get("incidents:status", "open");
+  const box = h("div");
+  main.append(box);
+  async function load() {
+    const data = await api("GET", `/api/incidents?status=${status}`);
+    const chip = (k, label) => h("button", { type: "button", class: "chip" + (status === k ? " on" : ""), "aria-pressed": status === k ? "true" : "false",
+      onclick: () => { status = k; store.set("incidents:status", k); load(); } }, `${label}${data.counts[k] !== undefined ? ` (${data.counts[k]})` : ""}`);
+    const srcInfo = Object.entries(data.sources || {});
+    const statusLine = data.enabled
+      ? h("div", { class: "small" }, `Lấy cảnh báo lần cuối: ${data.last_poll ? ago(new Date(data.last_poll * 1000).toISOString()) : "chưa"}`,
+          ...srcInfo.map(([name, st]) => h("span", { class: "badge " + (st.error ? "bad" : "ok") }, `${name}: ${st.error ? "lỗi" : st.count + " cảnh báo"}`)),
+          ...srcInfo.filter(([, st]) => st.error).map(([name, st]) => h("div", { class: "warn-text" }, `${name}: ${st.error}`)))
+      : h("div", { class: "card muted" }, "Luồng tự xử lý cảnh báo đang tắt. ", isAdmin() ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("settings", undefined, "alerts"); } }, "Bật ở Cài đặt → Cảnh báo") : "Nhờ admin bật ở Cài đặt → Cảnh báo.");
+    const rows = data.items.map((i) => h("div", { class: "card incident-row", role: "button", tabindex: "0", onclick: () => go("incidents", undefined, i.id),
+      onkeydown: (e) => { if (e.key === "Enter") go("incidents", undefined, i.id); } },
+      h("div", { class: "tool-head" }, sevBadge(i.severity), h("strong", {}, i.title), h("span", { class: "spacer" }),
+        h("span", { class: "badge " + (STAGE_CLASS[i.stage] || "") }, i.investigating ? "đang điều tra" : i.stage_label),
+        h("span", { class: "badge" }, i.env)),
+      h("div", { class: "small" }, `${i.firing}/${i.alerts} cảnh báo đang bắn · ${i.sources.join(", ")} · cảnh báo mới nhất ${ago(i.last_alert_at)}`,
+        i.confidence !== null && i.confidence !== undefined ? ` · độ tin ${i.confidence.toFixed(2)}` : ""),
+      i.last_action && h("div", { class: "small" }, `${STEP_STATUS[i.last_action.status] || i.last_action.status}${i.last_action.auto ? " (tự động)" : ""}: `, h("code", {}, actionText(i.last_action)),
+        i.last_action.verified === true ? " · đã xác minh hết cảnh báo" : i.last_action.verified === false ? " · cảnh báo vẫn còn" : "")));
+    box.replaceChildren();
+    appendKids(box, [h("div", { class: "row" }, chip("open", "Đang mở"), chip("resolved", "Đã hết"), chip("closed", "Đã đóng"), chip("all", "Tất cả"),
+      h("span", { class: "spacer" }), h("span", { class: "small" }, `Tự xử lý hôm nay: ${data.auto_today}`)), statusLine,
+      rows.length ? rows : h("div", { class: "card muted" }, status === "open" ? "Không có sự cố đang mở." : "Không có sự cố.")]);
+    refreshLater(15000, token, load);
+  }
+  await load();
+}
+
+async function incidentDetail(main, id) {
+  const token = ++incidentTimer;
+  const box = h("div");
+  main.append(box);
+  async function load() {
+    const [d, open] = await Promise.all([api("GET", `/api/incidents/${id}`), api("GET", "/api/incidents?status=open")]);
+    const act = (fn, msg) => guard(async () => { await fn(); if (msg) toast(msg); await load(); });
+    const others = open.items.filter((i) => i.id !== d.id);
+    const into = h("select", { "aria-label": "Gộp vào sự cố" }, h("option", { value: "" }, "Gộp vào sự cố…"), others.map((i) => h("option", { value: i.id }, i.title)));
+    const closeNote = h("input", { placeholder: "Ghi chú khi đóng (tuỳ chọn)", "aria-label": "Ghi chú khi đóng" });
+    const busyNow = d.investigating || d.stage === "investigating";
+    const head = h("div", { class: "card" },
+      h("div", { class: "row" }, h("button", { type: "button", class: "ghost small-btn", onclick: () => go("incidents") }, "← Danh sách")),
+      h("div", { class: "tool-head" }, sevBadge(d.severity), h("h3", {}, d.title), h("span", { class: "spacer" }),
+        h("span", { class: "badge " + (STAGE_CLASS[d.stage] || "") }, busyNow ? "đang điều tra" : d.stage_label), badge(d.status === "open" ? "active" : d.status), h("span", { class: "badge" }, d.env)),
+      h("div", { class: "small" }, `Mở ${ago(d.created_at)} · cảnh báo mới nhất ${ago(d.last_alert_at)}${d.resolved_at ? ` · hết lúc ${fmtTime(d.resolved_at)}` : ""}`),
+      d.status === "open" && h("div", { class: "row" },
+        h("button", { type: "button", class: "ghost small-btn", disabled: busyNow, onclick: act(() => api("POST", `/api/incidents/${id}/investigate`), "Đã bắt đầu điều tra lại") }, busyNow ? "Đang điều tra…" : "Điều tra lại"),
+        others.length > 0 && into, others.length > 0 && h("button", { type: "button", class: "ghost small-btn", onclick: guard(async () => {
+          if (!into.value) { toast("Chọn sự cố để gộp vào", true); return; }
+          await api("POST", `/api/incidents/${id}/merge`, { into: into.value }); toast("Đã gộp"); go("incidents", undefined, into.value);
+        }) }, "Gộp"),
+        closeNote, h("button", { type: "button", class: "danger small-btn", onclick: act(() => api("POST", `/api/incidents/${id}/close`, { note: closeNote.value }), "Đã đóng sự cố") }, "Đóng")));
+    const cause = h("div", { class: "card" }, h("h3", {}, "Nguyên nhân"),
+      busyNow ? busy("Agent đang điều tra bằng các lệnh chỉ đọc…")
+        : d.episode_id ? [h("p", {}, d.root_cause || "Chưa rõ nguyên nhân."),
+            h("div", { class: "small" }, `Độ tin: ${(d.confidence || 0).toFixed(2)}`),
+            d.evidence.length > 0 && h("ul", {}, d.evidence.map((e) => h("li", {}, e))),
+            h("details", {}, h("summary", { class: "small" }, `Quá trình điều tra (${d.steps.length} lệnh đọc)`),
+              d.steps.map((s) => h("div", { class: "small" }, badge(s.status), " ", h("code", {}, actionText(s)), s.untrusted ? h("span", { class: "badge warn" }, "chưa tin cậy") : null)),
+              d.investigation && h("pre", {}, d.investigation))]
+        : h("div", { class: "small muted" }, "Chưa điều tra."));
+    const alertRows = d.alerts.map((a) => {
+      const keys = ["namespace", "service", "pod", "node", "job", "instance"].filter((k) => a.labels[k]).map((k) => `${k}=${a.labels[k]}`).join(" ");
+      return h("tr", {}, h("td", {}, h("strong", {}, a.alertname || "?"), h("div", { class: "small" }, a.summary || "")), h("td", {}, sevBadge(a.severity)),
+        h("td", {}, h("span", { class: "badge " + (a.status === "firing" ? "warn" : "ok") }, a.status === "firing" ? "đang bắn" : "đã hết")),
+        h("td", { class: "small" }, keys), h("td", { class: "small" }, ago(a.starts_at || a.first_seen)),
+        h("td", { class: "small" }, a.join_method === "root" ? "gốc" : `${a.join_label}${a.join_method === "ai" ? ` ${(a.join_score || 0).toFixed(2)}` : ""}: ${a.join_reason || ""}`),
+        h("td", {}, d.alerts.length > 1 && a.join_method !== "root" && h("button", { type: "button", class: "ghost small-btn", onclick: act(() => api("POST", `/api/incidents/${id}/split`, { alert_id: a.id }), "Đã tách thành sự cố riêng") }, "Tách")));
+    });
+    const alerts = h("div", { class: "card" }, h("h3", {}, `Cảnh báo (${d.alerts.length})`),
+      h("table", { class: "incident-table" }, h("thead", {}, h("tr", {}, ["Cảnh báo", "Mức", "Trạng thái", "Nhãn", "Bắt đầu", "Vì sao gộp", ""].map((t) => h("th", {}, t)))), h("tbody", {}, alertRows)));
+    const actions = h("div", { class: "card" }, h("h3", {}, "Hành động"),
+      d.actions.length ? d.actions.map((a) => {
+        const status = a.approval_status && a.status === "pending" ? a.approval_status : a.status;
+        const reason = h("input", { placeholder: "Lý do từ chối", "aria-label": "Lý do từ chối" });
+        return h("div", { class: "rbac-rule" },
+          h("div", { class: "tool-head" }, h("code", {}, actionText(a)), a.risk_tier && h("span", { class: "badge" }, a.risk_tier),
+            h("span", { class: "badge " + ({ ok: "ok", pending: "warn" }[status] || "bad") }, `${STEP_STATUS[status] || status}${a.auto ? " (tự động)" : ""}`),
+            a.verified === true && h("span", { class: "badge ok" }, "đã hết cảnh báo"), a.verified === false && h("span", { class: "badge bad" }, "cảnh báo vẫn còn")),
+          a.why && h("div", { class: "small" }, a.why),
+          a.reasons && a.reasons.length > 0 && h("div", { class: "small warn-text" }, (a.auto ? "Ghi chú: " : "Không tự chạy vì: ") + a.reasons.join("; ")),
+          a.dry_run && h("details", {}, h("summary", { class: "small" }, "Kết quả chạy thử"), h("pre", {}, JSON.stringify(a.dry_run, null, 1))),
+          a.result && h("details", {}, h("summary", { class: "small" }, "Kết quả"), h("pre", {}, a.result)),
+          status === "pending" && a.approval_id && h("div", { class: "row" },
+            h("button", { type: "button", onclick: act(() => api("POST", `/api/approvals/${a.approval_id}/decide`, { action: "approve_once" }), "Đã duyệt") }, "Duyệt và chạy"),
+            reason, h("button", { type: "button", class: "ghost", onclick: guard(async () => {
+              if (!reason.value.trim()) { toast("Nhập lý do từ chối", true); return; }
+              await api("POST", `/api/approvals/${a.approval_id}/decide`, { action: "deny", reason: reason.value.trim() }); toast("Đã từ chối"); await load();
+            }) }, "Từ chối")));
+      }) : h("div", { class: "small muted" }, d.episode_id ? "Không có hành động được đề xuất." : "Chưa có."));
+    const timeline = h("div", { class: "card" }, h("h3", {}, "Dòng thời gian"),
+      h("ul", { class: "timeline" }, d.events.map((e) => h("li", {}, h("span", { class: "small" }, fmtTime(e.at)), " ", e.text))));
+    box.replaceChildren();
+    appendKids(box, [head, cause, alerts, actions, timeline]);
+    if (d.status === "open" && (busyNow || ["new", "awaiting_approval", "verifying"].includes(d.stage))) refreshLater(8000, token, load);
+  }
+  await load();
+}
+
+async function alertSettingsView(main) {
+  const info = await api("GET", "/api/alert-settings");
+  const cfg = JSON.parse(JSON.stringify(info.settings));
+  const dis = !info.can_manage;
+  const num = (key, label, step) => h("label", { class: "field" }, label, h("input", { type: "number", step: step || "1", value: cfg[key], disabled: dis,
+    oninput: (e) => { cfg[key] = Number(e.target.value); } }));
+  const check = (obj, key, label) => h("label", { class: "row small" }, h("input", { type: "checkbox", checked: obj[key], disabled: dis, onchange: (e) => { obj[key] = e.target.checked; } }), label);
+  const sources = info.available_sources.length ? info.available_sources.map((src) => h("label", { class: "row small" },
+    h("input", { type: "checkbox", checked: cfg.sources.includes(src.name), disabled: dis, onchange: (e) => { cfg.sources = e.target.checked ? [...cfg.sources, src.name] : cfg.sources.filter((x) => x !== src.name); } }),
+    `${src.name} (${src.template}, môi trường ${src.envs.join(", ")})`, info.sources && info.sources[src.name] ? h("span", { class: "badge " + (info.sources[src.name].error ? "bad" : "ok") },
+      info.sources[src.name].error ? "lỗi: " + info.sources[src.name].error : `${info.sources[src.name].count} cảnh báo`) : null))
+    : h("div", { class: "small muted" }, "Chưa có kết nối Alertmanager/Prometheus dùng chung. Tạo ở Công cụ → Kết nối.");
+  const labels = h("input", { class: "wide", value: cfg.group_labels.join(", "), disabled: dis, "aria-label": "Nhãn dùng để gom", oninput: (e) => { cfg.group_labels = csv(e.target.value); } });
+  const envRows = ["dev", "staging", "prod"].map((env) => h("tr", {}, h("td", {}, env),
+    h("td", {}, h("input", { type: "checkbox", checked: cfg.auto[env].enabled, disabled: dis, "aria-label": `Tự xử lý ở ${env}`, onchange: (e) => { cfg.auto[env].enabled = e.target.checked; } })),
+    h("td", {}, h("input", { type: "number", min: "0.5", max: "1", step: "0.05", value: cfg.auto[env].min_confidence, disabled: dis, "aria-label": `Ngưỡng độ tin ở ${env}`,
+      oninput: (e) => { cfg.auto[env].min_confidence = Number(e.target.value); } }))));
+  const save = guard(async () => { await api("PUT", "/api/alert-settings", cfg); toast("Đã lưu cài đặt cảnh báo"); renderShell(); });
+  const pollNow = guard(async () => { const r = await api("POST", "/api/alert-settings/poll"); toast(`Đã lấy: ${r.new} cảnh báo mới, ${r.resolved} đã hết`); renderShell(); });
+  main.append(h("div", { class: "card" }, h("h3", {}, "Tự xử lý cảnh báo"),
+    h("p", { class: "small" }, "kagent định kỳ lấy cảnh báo đang bắn, gom các cảnh báo liên quan thành sự cố (luật nhãn → quan hệ k8s → AI), điều tra bằng lệnh chỉ đọc rồi đề xuất hành động. Hành động chỉ tự chạy khi tự xử lý bật ở môi trường đó, độ tin của báo cáo đạt ngưỡng, và gateway cũng cho tự chạy theo chính sách (ma trận rủi ro, tiền lệ, nội dung chưa tin cậy). Không đạt thì thành yêu cầu duyệt. Lệnh chạy bằng tài khoản kagent-alerts (vai trò member), có audit như mọi lệnh khác."),
+    check(cfg, "enabled", "Bật luồng tự xử lý cảnh báo"),
+    h("h3", {}, "Nguồn cảnh báo"), sources,
+    h("h3", {}, "Gom nhóm"),
+    h("div", { class: "row" }, num("poll_seconds", "Chu kỳ lấy cảnh báo (giây)"), num("window_minutes", "Khung thời gian gom (phút)"), num("debounce_seconds", "Chờ trước khi điều tra (giây)")),
+    h("label", { class: "field" }, "Nhãn dùng để gom (trùng các nhãn này thì chung sự cố)", labels),
+    check(cfg, "ai_grouping", "Dùng AI gom khi luật không quyết được"), num("ai_min_score", "Điểm tối thiểu để AI gộp (0.5–1)", "0.05"),
+    h("h3", {}, "Điều tra và tự xử lý"),
+    check(cfg, "investigate", "Tự điều tra sự cố mới (agent chỉ dùng công cụ đọc)"),
+    h("table", { class: "incident-table" }, h("thead", {}, h("tr", {}, h("th", {}, "Môi trường"), h("th", {}, "Tự xử lý"), h("th", {}, "Độ tin tối thiểu"))), h("tbody", {}, envRows)),
+    h("div", { class: "row" }, num("max_auto_actions_per_hour", "Số lần tự xử lý tối đa mỗi sự cố mỗi giờ"), num("verify_minutes", "Xác minh sau (phút)")),
+    info.can_manage ? h("div", { class: "row" }, h("button", { type: "button", onclick: save }, "Lưu"), h("button", { type: "button", class: "ghost", onclick: pollNow }, "Lấy cảnh báo ngay"))
+      : h("div", { class: "small muted" }, "Chỉ tenant admin được đổi cài đặt này.")));
 }
 
 VIEWS.chat = chatView;
@@ -1241,7 +1397,7 @@ async function refreshMe() {
   renderShell();
 }
 
-VIEWS.settings = (main) => subTabs(main, [["policy", "Chính sách", policyView], ...(state.me.is_org_admin ? [["llm", "LLM", llmSettingsView], ["proxy", "Proxy", proxySettingsView]] : [])]);
+VIEWS.settings = (main) => subTabs(main, [["policy", "Chính sách", policyView], ["alerts", "Cảnh báo", alertSettingsView], ...(state.me.is_org_admin ? [["llm", "LLM", llmSettingsView], ["proxy", "Proxy", proxySettingsView]] : [])]);
 
 async function proxySettingsView(main) {
   let st = await api("GET", "/api/settings/proxy");

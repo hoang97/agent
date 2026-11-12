@@ -222,19 +222,20 @@ def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
 
 def run_task(conn, tenant_id: str, user_id: str, task: str, env: str = "dev", project: str | None = None, agent_id: str = "ops-agent",
              conversation_id: str | None = None, episode_id: str | None = None, on_event=None, cancelled=None,
-             continuation_of: str | None = None) -> dict:
-    """Chạy một lượt và ghi số token của từng lần gọi LLM vào llm_call để đo chi phí."""
+             continuation_of: str | None = None, read_only: bool = False) -> dict:
+    """Chạy một lượt và ghi số token của từng lần gọi LLM vào llm_call để đo chi phí. read_only: agent chỉ thấy công cụ đọc."""
     episode_id = episode_id or db.new_id()
     with llm.collect_usage() as usage:
         try:
-            return _run_task(conn, tenant_id, user_id, task, env, project, agent_id, conversation_id, episode_id, on_event, cancelled, continuation_of)
+            return _run_task(conn, tenant_id, user_id, task, env, project, agent_id, conversation_id, episode_id, on_event, cancelled, continuation_of,
+                             read_only)
         finally:
             if usage:
                 llm.save_usage(conn, tenant_id, episode_id, usage)
 
 
 def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: str | None, agent_id: str,
-              conversation_id: str | None, episode_id: str, on_event, cancelled, continuation_of: str | None) -> dict:
+              conversation_id: str | None, episode_id: str, on_event, cancelled, continuation_of: str | None, read_only: bool = False) -> dict:
     """on_event nhận các sự kiện tiến trình để stream; cancelled là threading.Event do nút dừng đặt."""
     tenant = conn.execute("SELECT token_quota_daily FROM tenant WHERE id=?", (tenant_id,)).fetchone()
     if tokens_today(conn, tenant_id) >= tenant["token_quota_daily"]:
@@ -263,7 +264,14 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
 
     batches = {"n": 0}
 
+    allowed: set[str] = set()  # read_only: chỉ công cụ đã cho agent thấy, chặn cả tên model tự bịa ra
+
     def run_one(c, name: str, args: dict) -> dict:
+        if read_only and name not in allowed:
+            step = {"type": "tool_call", "tool": name, "args": args, "env": env, "decision": "blocked", "status": "blocked",
+                    "reasons": ["lượt này chỉ được dùng công cụ đọc"]}
+            emit({"type": "tool_end", "step": step})
+            return step
         local = replace(ctx, independent=provider.check_plan(task, name, args), roles=set(ctx.roles))
         step = gateway.invoke(c, local, name, args)
         emit({"type": "tool_end", "step": step})
@@ -314,8 +322,10 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         visible = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND enabled=1 AND status='active' ORDER BY tool", (tenant_id,)).fetchall()
         tool_list = [{"tool": r["tool"], "description": r["description"], "input_schema": _with_filter(r),
                       "canonical": r["canonical"], "action_class": r["action_class"]}
-                     for r in visible if callable_by(r, env, roles, user_id)[0]]
-        tool_list += learned.for_agent(conn, tenant_id, user_id, env, roles)
+                     for r in visible if callable_by(r, env, roles, user_id)[0] and (not read_only or r["action_class"] == "read")]
+        if not read_only:
+            tool_list += learned.for_agent(conn, tenant_id, user_id, env, roles)
+        allowed.update(t["tool"] for t in tool_list)
         query = f"{history['last_task']} {task}".strip()
         assembled = assemble_context(conn, tenant_id, query, task_type, project=project, user_id=user_id, entities=entities,
                                      tool_names=[t["tool"] for t in tool_list])
