@@ -347,3 +347,14 @@ def test_other_tenant_cannot_see_connections(client, users):
     assert [c["name"] for c in finance.get("/api/connections").json()] == ["data"]  # chỉ kết nối nội bộ của chính tenant đó
     k8s_conn = next(c for c in users["admin"].get("/api/connections").json() if c["name"] == "k8s")
     assert finance.patch(f"/api/connections/{k8s_conn['id']}", json={"title": "x"}).status_code == 404
+
+
+def test_tls_verify_error_tells_user_to_set_ca(monkeypatch):
+    import ssl
+
+    def fail(request):
+        raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate")
+
+    monkeypatch.setattr(net, "transport_override", lambda: httpx.MockTransport(fail))
+    with net.client("https://example.test", allow_private=False) as c, pytest.raises(ConnectorError, match="ca_cert"):
+        base.call(c, "GET", "/")

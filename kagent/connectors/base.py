@@ -98,6 +98,9 @@ def call(client: httpx.Client, method: str, path: str, *, params=None, json_body
     except httpx.TimeoutException as exc:
         raise ConnectorError("hết thời gian chờ phản hồi" + _route_hint(client) + host_hint(client.base_url.host)) from exc
     except httpx.HTTPError as exc:
+        if "CERTIFICATE_VERIFY_FAILED" in str(exc):
+            raise ConnectorError("chứng chỉ TLS của máy chủ không xác thực được (thường do CA nội bộ): dán chứng chỉ CA dạng PEM vào ô ca_cert "
+                                 "của kết nối, hoặc tạm tắt verify_tls" + _route_hint(client)) from exc
         raise ConnectorError(f"lỗi kết nối ({exc.__class__.__name__})" + _route_hint(client) + host_hint(client.base_url.host)) from exc
     text = data.decode("utf-8", "replace")
     if with_status:
