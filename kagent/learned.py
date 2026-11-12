@@ -23,6 +23,12 @@ PLACEHOLDER = re.compile(r"^\{\{([a-z_][a-z0-9_]{0,30})\}\}$")
 # {{step:N}}: kết quả đầy đủ của bước N, chỉ dùng làm dữ liệu đầu vào cho công cụ local (data.*), không bao giờ cho lệnh gọi ra ngoài.
 STEP_REF = re.compile(r"^\{\{step:([1-9])\}\}$")
 PARAM_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,30}$")
+# {{x}} nằm giữa chuỗi (vd. command của kubectl_*): giá trị thay vào chỉ là một từ, không dấu cách, không mở đầu bằng "-",
+# nên không chèn thêm được flag hay lệnh.
+INLINE = re.compile(r"\{\{([a-z_][a-z0-9_]{0,30})\}\}")
+INLINE_VALUE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._:/=@+,-]{0,252}$")
+MAX_INLINE_PARAMS = 6
+COMMAND_ARG = "command"  # chỉ chuỗi lệnh dạng kubectl mới tự tách tham số khi học; SQL, URL... giữ nguyên
 PARAM_TYPES = ("string", "integer")
 MIN_EPISODES = 3
 MAX_STEPS = 8
@@ -52,6 +58,11 @@ def _step_ref(value) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _inline(value) -> list[str]:
+    """Tham số {{x}} nằm giữa chuỗi (không tính chuỗi chỉ gồm đúng một {{x}})."""
+    return INLINE.findall(value) if isinstance(value, str) and not _placeholder(value) else []
+
+
 def _values(value) -> list:
     return value if isinstance(value, list) else [value]
 
@@ -77,8 +88,9 @@ def validate(conn, tenant_id: str, steps, params) -> None:
         if not isinstance(args, dict):
             raise LearnedError(f"bước {i}: args phải là object")
         for value in (v for raw in args.values() for v in _values(raw)):
-            name = _placeholder(value)
-            if name:
+            if isinstance(value, str) and "{{step:" in value and _step_ref(value) is None:
+                raise LearnedError(f"bước {i}: {{{{step:N}}}} phải đứng riêng một giá trị")
+            for name in ([_placeholder(value)] if _placeholder(value) else _inline(value)):
                 if name not in params:
                     raise LearnedError(f"bước {i}: tham số {name} chưa được khai báo")
                 used.add(name)
@@ -196,6 +208,53 @@ def _scalar(value) -> bool:
     return isinstance(value, (str, int)) and not isinstance(value, bool)
 
 
+def _pname(base: str, params: dict) -> str:
+    base = re.sub(r"[^a-z0-9_]", "_", base.lower()).strip("_")[:24] or "arg"
+    base = base if PARAM_NAME.match(base) else f"p_{base}"
+    name, n = base, 2
+    while name in params:
+        name, n = f"{base}_{n}", n + 1
+    return name
+
+
+def _pieces(token: str, prev: str | None) -> tuple[str, str, str]:
+    """(tiền tố cố định, phần có thể thành tham số, tên gợi ý): --replicas=5 → ("--replicas=", "5", "replicas"), deploy/web → ("deploy/", "web", "deploy")."""
+    if token.startswith("-"):
+        head, eq, tail = token.partition("=")
+        return (head + eq, tail, head.lstrip("-")) if eq else (token, "", "")
+    head, slash, tail = token.rpartition("/")
+    if slash:
+        return head + slash, tail, head.split("/")[-1]
+    hint = {"-n": "namespace", "--namespace": "namespace", "-l": "selector", "-c": "container"}.get(prev or "", "arg")
+    return "", token, hint
+
+
+def _templatize(texts: list[str], params: dict, keep=None) -> str | None:
+    """Gộp các chuỗi lệnh cùng khung thành một mẫu có {{x}} ở chỗ khác nhau. keep(phần) quyết định chỗ nào thành tham số khi chỉ có một chuỗi."""
+    rows = [t.split(" ") for t in texts]
+    if len({len(r) for r in rows}) != 1:
+        return None
+    out, added = [], 0
+    for i, column in enumerate(zip(*rows)):
+        prev = rows[0][i - 1] if i else None
+        split = [_pieces(t, prev) for t in column]
+        heads, tails = {x[0] for x in split}, [x[1] for x in split]
+        varies = len(set(column)) > 1
+        if i == 0 or not tails[0] or len(heads) != 1 or not (varies or (keep and keep(tails[0]))):
+            if varies:
+                return None
+            out.append(column[0])
+            continue
+        if not all(INLINE_VALUE.match(t) for t in tails):
+            return None
+        name = _pname(split[0][2], params)
+        examples = ", ".join(list(dict.fromkeys(tails))[:3])
+        params[name] = {"type": "integer" if all(t.isdigit() for t in tails) else "string", "description": f"ví dụ: {examples}"}
+        out.append(split[0][0] + "{{%s}}" % name)
+        added += 1
+    return " ".join(out) if added <= MAX_INLINE_PARAMS else None
+
+
 def from_episode(conn, tenant_id: str, user_id: str, episode_id: str, name: str | None, description: str | None, scope: str) -> dict:
     r = conn.execute("SELECT * FROM episode WHERE id=? AND tenant_id=?", (episode_id, tenant_id)).fetchone()
     if r is None:
@@ -220,6 +279,11 @@ def from_episode(conn, tenant_id: str, user_id: str, episode_id: str, name: str 
                 pname = key if key not in params else f"{key}_{len(params) + 1}"
                 params[pname] = {"type": "integer" if isinstance(value, int) else "string", "description": f"ví dụ: {value}"}
                 args[key] = "{{%s}}" % pname
+            elif key == COMMAND_ARG and isinstance(value, str) and " " in value.strip():
+                trial = dict(params)
+                template = _templatize([value], trial, keep=lambda piece: piece.lower() in words)
+                args[key] = template if template else value
+                params.update(trial if template else {})
             else:
                 args[key] = value
         out.append({"tool": s["tool"], "args": args})
@@ -256,6 +320,14 @@ def propose(conn, tenant_id: str) -> int:
                 values = [item[2][i]["args"][key] for item in items]
                 if all(v == values[0] for v in values):
                     args[key] = values[0]
+                elif key == COMMAND_ARG and all(isinstance(v, str) and " " in v.strip() for v in values):
+                    trial = dict(params)  # mẫu hỏng giữa chừng thì không để lại tham số thừa
+                    template = _templatize(values, trial)
+                    if template is None:
+                        generalizable = False
+                    else:
+                        params.update(trial)
+                        args[key] = template
                 elif all(_scalar(v) for v in values):
                     pname = key if key not in params else f"{key}_{i + 1}"
                     examples = ", ".join(str(v) for v in list(dict.fromkeys(values))[:3])
@@ -319,7 +391,9 @@ def invoke_by_name(conn, ctx, name: str, args: dict) -> dict:
     def resolve(value):
         ref = _step_ref(value)
         if ref is None:
-            return values[_placeholder(value)] if _placeholder(value) else value
+            if _placeholder(value):
+                return values[_placeholder(value)]
+            return INLINE.sub(lambda m: str(values[m.group(1)]), value) if _inline(value) else value
         consumed.add(ref)
         if ref not in handles:
             prev = subs[ref - 1]
@@ -327,6 +401,11 @@ def invoke_by_name(conn, ctx, name: str, args: dict) -> dict:
                 else results.save(conn, ctx.tenant_id, ctx.user_id, ctx.episode_id, prev["tool"], prev.get("result"), bool(prev.get("untrusted")))
         return handles[ref]
 
+    for step in row["steps"]:
+        for name in (n for raw in step["args"].values() for v in _values(raw) for n in _inline(v)):
+            if not INLINE_VALUE.match(str(values[name])):
+                return {**base, "risk_tier": tier, "decision": "blocked", "status": "invalid",
+                        "reasons": [f"tham số {name} nằm trong chuỗi lệnh nên chỉ được là một từ (chữ, số, ._:/=@+,-), không mở đầu bằng -"]}
     reviewed = _reviewed(conn, ctx.tenant_id, row)
     for step in row["steps"]:
         call_args = {k: [resolve(x) for x in v] if isinstance(v, list) else resolve(v) for k, v in step["args"].items()}

@@ -130,9 +130,13 @@ def tokens_today(conn, tenant_id: str) -> int:
     return conn.execute("SELECT coalesce(sum(tokens),0) t FROM episode WHERE tenant_id=? AND started_at>=?", (tenant_id, start)).fetchone()["t"]
 
 
-def _untrusted_tool(conn, tenant_id: str, tool: str) -> bool:
-    r = conn.execute("SELECT untrusted_output FROM tool_registry WHERE tenant_id=? AND tool=?", (tenant_id, tool)).fetchone()
-    return bool(r and r["untrusted_output"])
+def _untrusted_tool(conn, tenant_id: str, tool: str, args: dict | None = None) -> bool:
+    from .tools import spec_of
+    r = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (tenant_id, tool)).fetchone()
+    if not (r and r["untrusted_output"]):
+        return False
+    spec = spec_of(r)
+    return spec.untrusted(args) if spec else True
 
 
 APPROVED_RESULT_CHARS = 24000  # tổng cho mọi lệnh đã duyệt của lượt mới nhất
@@ -193,7 +197,7 @@ def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
         cap = max(1000, APPROVED_RESULT_CHARS // max(1, len(approvals))) if i == 0 else 300
         for a in approvals:
             detail = _clip_chars(json.dumps(a["result"], ensure_ascii=False), cap) if a["result"] else (a["deny_reason"] or "")
-            if a["result"] and _untrusted_tool(conn, tenant_id, a["tool"]):
+            if a["result"] and _untrusted_tool(conn, tenant_id, a["tool"], a["args"]):
                 detail = f"<untrusted>{detail}</untrusted>"
             notes.append(f"- {a['tool']} {json.dumps(a['args'], ensure_ascii=False)}: {a['status']} {detail}".rstrip())
         # Kết quả lệnh duyệt sau đi trong message riêng của hệ thống, không trộn vào lời của agent:
@@ -207,7 +211,7 @@ def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
         turns.insert(0, (ep["input"]["task"], answer, note))
         # Nội dung untrusted nằm trong lịch sử vẫn có thể lái kế hoạch của lượt sau.
         tainted = tainted or any(s.get("untrusted") for s in ep["trace"]) or any(
-            a["status"] == "approved" and _untrusted_tool(conn, tenant_id, a["tool"]) for a in approvals)
+            a["status"] == "approved" and _untrusted_tool(conn, tenant_id, a["tool"], a["args"]) for a in approvals)
     messages = []
     for task, answer, note in turns:
         messages += [{"role": "user", "content": task}, {"role": "assistant", "content": answer}]

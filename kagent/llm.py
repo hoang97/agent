@@ -258,6 +258,19 @@ def _openai_client(cred: vault.Credential, **options) -> openai.OpenAI:
     return openai.OpenAI(api_key=cred.key, **options)
 
 
+def _kubectl_tool(command: str) -> str:
+    """Công cụ kubectl_* thấp nhất chạy được lệnh (theo bảng lệnh con của connector)."""
+    from .connectors.base import ConnectorError
+    from .connectors.kubectl import parse
+    for profile in ("read", "write", "admin"):
+        try:
+            parse(command, profile)
+            return f"k8s.kubectl_{profile}"
+        except ConnectorError:
+            continue
+    return "k8s.kubectl_admin"
+
+
 class HeuristicProvider:
     """Bản không dùng model: lập kế hoạch bằng từ khóa, phản tư bằng mẫu câu."""
 
@@ -285,7 +298,7 @@ class HeuristicProvider:
                     return
 
         learned_names = re.findall(r"learned\.[a-z0-9_]+", task.lower())
-        # Tên công cụ học được (vd learned.list_pods_prometheus_query) không được kích hoạt từ khóa của công cụ khác.
+        # Tên công cụ học được (vd learned.kubectl_read_prometheus_query) không được kích hoạt từ khóa của công cụ khác.
         t = re.sub(r"learned\.[a-z0-9_]+", " ", task.lower())
         ns_m = re.search(r"(?:namespace|ns)\s+([\w-]+)", t)
         ns = ns_m.group(1) if ns_m else "default"
@@ -297,22 +310,28 @@ class HeuristicProvider:
         sql = [q for q in ticks if q not in shell and re.match(r"\s*(select|with|insert|update|delete)\b", q, re.I)]
         promql = [q for q in ticks if q not in shell and q not in sql]
         exec_wanted = re.search(r"\bexec\b", t)
+        kubectl_cmds = [q.strip() for q in ticks if re.match(r"\s*kubectl\s", q)]
+        shell = [q for q in shell if q not in kubectl_cmds]
+        sql, promql = [q for q in sql if q not in kubectl_cmds], [q for q in promql if q not in kubectl_cmds]
+        for q in kubectl_cmds:
+            add(_kubectl_tool(q), {"command": q.split(None, 1)[1]})
         if re.search(r"\blogs? (?:của |of )?pod\b", t) and pod_m:
-            add("k8s.pod_logs", {"namespace": ns, "pod": pod_m.group(1)})
-        elif re.search(r"\bpods?\b|kubectl get|liệt kê pod", t) and not exec_wanted and not re.search(r"xóa pod|delete pod", t):
-            add("k8s.list_pods", {"namespace": ns})
+            add("k8s.kubectl_read", {"command": f"logs {pod_m.group(1)} -n {ns} --tail=200"})
+        elif re.search(r"\bpods?\b|liệt kê pod", t) and not exec_wanted and not kubectl_cmds and not re.search(r"xóa pod|delete pod", t):
+            add("k8s.kubectl_read", {"command": f"get pods -n {ns}"})
         if re.search(r"(xem|liệt kê|list) deployment", t):
-            add("k8s.list_deployments", {"namespace": ns})
-        if re.search(r"\bscale\b|mở rộng|tăng replica", t):
+            add("k8s.kubectl_read", {"command": f"get deployments -n {ns}"})
+        if re.search(r"\bscale\b|mở rộng|tăng replica", t) and not kubectl_cmds:
             m = re.search(r"(?:lên|to|=)\s*(\d+)|(\d+)\s*(?:replica|bản)", t)
-            add("k8s.scale", {"namespace": ns, "deployment": dep, "replicas": int(next(g for g in m.groups() if g)) if m else 3})
-        if re.search(r"restart|khởi động lại", t):
-            add("k8s.rollout_restart", {"namespace": ns, "deployment": dep})
+            replicas = int(next(g for g in m.groups() if g)) if m else 3
+            add("k8s.kubectl_write", {"command": f"scale deployment/{dep} --replicas={replicas} -n {ns}"})
+        if re.search(r"restart|khởi động lại", t) and not kubectl_cmds:
+            add("k8s.kubectl_write", {"command": f"rollout restart deployment/{dep} -n {ns}"})
         if re.search(r"xóa pod|delete pod", t) and pod_m:
-            add("k8s.delete_pod", {"namespace": ns, "pod": pod_m.group(1)})
+            add("k8s.kubectl_admin", {"command": f"delete pod {pod_m.group(1)} -n {ns}"})
         if exec_wanted:
             for command in shell or ["ls"]:
-                add("k8s.exec", {"namespace": ns, "pod": pod_m.group(1) if pod_m else dep, "command": command})
+                add("k8s.kubectl_admin", {"command": f"exec {pod_m.group(1) if pod_m else dep} -n {ns} -- {command}"})
         for q in sql:
             write = re.match(r"\s*(insert|update|delete)\b", q, re.I)
             add(("postgres.execute", "mysql.execute") if write else ("postgres.query", "mysql.query"), {"sql": q})

@@ -69,12 +69,12 @@ class Session:
 def infra(monkeypatch, tmp_path):
     """Mọi test chạy connector thật trên hạ tầng giả: không DNS, không mạng, không CSDL thật."""
     from kagent import net
-    from kagent.connectors import k8s as k8s_connector, sql as sql_connector
+    from kagent.connectors import kubectl, sql as sql_connector
     fake = fakes.Infra()
     monkeypatch.setattr(net, "resolve", fakes.resolve)
     monkeypatch.setattr(net, "transport_override", fake.transport)
     monkeypatch.setattr(sql_connector, "_open", fakes.sqlite_open(tmp_path / "shop.db"))
-    monkeypatch.setattr(k8s_connector, "_exec_ws", fakes.exec_ws)
+    monkeypatch.setattr(kubectl, "runner", fakes.kubectl_runner(fake))
     return fake
 
 
@@ -83,8 +83,10 @@ def create_connections(tenant_id: str, enable_all: bool = True) -> None:
     with db.session() as conn:
         admin = conn.execute("SELECT id FROM app_user WHERE username='admin'").fetchone()["id"]
         for name, template, params, secrets in fakes.CONNECTIONS:
-            connections.create(conn, tenant_id, admin, is_admin=True, is_org_admin=True, template=template, name=name, scope="tenant",
-                               envs=["dev", "staging", "prod"], roles=["member"], params=params, secrets=secrets, enable_all=enable_all)
+            row = connections.create(conn, tenant_id, admin, is_admin=True, is_org_admin=True, template=template, name=name, scope="tenant",
+                                     envs=["dev", "staging", "prod"], roles=["member"], params=params, secrets=secrets, enable_all=enable_all)
+            if template == "k8s":  # như đã bấm Áp dụng quyền Kubernetes
+                connections.set_internal(conn, row, secrets={f"_sa_{p}": t for p, t in fakes.SA_TOKENS.items()})
 
 
 @pytest.fixture()

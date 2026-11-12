@@ -36,14 +36,14 @@ def params(**kw):
     return {"_allow_private": False, "namespace": "default", **kw}
 
 
-def test_kubeconfig_token_lists_pods(infra):
-    assert k8s.list_pods(params(kubeconfig=TOKEN_KC), {})["namespace"] == "default"
+def test_kubeconfig_token_reaches_api(infra):
+    assert k8s.ping(params(kubeconfig=TOKEN_KC))["ok"]
     assert infra.requests[-1].headers["authorization"] == f"Bearer {fakes.K8S_TOKEN}"
 
 
 def test_explicit_fields_override_kubeconfig(infra):
     kc = kubeconfig({"token": "wrong-token"}, server="https://127.0.0.1:6443")
-    k8s.list_pods(params(kubeconfig=kc, api_url="https://k8s.test:6443", token=fakes.K8S_TOKEN), {})
+    k8s.ping(params(kubeconfig=kc, api_url="https://k8s.test:6443", token=fakes.K8S_TOKEN))
     assert infra.requests[-1].url.host == "k8s.test" and infra.requests[-1].headers["authorization"] == f"Bearer {fakes.K8S_TOKEN}"
 
 

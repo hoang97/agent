@@ -1,7 +1,7 @@
 """Chuẩn hoá tên thực thể và gộp tên do admin chọn."""
 from kagent import db, entities, knowledge
 
-V = entities.Vocab(["kibana_devtest.search_logs", "kibana_devtest.count_logs", "k8s_devtest.list_pods", "db.list_pods"], {})
+V = entities.Vocab(["kibana_devtest.search_logs", "kibana_devtest.count_logs", "k8s_devtest.kubectl_read", "db.kubectl_read"], {})
 
 
 def n(*names, v=V):
@@ -25,8 +25,8 @@ def test_http_codes_share_one_name():
 
 def test_tools_resolve_to_full_name_and_connection():
     assert n("search_logs") == n("kibana_devtest.search_logs") == n("tool:kibana_devtest.search_logs") == ["kibana_devtest", "tool:kibana_devtest.search_logs"]
-    assert n("list_pods") == ["list_pods"]  # hai kết nối cùng có lệnh này: không đoán
-    assert n("tool:k8s.scale") == ["tool:k8s.scale"]
+    assert n("kubectl_read") == ["kubectl_read"]  # hai kết nối cùng có lệnh này: không đoán
+    assert n("tool:k8s.kubectl_write") == ["tool:k8s.kubectl_write"]
 
 
 def test_aliases_apply():

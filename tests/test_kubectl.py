@@ -222,15 +222,11 @@ def test_plan_reports_missing_namespace_and_escalation(infra):
     assert any("not currently held" in e for e in plan["errors"])
 
 
-def test_old_tools_switch_to_service_account(infra):
+def test_ping_reports_service_account_identities(infra):
     _, tokens = k8s_rbac.apply(ADMIN_P, CID, CNAME, config(read=[rule()]))
-    p = {**ADMIN_P, "_sa_read": tokens["read"]}
-    assert k8s.list_pods(p, {})["pods"]  # SA giả chỉ đọc được pod ở default
-    with pytest.raises(ConnectorError, match="403"):
-        k8s.list_pods(p, {"namespace": "payments"})
-    with pytest.raises(ConnectorError, match="chưa có nhóm write"):
-        k8s.scale(p, {"deployment": "web", "replicas": 2})
-    assert k8s.ping(p)["identities"]["read"] == f"system:serviceaccount:kagent-system:{BASE}-read"
+    out = k8s.ping({**ADMIN_P, "_sa_read": tokens["read"], "_sa_write": "revoked-token"})
+    assert out["identities"]["read"] == f"system:serviceaccount:kagent-system:{BASE}-read"
+    assert out["identities"]["write"].startswith("lỗi: HTTP 401")
 
 
 # ---------- qua API và gateway ----------
@@ -265,7 +261,7 @@ def test_rbac_api_flow_and_gateway(users, calls, infra):
         row = connections.get(conn, alice.tenant, c["id"])
         assert connections.params_of(row)["_sa_read"] == f"sa-token-{k8s_rbac.base_name(c['id'], 'my_k8s')}-read-token"
         step = gateway.invoke(conn, ctx, "my_k8s.kubectl_read", {"command": "get pods -n default"})
-    assert step["status"] == "ok" and step["risk_tier"] == "R1" and step["untrusted"] is True
+    assert step["status"] == "ok" and step["risk_tier"] == "R1" and step["untrusted"] is False  # bảng pod: dữ liệu có cấu trúc
     assert calls.seen[-1]["config"]["users"][0]["user"]["token"].endswith("-read-token")
 
     assert alice._call("DELETE", f"/api/connections/{c['id']}").json() == {"ok": True}
@@ -318,3 +314,15 @@ def test_subresource_wildcard():
     rules = k8s_rbac._k8s_rules({"api_groups": [""], "resources": ["pods/*"], "verbs": ["get"]}, "read", False,
                                 {"": fakes.Infra.K8S_DISCOVERY["/api/v1"]["resources"]})
     assert rules == [{"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]}]
+
+
+@pytest.mark.parametrize("command, trusted", [
+    ("get pods -n app", True), ("get deploy,svc -o wide", True), ("get pods -o name", True), ("get deployment/web", True), ("top pods", True),
+    ("auth can-i list pods", True), ("rollout status deploy/web", True), ("scale deploy/web --replicas=2", True), ("delete pod web-0", True),
+    ("logs web-0", False), ("describe pod web-0", False), ("get pods -o yaml", False), ("get pods -o jsonpath={.items}", False),
+    ("get events", False), ("get configmaps", False), ("get widgets.example.com", False), ("get --raw /metrics", False),
+    ("rollout history deploy/web", False), ("explain pods", False), ("exec web-0 -- env", False), ("apply -f - -o yaml", False),
+    ("get pods --kubeconfig=/x", False),
+])
+def test_trusted_output_only_for_structured_results(command, trusted):
+    assert kubectl.trusted_output({"command": command}) is trusted

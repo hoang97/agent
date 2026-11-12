@@ -11,9 +11,9 @@ def usage(i=100, o=20, read=0, write=0):
 
 
 def test_agent_loop_marks_cache_breakpoints_and_records_usage():
-    p, fake = provider([NS(content=[use("k8s__list_pods", {})], stop_reason="tool_use", usage=usage(500, 30, 0, 4000), model="claude-opus-5-5"),
+    p, fake = provider([NS(content=[use("k8s__kubectl_read", {})], stop_reason="tool_use", usage=usage(500, 30, 0, 4000), model="claude-opus-5-5"),
                         NS(content=[text("xong")], stop_reason="end_turn", usage=usage(80, 10, 4000, 600), model="claude-opus-5-5")])
-    tools = [{"tool": "k8s.list_pods", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
+    tools = [{"tool": "k8s.kubectl_read", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
     with llm.collect_usage() as got:
         p.run_agent("xem pod", "ctx", tools, lambda name, args: {"status": "ok", "result": {"pods": []}})
     first, second = fake.calls
@@ -48,7 +48,7 @@ def test_purpose_tags_structured_calls():
     p, _ = provider([msg([text(json.dumps({"task_type": "k8s_ops", "entities": []}))]), msg([text(json.dumps({"score": 0.5}))])])
     with llm.collect_usage() as got:
         p.route("xem pod")
-        p.check_plan("xem pod", "k8s.list_pods", {})
+        p.check_plan("xem pod", "k8s.kubectl_read", {})
     assert [u["purpose"] for u in got] == ["route", "check_plan"]
 
 
@@ -72,7 +72,7 @@ def test_metrics_endpoint_reports_tokens_cache_and_tool_sizes(users):
     t = alice.get("/api/metrics").json()["tokens"]
     assert t["cache_hit_pct"] == round(100 * 3000 / 4050, 1)
     assert {r["purpose"]: r["calls"] for r in t["by_purpose"]} == {"agent": 1, "route": 1}
-    tool = next(x for x in t["tools"] if x["tool"] == "k8s.list_pods")
+    tool = next(x for x in t["tools"] if x["tool"] == "k8s.kubectl_read")
     assert tool["calls"] == 1 and tool["result_chars"] > 0
     assert t["top_turns"][0]["id"] == ep["id"] and t["top_turns"][0]["cache_read"] == 3000
 
@@ -96,9 +96,9 @@ def test_run_task_saves_usage_rows(users, monkeypatch):
 def test_step_limit_forces_a_summary_instead_of_failing(monkeypatch):
     from kagent.config import settings
     monkeypatch.setattr(settings, "max_agent_steps", 2)
-    loop = NS(content=[use("k8s__list_pods", {})], stop_reason="tool_use", usage=usage(), model="m")
+    loop = NS(content=[use("k8s__kubectl_read", {})], stop_reason="tool_use", usage=usage(), model="m")
     p, fake = provider([loop, loop, NS(content=[text("Tóm tắt: đã xem pod, chưa xong phần log.")], stop_reason="end_turn", usage=usage(), model="m")])
-    out = p.run_agent("x", "", [{"tool": "k8s.list_pods", "description": "d", "input_schema": {"type": "object", "properties": {}}}],
+    out = p.run_agent("x", "", [{"tool": "k8s.kubectl_read", "description": "d", "input_schema": {"type": "object", "properties": {}}}],
                       lambda n, a: {"status": "ok", "result": {}})
     assert out["answer"].endswith("Tóm tắt: đã xem pod, chưa xong phần log.")
     last = fake.calls[-1]

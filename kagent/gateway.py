@@ -5,6 +5,7 @@ import copy
 import fnmatch
 import hashlib
 import json
+import shlex
 from dataclasses import dataclass, field
 
 from . import datafilter, db
@@ -114,7 +115,7 @@ class Decision:
 
 
 def evaluate(policy: dict, tier: str, tool: str, env: str, confidence: float, forced: list[str], canonical: str | None = None) -> Decision:
-    """canonical là "<template>.<công_cụ>" để luật chặn như "k8s.exec" áp cho mọi kết nối Kubernetes."""
+    """canonical là "<template>.<công_cụ>" để luật chặn như "k8s.kubectl_admin" áp cho mọi kết nối Kubernetes."""
     for rule in policy["deny"]:
         names = [tool] + ([canonical] if canonical else [])
         if any(fnmatch.fnmatchcase(n, rule["tool"]) for n in names) and fnmatch.fnmatchcase(env, rule["env"]):
@@ -211,8 +212,35 @@ def confidence(conn, ctx: CallContext, tool_meta: dict, args: dict, dry_ok: floa
     return round(sum(WEIGHTS[k] * v for k, v in parts.items()), 3), parts
 
 
+def _command_args(args: dict) -> list[str]:
+    """argv của tham số command kiểu kubectl (bỏ chữ kubectl và phần sau --); lệnh không tách được thì rỗng."""
+    command = args.get("command")
+    if not isinstance(command, str) or "namespace" in args:
+        return []
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return []
+    argv = argv[1:] if argv[:1] == ["kubectl"] else argv
+    return argv[:argv.index("--")] if "--" in argv else argv
+
+
+def namespace_of(args: dict) -> str | None:
+    """Namespace của lệnh: tham số namespace, hoặc -n/--namespace trong command của kubectl_*."""
+    if args.get("namespace"):
+        return args["namespace"]
+    argv = _command_args(args)
+    for i, a in enumerate(argv):
+        for flag in ("-n", "--namespace"):
+            if a == flag and i + 1 < len(argv):
+                return argv[i + 1]
+            if a.startswith(flag + "="):
+                return a[len(flag) + 1:]
+    return None
+
+
 def _unseen_object(conn, ctx: CallContext, args: dict) -> str | None:
-    target = args.get("namespace") or args.get("index")
+    target = namespace_of(args) or args.get("index")
     if not target:
         return None
     key_args = conn.execute(
@@ -220,7 +248,7 @@ def _unseen_object(conn, ctx: CallContext, args: dict) -> str | None:
         (ctx.tenant_id, ctx.env)).fetchall()
     for r in key_args:
         past = json.loads(r["args"])
-        if past.get("namespace") == target or past.get("index") == target:
+        if namespace_of(past) == target or past.get("index") == target:
             return None
     return f"đối tượng chưa từng thấy: {target}"
 
@@ -261,7 +289,7 @@ def _run(conn, tenant_id: str, tool_name: str, args: dict, check: bool = False, 
         # Bản gốc lớn được giữ lại để lọc theo cách khác bằng data.query mà không phải gọi lại hệ thống.
         from . import results
         if len(json.dumps(raw, ensure_ascii=False)) > results.INLINE_LIMIT:
-            result["raw_result_id"] = results.save(conn, tenant_id, user_id, None, tool_name, raw, spec.untrusted_output)
+            result["raw_result_id"] = results.save(conn, tenant_id, user_id, None, tool_name, raw, spec.untrusted(args))
     return result
 
 
@@ -281,7 +309,7 @@ def _execute(conn, tenant_id: str, env: str, tool_name: str, args: dict, user_id
 def _has_grant(conn, ctx: CallContext, tool: str, args: dict) -> bool:
     return conn.execute(
         "SELECT 1 FROM approval_grant WHERE tenant_id=? AND user_id=? AND tool=? AND env=? AND namespace IS ? AND expires_at>?",
-        (ctx.tenant_id, ctx.user_id, tool, ctx.env, args.get("namespace"), db.iso())).fetchone() is not None
+        (ctx.tenant_id, ctx.user_id, tool, ctx.env, namespace_of(args), db.iso())).fetchone() is not None
 
 
 def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
@@ -376,7 +404,7 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
 
     status, result = _execute(conn, ctx.tenant_id, ctx.env, tool_name, args, ctx.user_id)
     audit(conn, ctx, tool_name, args, tier, conf, "auto", decision.reasons, status)
-    step.update(decision="auto", status=status, result=result, untrusted=bool(meta["untrusted_output"]))
+    step.update(decision="auto", status=status, result=result, untrusted=tool.untrusted(args))
     return step
 
 
@@ -517,7 +545,7 @@ def decide(conn, tenant_id: str, approval_id: str, user_id: str, roles: set[str]
                 audit(conn, ctx, req["tool"], req["args"], req["risk_tier"], req["confidence"], "approved", decided, status)
                 if action == "approve_session" and req["required_approvals"] == 1:
                     conn.execute("INSERT INTO approval_grant(id,tenant_id,user_id,tool,env,namespace,expires_at) VALUES (?,?,?,?,?,?,?)",
-                                 (db.new_id(), tenant_id, req["requester_id"], req["tool"], req["env"], req["args"].get("namespace"),
+                                 (db.new_id(), tenant_id, req["requester_id"], req["tool"], req["env"], namespace_of(req["args"]),
                                   db.later(minutes=settings.grant_ttl_minutes)))
                     also = _run_covered_siblings(conn, tenant_id, req, meta, user_id)
     out = db.row(conn.execute("SELECT * FROM approval_request WHERE id=?", (approval_id,)).fetchone(),
@@ -531,7 +559,7 @@ def _compact(conn, tenant_id: str, req: dict, meta, result):
     from . import results
     from .tools import spec_of
     spec = spec_of(meta)
-    small = results.compact(conn, tenant_id, req["requester_id"], req["episode_id"], req["tool"], result, bool(spec and spec.untrusted_output))
+    small = results.compact(conn, tenant_id, req["requester_id"], req["episode_id"], req["tool"], result, bool(spec and spec.untrusted(req["args"])))
     return small or result
 
 
@@ -561,10 +589,31 @@ def _run_covered_siblings(conn, tenant_id: str, req: dict, meta, user_id: str) -
     return done
 
 
+KUBECTL_WORDS = {"pod", "pods", "po", "deployment", "deployments", "deploy", "service", "services", "svc", "node", "nodes", "no", "namespace",
+                 "namespaces", "ns", "configmap", "configmaps", "cm", "statefulset", "sts", "daemonset", "ds", "job", "jobs", "cronjob", "ingress",
+                 "ing", "events", "all", "restart", "status", "history", "undo", "pause", "resume", "can-i", "whoami"}
+_VALUE_FLAGS = {"-n", "--namespace", "-l", "--selector", "-c", "--container", "-o", "--output", "-p", "--patch"}
+
+
+def _kubectl_targets(args: dict) -> list[str]:
+    """Đối tượng của lệnh kubectl: tham số vị trí sau lệnh con (deploy/web → web) và namespace."""
+    argv, out, skip = _command_args(args), [], False
+    for a in argv[1:]:
+        if skip:
+            skip = False
+        elif a.startswith("-"):
+            skip = a in _VALUE_FLAGS
+        elif a.lower() not in KUBECTL_WORDS:
+            out.append(a.split("/")[-1].lower())
+    ns = namespace_of(args) if "namespace" not in args else None
+    return out + ([ns.lower()] if ns else [])
+
+
 def plan_overlap(task: str, tool_name: str, args: dict) -> float:
     """Kiểm tra độc lập khi không có model: đối tượng của lệnh có nằm trong yêu cầu gốc không."""
     words = set(tokenize(task))
     targets = [str(v).lower() for k, v in args.items() if k in ("deployment", "namespace", "name", "index", "alert", "url", "query", "pod")]
+    targets += _kubectl_targets(args)
     if not targets:
         return 0.5
     hits = sum(1 for t in targets if t in words or any(p in words for p in tokenize(t)))

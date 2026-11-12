@@ -8,7 +8,7 @@ import pytest
 import fakes
 from conftest import Session, create_connections, tool_steps
 from kagent import connections, db, net, tools
-from kagent.connectors import base, elasticsearch, grafana, k8s, sql, web
+from kagent.connectors import base, elasticsearch, grafana, k8s, kubectl, sql, web
 from kagent.connectors.base import ConnectorError
 
 
@@ -64,39 +64,23 @@ def test_response_size_capped(infra, monkeypatch):
 
 # ---------- connector ----------
 
-def test_k8s_reads_and_writes(infra):
-    assert k8s.ping(K8S)["version"] == "v1.31.0"
-    assert [p["name"] for p in k8s.list_pods(K8S, {})["pods"]] == ["web-0", "web-1", "web-2", "api-0", "api-1"]
-    assert k8s.list_deployments(K8S, {"namespace": "payments"})["deployments"][0] == {"name": "checkout", "replicas": 4, "ready": 4, "images": ["checkout:1"]}
-    assert "ERROR db timeout" in k8s.pod_logs(K8S, {"pod": "web-0"})["log"]
-    assert k8s.scale_check(K8S, {"deployment": "web", "replicas": 5})["would_change"] == "default/web: 3 → 5"
-    assert k8s.scale(K8S, {"deployment": "web", "replicas": 5}) == {"namespace": "default", "deployment": "web", "from": 3, "to": 5}
-    assert infra.deployments["default"]["web"] == 5
-    assert k8s.rollout_restart(K8S, {"deployment": "api"})["restarted"] == "default/api"
-    assert k8s.delete_pod(K8S, {"pod": "api-1"})["deleted"] == "default/api-1"
-
-
-@pytest.mark.parametrize("args,message", [
-    ({"deployment": "web", "replicas": 99}, "khoảng"), ({"deployment": "khong-co", "replicas": 1}, "HTTP 404"),
-    ({"deployment": "Web!", "replicas": 1}, "không hợp lệ"), ({"deployment": "web", "replicas": 1, "namespace": "../x"}, "không hợp lệ"),
-])
-def test_k8s_validation(infra, args, message):
-    with pytest.raises(ConnectorError, match=message):
-        k8s.scale(K8S, args)
-
-
-def test_k8s_allowed_namespaces_and_bad_token(infra):
-    with pytest.raises(ConnectorError, match="không nằm trong"):
-        k8s.list_pods({**K8S, "allowed_namespaces": ["payments"]}, {"namespace": "default"})
+def test_k8s_ping_and_bad_token(infra):
+    assert k8s.ping(K8S) == {"ok": True, "version": "v1.31.0"}
     with pytest.raises(ConnectorError, match="401"):
-        k8s.list_pods({**K8S, "token": "sai"}, {})
+        k8s.ping({**K8S, "token": "sai"})
 
 
-def test_k8s_exec_parses_command(infra):
-    out = k8s.exec_command(K8S, {"pod": "api-0", "command": 'psql -c "SELECT 1"'})
-    assert out["command"] == ["psql", "-c", "SELECT 1"]
-    with pytest.raises(ConnectorError, match="lệnh không hợp lệ"):
-        k8s.exec_command(K8S, {"pod": "api-0", "command": 'psql -c "chưa đóng'})
+def test_k8s_kubectl_tools_through_fake_kubectl(infra):
+    p = {**K8S, **{f"_sa_{k}": v for k, v in fakes.SA_TOKENS.items()}}
+    assert "web-2" in kubectl.run_read(p, {"command": "get pods"})["stdout"]
+    assert "checkout" in kubectl.run_read(p, {"command": "get deploy -n payments"})["stdout"]
+    assert "(server dry run)" in kubectl.check_write(p, {"command": "scale deployment/web --replicas=5"})["stdout"]
+    assert infra.deployments["default"]["web"] == 3
+    kubectl.run_write(p, {"command": "scale deployment/web --replicas=5"})
+    assert infra.deployments["default"]["web"] == 5
+    with pytest.raises(ConnectorError, match="NotFound"):
+        kubectl.run_write(p, {"command": "scale deployment/khong-co --replicas=1"})
+    assert "deleted" in kubectl.run_admin(p, {"command": "delete pod api-1"})["stdout"]
 
 
 def test_grafana(infra):
@@ -250,7 +234,7 @@ def test_member_creates_personal_connection_private_to_them(users):
     c = r.json()
     assert c["personal"] and c["secrets_set"] == {"kubeconfig": False, "token": True} and fakes.K8S_TOKEN not in r.text
     tools_ = {t["tool"]: t for t in c["tools"]}
-    assert tools_["my_k8s.list_pods"]["enabled"] == 1 and tools_["my_k8s.scale"]["enabled"] == 0  # ghi mặc định tắt
+    assert tools_["my_k8s.kubectl_read"]["enabled"] == 1 and tools_["my_k8s.kubectl_write"]["enabled"] == 0  # ghi mặc định tắt
     assert all(x["name"] != "my_k8s" for x in bob.get("/api/connections").json())
     assert all(x["name"] != "my_k8s" for x in admin.get("/api/connections").json())
     assert all(not t["tool"].startswith("my_k8s.") for t in bob.get("/api/tools").json())
@@ -262,16 +246,17 @@ def test_member_creates_personal_connection_private_to_them(users):
 def test_personal_tool_usable_only_by_owner(users):
     from kagent import gateway
     alice, bob = users["alice"], users["bob"]
-    new_k8s(alice)
+    c = new_k8s(alice).json()
     with db.session() as conn:
+        connections.set_internal(conn, connections.get(conn, alice.tenant, c["id"]), secrets={"_sa_read": fakes.SA_TOKENS["read"]})
         ids = {r["username"]: r["id"] for r in conn.execute("SELECT id, username FROM app_user")}
-        mine = gateway.invoke(conn, gateway.CallContext(alice.tenant, ids["alice"], "dev", "xem pod"), "my_k8s.list_pods", {})
-        theirs = gateway.invoke(conn, gateway.CallContext(alice.tenant, ids["bob"], "dev", "xem pod"), "my_k8s.list_pods", {})
-        other_env = gateway.invoke(conn, gateway.CallContext(alice.tenant, ids["alice"], "prod", "xem pod"), "my_k8s.list_pods", {})
+        mine = gateway.invoke(conn, gateway.CallContext(alice.tenant, ids["alice"], "dev", "xem pod"), "my_k8s.kubectl_read", {"command": "get pods"})
+        theirs = gateway.invoke(conn, gateway.CallContext(alice.tenant, ids["bob"], "dev", "xem pod"), "my_k8s.kubectl_read", {"command": "get pods"})
+        other_env = gateway.invoke(conn, gateway.CallContext(alice.tenant, ids["alice"], "prod", "xem pod"), "my_k8s.kubectl_read", {"command": "get pods"})
     assert mine["status"] == "ok" and theirs["status"] == "blocked" and "người khác" in theirs["reasons"][0]
     assert other_env["status"] == "blocked" and "môi trường prod" in other_env["reasons"][0]
-    assert bob.patch("/api/tools/my_k8s.scale", json={"enabled": True}).status_code == 404
-    assert alice.patch("/api/tools/my_k8s.scale", json={"enabled": True}).json()["enabled"] == 1
+    assert bob.patch("/api/tools/my_k8s.kubectl_write", json={"enabled": True}).status_code == 404
+    assert alice.patch("/api/tools/my_k8s.kubectl_write", json={"enabled": True}).json()["enabled"] == 1
 
 
 def test_shared_connection_requires_admin(users):
@@ -317,9 +302,9 @@ def test_env_binding_follows_connection(users):
     alice = users["alice"]
     c = new_k8s(alice, envs=["dev", "staging"]).json()
     alice.patch(f"/api/connections/{c['id']}", json={"envs": ["staging"]})
-    tool = next(t for t in alice.get("/api/tools").json() if t["tool"] == "my_k8s.list_pods")
+    tool = next(t for t in alice.get("/api/tools").json() if t["tool"] == "my_k8s.kubectl_read")
     assert tool["effective_envs"] == ["staging"] and tool["catalog_envs"] == ["staging"]
-    assert alice.patch("/api/tools/my_k8s.list_pods", json={"envs": ["dev"]}).status_code == 400
+    assert alice.patch("/api/tools/my_k8s.kubectl_read", json={"envs": ["dev"]}).status_code == 400
 
 
 def test_remove_connection_blocks_its_tools(users):
@@ -342,9 +327,9 @@ def test_deny_rule_matches_template_name_for_any_connection(users):
     admin, alice = users["admin"], users["alice"]
     new_k8s(admin, scope="tenant", name="k8s_prod", envs=["prod"])
     with db.session() as conn:
-        conn.execute("UPDATE tool_registry SET enabled=1 WHERE tool='k8s_prod.exec'")
+        conn.execute("UPDATE tool_registry SET enabled=1 WHERE tool='k8s_prod.kubectl_admin'")
     step = tool_steps(alice.run("exec vào pod web-0 chạy `ls`", env="prod"))
-    assert all(s["decision"] == "blocked" and "k8s.exec" in s["reasons"][0] for s in step)
+    assert step and all(s["decision"] == "blocked" and "k8s.kubectl_admin" in s["reasons"][0] for s in step)
 
 
 def test_old_simulated_tools_marked_removed_on_startup(client):

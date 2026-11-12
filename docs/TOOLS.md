@@ -4,13 +4,13 @@ Agent chỉ dùng công cụ thật. Mỗi công cụ được tạo từ một 
 
 - **Template** (`kagent/templates/*.yaml`, lưu trong git) khai báo: tham số kết nối cần điền, bộ công cụ, metadata rủi ro của từng công cụ. Handler gọi hệ thống thật nằm trong `kagent/connectors/`.
 - **Kết nối** là một bản của template với tham số riêng (URL, token, namespace...). Kết nối được gắn với tenant hoặc một user, và với các môi trường dev/staging/prod.
-- Công cụ sinh ra có tên `<tên_kết_nối>.<công_cụ>`, ví dụ `k8s_prod.scale`. Tên theo template (`k8s.scale`) dùng trong luật chặn của chính sách, để một luật áp cho mọi kết nối Kubernetes.
+- Công cụ sinh ra có tên `<tên_kết_nối>.<công_cụ>`, ví dụ `k8s_prod.kubectl_write`. Tên theo template (`k8s.kubectl_write`) dùng trong luật chặn của chính sách, để một luật áp cho mọi kết nối Kubernetes.
 
 ## Template có sẵn
 
 | Template | Công cụ (mức rủi ro) | Tham số chính |
 | --- | --- | --- |
-| `k8s` Kubernetes | list_pods R0, list_deployments R0, pod_logs R1, scale R2, rollout_restart R3, delete_pod R3, exec R4; kubectl_read R1, kubectl_write R3 (có chạy thử), kubectl_admin R4 (xem [Quyền Kubernetes](#quyền-kubernetes-và-công-cụ-kubectl)) | kubeconfig (+ context) hoặc api_url + token ServiceAccount, ca_cert, namespace, allowed_namespaces, max_replicas. Kubeconfig phải nhúng sẵn chứng chỉ (`kubectl config view --raw --minify --flatten`); dùng token hoặc chứng chỉ client, không hỗ trợ exec/auth-provider; api_url, token điền tay được ưu tiên hơn kubeconfig |
+| `k8s` Kubernetes | kubectl_read R1, kubectl_write R3 (có chạy thử), kubectl_admin R4 (xem [Quyền Kubernetes](#quyền-kubernetes-và-công-cụ-kubectl)) | kubeconfig (+ context) hoặc api_url + token của tài khoản quản trị, ca_cert, namespace (mặc định của kubectl). Kubeconfig phải nhúng sẵn chứng chỉ (`kubectl config view --raw --minify --flatten`); dùng token hoặc chứng chỉ client, không hỗ trợ exec/auth-provider; api_url, token điền tay được ưu tiên hơn kubeconfig |
 | `grafana` | search_dashboards, list_datasources, prometheus_query, list_alerts (R0), create_silence R3 | url, token service account, default_datasource_uid |
 | `prometheus` (cả Mimir, Thanos, VictoriaMetrics) | query, query_range, list_alerts, list_rules, list_targets, label_values, metric_metadata (R0). query_range trả min/max/avg/last và vài điểm mẫu thay vì toàn bộ chuỗi | url, token hoặc username/password, tenant_header (X-Scope-OrgID) |
 | `alertmanager` | list_alerts (gom theo alertname, severity), list_silences (R0), create_silence R3, expire_silence R3 (cả hai có chạy thử) | url, token hoặc username/password, tenant_header |
@@ -74,7 +74,8 @@ Quy tắc:
 - Nhóm đọc và ghi không được cấp `secrets`, `pods/exec`, `pods/attach`, `pods/portforward`, các `*/proxy`, `serviceaccounts/token`; nhóm ghi thêm `pods/eviction` (tạo eviction là xóa pod). Những quyền này chỉ cấp được cho nhóm quản trị (R4).
 - API group `*` là mọi group. Resource `*` (cả `pods/*`, `*/scale`) ở nhóm quản trị được ghi nguyên vào Role. Ở nhóm đọc và ghi, kagent đọc API discovery của cụm rồi đổi `*` thành danh sách resource cụ thể, khớp như RBAC (gồm cả subresource), bỏ các loại nhạy cảm ở trên. Danh sách chỉ giữ resource có verb đã chọn, và chỉ giữ resource cấp namespace khi quy tắc không phải namespace `*`. Cài CRD mới thì lần Xem trước sau báo lệch, bấm Áp dụng để cập nhật. API tổng hợp đang lỗi (ví dụ metrics-server hỏng) bị bỏ qua kèm cảnh báo.
 - Khi quy tắc ghi chạm tới workload, hệ thống cảnh báo: ai tạo được pod thì chạy được pod với ServiceAccount bất kỳ trong namespace đó.
-- Sau khi áp dụng, các công cụ cũ cũng chạy bằng SA của nhóm thấp nhất đủ cho chúng: list_pods, list_deployments, pod_logs dùng nhóm đọc; scale, rollout_restart dùng nhóm ghi; delete_pod, exec dùng nhóm quản trị. Nút **Kiểm tra** cho biết danh tính của từng SA.
+- Chưa áp dụng quyền thì các công cụ kubectl_* báo lỗi, không bao giờ chạy bằng tài khoản quản trị. Nút **Kiểm tra** cho biết danh tính của từng SA.
+- **Kết quả tin cậy theo lệnh:** kubectl_* khai `untrusted_output` nhưng có `trusted_when`. Lệnh chỉ trả dữ liệu có cấu trúc được coi là tin cậy, nên không ép duyệt các lệnh sau và không chặn việc học tri thức. Đó là: `get` các loại có sẵn (pods, deploy, svc, nodes, ns, jobs, pvc, ingress, hpa...) dạng bảng, `-o wide` hoặc `-o name`; `top`; `version`; `api-resources`; `auth can-i/whoami`; `rollout status`; và xác nhận của lệnh ghi khi không có `-o`. Còn lại là chưa tin cậy, gồm `logs`, `describe`, `events`, `-o yaml/json/jsonpath`, configmap, CRD (cột in tùy ý), `explain`, `exec`, `--raw`.
 - **Gỡ khỏi cụm** xóa mọi object có nhãn của kết nối, nhưng giữ namespace. Gỡ kết nối cũng tự gỡ các object đó; nếu không gỡ được, giao diện báo nhãn để xóa tay.
 
 kagent vẫn chặn những gì RBAC không chặn được:
@@ -143,3 +144,5 @@ Mức rủi ro tối thiểu được tính từ metadata; template khai `risk_t
 - **Công cụ học được** (`learned.<tên>`) là chuỗi bước gọi các công cụ ở trên, sinh từ thao tác lặp lại hoặc lưu từ chat:
   - Mỗi bước vẫn qua gateway với quyền của người gọi.
   - Nếu kết nối của một bước bị gỡ hoặc tắt, công cụ học được bị chặn theo.
+  - Tham số `{{x}}` đặt được giữa chuỗi, ví dụ `{"command": "scale deployment/{{dep}} --replicas={{n}} -n {{ns}}"}`. Giá trị thay vào chỉ được là một từ gồm chữ, số và `._:/=@+,-`, không mở đầu bằng `-`, nên không chèn thêm được flag. `{{step:N}}` vẫn phải đứng riêng một giá trị.
+  - Khi học, hệ thống tự tách tham số từ `command`: so các lệnh cùng khung ở những lượt lặp lại, phần khác nhau thành tham số; khi lưu từ một lượt chat, từ nào có trong câu yêu cầu thành tham số. Các chuỗi khác như SQL, URL được giữ nguyên.

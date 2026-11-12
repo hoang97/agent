@@ -82,7 +82,7 @@ def test_agent_loop_routes_tools_through_gateway_and_marks_untrusted():
 
 def test_agent_step_limit_ends_with_summary():
     from kagent.config import settings
-    replies = [msg([use("k8s__list_pods", {})], stop="tool_use") for _ in range(settings.max_agent_steps)] + [msg([text("tổng kết")])]
+    replies = [msg([use("k8s__kubectl_read", {})], stop="tool_use") for _ in range(settings.max_agent_steps)] + [msg([text("tổng kết")])]
     p, fake = provider(replies)
     assert p.run_agent("x", "c", [], lambda n, a: {"status": "ok"})["answer"] == "tổng kết"
     assert fake.calls[-1]["tool_choice"] == {"type": "none"}

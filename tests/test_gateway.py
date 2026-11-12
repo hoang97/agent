@@ -87,7 +87,7 @@ def test_write_on_unseen_namespace_requires_approval_then_runs(users):
     assert step["status"] == "pending"
     decided = bob.post(f"/api/approvals/{step['approval_id']}/decide", json={"action": "approve_once"}).json()
     assert decided["status"] == "approved"
-    assert decided["result"]["result"]["to"] == 5
+    assert "scaled" in decided["result"]["result"]["stdout"]
 
 
 def strict(users):
@@ -101,13 +101,13 @@ def test_requester_self_approves_by_default(users):
     pending = alice.get("/api/approvals?status=pending").json()[0]
     assert pending["can_decide"] is True and pending["mine"] is True
     decided = alice.post(f"/api/approvals/{step['approval_id']}/decide", json={"action": "approve_once"}).json()
-    assert decided["status"] == "approved" and decided["result"]["result"]["to"] == 4
+    assert decided["status"] == "approved" and "scaled" in decided["result"]["result"]["stdout"]
     audit = next(a for a in alice.get("/api/audit").json() if a["decision"] == "approved")
-    assert audit["user"] == "alice" and audit["tool"] == "k8s.scale"
+    assert audit["user"] == "alice" and audit["tool"] == "k8s.kubectl_write"
 
 
 def test_self_approval_still_respects_hard_blocks(users):
-    # Luật chặn của tenant: k8s.exec ở prod (khớp theo tên template, cho mọi kết nối Kubernetes)
+    # Luật chặn của tenant: k8s.kubectl_admin ở prod (khớp theo tên template, cho mọi kết nối Kubernetes)
     step = tool_steps(users["alice"].run("exec vào pod web-0 chạy `ls`", env="prod"))[0]
     assert step["decision"] == "blocked" and "approval_id" not in step
 
@@ -203,7 +203,7 @@ def test_expired_approval_cannot_be_used(users, client):
 
 def test_prod_delete_blocked_by_tenant_deny(users):
     step = tool_steps(users["alice"].run("xóa pod web-0", env="prod"))[0]
-    assert step["decision"] == "blocked" and step["tool"] == "k8s.delete_pod" and "*.delete*" in step["reasons"][0]
+    assert step["decision"] == "blocked" and step["tool"] == "k8s.kubectl_admin" and "k8s.kubectl_admin" in step["reasons"][0]
 
 
 def test_untrusted_output_taints_following_commands(users):
@@ -211,7 +211,7 @@ def test_untrusted_output_taints_following_commands(users):
     alice.run("xem pod trong namespace default")
     ep = alice.run("tìm log lỗi rồi restart deployment web")
     steps = tool_steps(ep)
-    assert [s["tool"] for s in steps] == ["logs.search_logs", "k8s.rollout_restart"]
+    assert [s["tool"] for s in steps] == ["logs.search_logs", "k8s.kubectl_write"]
     assert steps[0]["status"] == "ok" and steps[0]["untrusted"] is True
     assert steps[1]["status"] == "pending"
     assert any("untrusted" in r for r in steps[1]["reasons"])
@@ -228,11 +228,11 @@ def test_change_freeze_forces_ask(users):
 def test_disabled_tool_is_hidden_from_agent_and_blocked_by_gateway(users):
     from kagent import db
     alice = users["alice"]
-    users["admin"].patch("/api/tools/k8s.list_pods", json={"enabled": False})
+    users["admin"].patch("/api/tools/k8s.kubectl_read", json={"enabled": False})
     assert tool_steps(alice.run("xem pod")) == []
     with db.session() as conn:
         uid = conn.execute("SELECT id FROM app_user WHERE username='alice'").fetchone()["id"]
-        step = gateway.invoke(conn, gateway.CallContext(alice.tenant, uid, "dev", "xem pod"), "k8s.list_pods", {})
+        step = gateway.invoke(conn, gateway.CallContext(alice.tenant, uid, "dev", "xem pod"), "k8s.kubectl_read", {"command": "get pods"})
     assert step["decision"] == "blocked" and "chưa bật" in step["reasons"][0]
 
 
@@ -242,11 +242,11 @@ def test_tenant_admin_cannot_lower_risk_but_can_raise(users):
     with db.session() as conn:
         uid = conn.execute("SELECT id FROM app_user WHERE username='alice'").fetchone()["id"]
         conn.execute("INSERT INTO membership(tenant_id,user_id,role) VALUES (?,?,'tenant_admin')", (alice.tenant, uid))
-    assert alice.patch("/api/tools/k8s.list_pods", json={"risk_tier": "R2"}).status_code == 200
-    assert alice.patch("/api/tools/k8s.scale", json={"risk_tier": "R0"}).status_code == 403
+    assert alice.patch("/api/tools/k8s.kubectl_read", json={"risk_tier": "R2"}).status_code == 200
+    assert alice.patch("/api/tools/k8s.kubectl_write", json={"risk_tier": "R0"}).status_code == 403
 
 
 def test_audit_records_each_call(users):
     users["alice"].run("xem pod")
     audit = users["alice"].get("/api/audit").json()
-    assert audit[0]["tool"] == "k8s.list_pods" and audit[0]["decision"] == "auto" and audit[0]["user"] == "alice"
+    assert audit[0]["tool"] == "k8s.kubectl_read" and audit[0]["decision"] == "auto" and audit[0]["user"] == "alice"

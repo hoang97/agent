@@ -22,8 +22,9 @@ def test_repeated_success_proposes_personal_tool_with_params(users):
     assert admin.post("/api/learning/run").json()["learned_tools_proposed"] == 1
     tool = alice.get("/api/learned-tools").json()[0]
     assert tool["status"] == "proposed" and tool["personal"] and tool["origin"] == "auto"
-    assert tool["flow"] == "k8s.list_pods → grafana.prometheus_query"
-    assert set(tool["params"]) == {"namespace"} and tool["risk_tier"] == "R0"  # expr giống nhau ở cả 3 lần nên là hằng số
+    assert tool["flow"] == "k8s.kubectl_read → grafana.prometheus_query"
+    assert tool["steps"][0]["args"] == {"command": "get pods -n {{namespace}}"}
+    assert set(tool["params"]) == {"namespace"} and tool["risk_tier"] == "R1"  # expr giống nhau ở cả 3 lần nên là hằng số
     # Không đề xuất lại cùng chuỗi
     run_three(alice, TASKS)
     assert admin.post("/api/learning/run").json()["learned_tools_proposed"] == 0
@@ -49,10 +50,10 @@ def test_learned_tool_runs_each_step_through_gateway(users):
     alice.patch(f"/api/learned-tools/{tool['id']}", json={"status": "active"})
     ep = alice.run(f"dùng {tool['name']} namespace=payments query=cpu")
     step = tool_steps(ep)[0]
-    assert step["status"] == "ok" and step["learned"] and [s["tool"] for s in step["steps"]] == ["k8s.list_pods", "grafana.prometheus_query"]
-    assert step["steps"][0]["result"]["namespace"] == "payments"
+    assert step["status"] == "ok" and step["learned"] and [s["tool"] for s in step["steps"]] == ["k8s.kubectl_read", "grafana.prometheus_query"]
+    assert step["steps"][0]["result"]["command"] == "kubectl get pods -n payments" and "checkout-0" in step["steps"][0]["result"]["stdout"]
     audit_tools = [a["tool"] for a in alice.get("/api/audit").json()[:2]]
-    assert set(audit_tools) == {"k8s.list_pods", "grafana.prometheus_query"}
+    assert set(audit_tools) == {"k8s.kubectl_read", "grafana.prometheus_query"}
 
 
 def test_learned_tool_cannot_bypass_permissions(users):
@@ -117,7 +118,10 @@ def test_save_episode_as_personal_tool(users):
     assert tool["name"] == "learned.xem_pod_nhanh" and tool["status"] == "active" and tool["params"] == {"namespace": {"type": "string", "description": "ví dụ: default"}}
     assert bob.post("/api/learned-tools/from-episode", json={"episode_id": ok_ep["id"]}).status_code == 403
     assert alice.post("/api/learned-tools/from-episode", json={"episode_id": ep["id"]}).status_code == 400  # bước pending, không có bước ok
-    assert tool_steps(alice.run("dùng learned.xem_pod_nhanh namespace=payments"))[0]["steps"][0]["result"]["namespace"] == "payments"
+    assert tool_steps(alice.run("dùng learned.xem_pod_nhanh namespace=payments"))[0]["steps"][0]["result"]["command"] == "kubectl get pods -n payments"
+    # giá trị thay vào giữa chuỗi lệnh không chèn được flag
+    bad = tool_steps(alice.run("dùng learned.xem_pod_nhanh namespace=--token=x"))[0]
+    assert bad["status"] == "invalid" and "một từ" in bad["reasons"][0]
 
 
 def test_save_episode_as_tenant_tool_needs_admin(users):
@@ -164,12 +168,11 @@ def test_low_success_rate_auto_disables(users):
     alice = users["alice"]
     with db.session() as conn:
         uid = conn.execute("SELECT id FROM app_user WHERE username='alice'").fetchone()["id"]
-        row = learned.create(conn, alice.tenant, name="learned.scale_x", description="d", scope=f"user:{uid}", status="active", origin="manual",
-                             source_eps=[], created_by=uid, params={"replicas": {"type": "integer"}},
-                             steps=[{"tool": "k8s.scale", "args": {"namespace": "default", "deployment": "web", "replicas": "{{replicas}}"}}])
-    alice.run("xem pod trong namespace default")
+        row = learned.create(conn, alice.tenant, name="learned.log_x", description="d", scope=f"user:{uid}", status="active", origin="manual",
+                             source_eps=[], created_by=uid, params={"name": {"type": "string"}},
+                             steps=[{"tool": "k8s.kubectl_read", "args": {"command": "logs {{name}} -n default --tail=20"}}])
     for _ in range(4):
-        step = tool_steps(alice.run("dùng learned.scale_x replicas=99"))[0]  # vượt max_replicas nên lỗi
+        step = tool_steps(alice.run("dùng learned.log_x name=khong-co"))[0]  # pod không tồn tại nên lỗi
         assert step["status"] in ("error", "blocked")
     view = alice.get("/api/learned-tools").json()[0]
     assert view["status"] == "disabled" and "tự tắt" in view["note"]
@@ -180,10 +183,11 @@ def test_low_success_rate_auto_disables(users):
 @pytest.mark.parametrize("steps,params,message", [
     ([], {}, "1 đến"),
     ([{"tool": "khong.co", "args": {}}], {}, "danh mục"),
-    ([{"tool": "k8s.scale", "args": {"deployment": "web"}}], {}, "thiếu tham số bắt buộc"),
-    ([{"tool": "k8s.list_pods", "args": {"namespace": "{{ns}}"}}], {}, "chưa được khai báo"),
-    ([{"tool": "k8s.list_pods", "args": {}}], {"ns": {"type": "string"}}, "không được dùng"),
-    ([{"tool": "k8s.list_pods", "args": {"namespace": "{{ns}}"}}], {"ns": {"type": "float"}}, "không hợp lệ"),
+    ([{"tool": "k8s.kubectl_write", "args": {}}], {}, "thiếu tham số bắt buộc"),
+    ([{"tool": "k8s.kubectl_read", "args": {"command": "get pods -n {{ns}}"}}], {}, "chưa được khai báo"),
+    ([{"tool": "k8s.kubectl_read", "args": {"command": "get pods"}}], {"ns": {"type": "string"}}, "không được dùng"),
+    ([{"tool": "k8s.kubectl_read", "args": {"command": "get pods -n {{ns}}"}}], {"ns": {"type": "float"}}, "không hợp lệ"),
+    ([{"tool": "db.query", "args": {"sql": "x"}}, {"tool": "data.query", "args": {"result_id": "id-{{step:1}}"}}], {}, "đứng riêng"),
 ])
 def test_learned_validation(users, steps, params, message):
     with db.session() as conn, pytest.raises(learned.LearnedError, match=message):
@@ -277,16 +281,28 @@ def test_personal_curation_does_not_touch_other_users(users):
 def test_tool_notes_learned_from_errors_are_loaded(users):
     alice, admin = users["alice"], users["admin"]
     alice.run("xem pod trong namespace default")
-    alice.run("scale deployment web lên 99 replica")  # lỗi: vượt max_replicas
+    alice.run("xem log của pod khong-co")  # lỗi: pod không tồn tại
     admin.post("/api/learning/run")
-    lesson = next(k for k in alice.get("/api/ku?kind=lesson").json() if "tool:k8s.scale" in k["entities"])
+    lesson = next(k for k in alice.get("/api/ku?kind=lesson").json() if "tool:k8s.kubectl_read" in k["entities"])
     admin.post(f"/api/ku/{lesson['id']}/review", json={"approve": True})
     with db.session() as conn:
-        ctx = agent.assemble_context(conn, alice.tenant, "tạo dashboard", "observability", tool_names=["k8s.scale", "k8s.list_pods"])
-    assert '<knowledge section="tools">' in ctx["text"] and "k8s.scale" in ctx["text"] and lesson["id"] in ctx["ku_used"]
+        ctx = agent.assemble_context(conn, alice.tenant, "tạo dashboard", "observability", tool_names=["k8s.kubectl_read", "k8s.kubectl_write"])
+    assert '<knowledge section="tools">' in ctx["text"] and "k8s.kubectl_read" in ctx["text"] and lesson["id"] in ctx["ku_used"]
 
 
 def test_manual_personal_memory_active_immediately(users):
     alice = users["alice"]
     ku = alice.post("/api/ku", json={"kind": "fact", "title": "Tên", "content": "Gọi tôi là An", "scope": "user"}).json()
     assert ku["status"] == "active" and ku["scope"].startswith("user:")
+
+
+def test_templatize_command_strings():
+    params = {}
+    out = learned._templatize(["scale deployment/web --replicas=3 -n app", "scale deployment/api --replicas=5 -n app"], params)
+    assert out == "scale deployment/{{deployment}} --replicas={{replicas}} -n app"
+    assert params["replicas"]["type"] == "integer" and params["deployment"]["type"] == "string"
+    assert learned._templatize(["get pods -n a", "get pods -n a -o wide"], {}) is None  # khác khung
+    assert learned._templatize(["get pods --watch", "get pods --tail"], {}) is None  # flag khác nhau không thành tham số
+    assert learned._templatize(["get pods -n a", "delete pods -n a"], {}) is None  # lệnh con luôn cố định
+    words = {"payments"}
+    assert learned._templatize(["get pods -n payments"], {}, keep=lambda w: w in words) == "get pods -n {{namespace}}"

@@ -33,7 +33,7 @@ def test_parallel_batch_does_not_taint_its_own_members_but_taints_next(users):
     alice = users["alice"]
     alice.run("xem pod trong namespace default")
     steps = tool_steps(alice.run("tìm log lỗi rồi xem pod rồi restart deployment web"))
-    assert [s["tool"] for s in steps] == ["k8s.list_pods", "logs.search_logs", "k8s.rollout_restart"]
+    assert [s["tool"] for s in steps] == ["k8s.kubectl_read", "logs.search_logs", "k8s.kubectl_write"]
     assert steps[0]["status"] == "ok" and steps[1]["status"] == "ok" and steps[0]["parallel"] == steps[1]["parallel"]
     assert steps[2]["status"] == "pending" and any("untrusted" in r for r in steps[2]["reasons"])
 
@@ -41,11 +41,11 @@ def test_parallel_batch_does_not_taint_its_own_members_but_taints_next(users):
 def test_exec_and_sql_in_one_request(users):
     alice = users["alice"]
     steps = tool_steps(alice.run('exec vào pod api-0 chạy `psql -c "SELECT count(*) FROM orders"` rồi chạy `SELECT status FROM orders WHERE id=102`'))
-    assert [s["tool"] for s in steps] == ["db.query", "k8s.exec"]  # đọc trước, exec sau
+    assert [s["tool"] for s in steps] == ["db.query", "k8s.kubectl_admin"]  # đọc trước, exec sau
     assert steps[1]["status"] == "pending" and steps[1]["risk_tier"] == "R4"  # exec luôn phải hỏi
     assert steps[0]["status"] == "ok" and steps[0]["result"]["rows"] == [["failed"]]
     approved = alice.post(f"/api/approvals/{steps[1]['approval_id']}/decide", json={"action": "approve_once"}).json()
-    assert "6" in approved["result"]["result"]["stdout"] and approved["result"]["result"]["command"][0] == "psql"
+    assert "6" in approved["result"]["result"]["stdout"] and "-- psql" in approved["result"]["result"]["command"]
 
 
 def test_parallel_calls_each_audited_and_gated(users):

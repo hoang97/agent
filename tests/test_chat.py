@@ -31,7 +31,7 @@ def test_stream_event_order_and_text(users):
     assert kinds.index("tool_start") < kinds.index("tool_end") < kinds.index("delta")
     text = "".join(e["text"] for e in evs if e["type"] == "delta")
     final = done(evs)["message"]
-    assert text == final["output"] and final["outcome"] == "success" and final["steps"][0]["tool"] == "k8s.list_pods"
+    assert text == final["output"] and final["outcome"] == "success" and final["steps"][0]["tool"] == "k8s.kubectl_read"
     assert final["id"] == evs[0]["run_id"]
 
 
@@ -89,7 +89,7 @@ def test_approval_result_visible_in_next_turn_history(users):
     alice, bob = users["alice"], users["bob"]
     evs = chat(alice, "scale deployment web lên 5 replica")
     approval = done(evs)["message"]["approvals"][0]
-    assert approval["status"] == "pending" and approval["tool"] == "k8s.scale"
+    assert approval["status"] == "pending" and approval["tool"] == "k8s.kubectl_write"
     bob.post(f"/api/approvals/{approval['id']}/decide", json={"action": "approve_once"})
     cid = evs[0]["conversation_id"]
     with db.session() as conn:
@@ -98,7 +98,7 @@ def test_approval_result_visible_in_next_turn_history(users):
     assert [m["role"] for m in messages] == ["user", "assistant", "user"]
     assert "[Lệnh" not in messages[1]["content"] and "approved" not in messages[1]["content"]
     content = messages[2]["content"]
-    assert content.startswith("[Hệ thống]") and "- k8s.scale {" in content and ": approved {" in content
+    assert content.startswith("[Hệ thống]") and "- k8s.kubectl_write {" in content and ": approved {" in content
     assert alice.get(f"/api/conversations/{cid}").json()["messages"][0]["approvals"][0]["status"] == "approved"
 
 
@@ -275,7 +275,7 @@ def text_block(t):
 
 
 def test_anthropic_stream_with_tools_joins_turns():
-    first = FakeStream(["Để ", "tôi xem"], message([text_block("Để tôi xem"), NS(type="tool_use", name="k8s__list_pods", input={}, id="t1")], "tool_use"))
+    first = FakeStream(["Để ", "tôi xem"], message([text_block("Để tôi xem"), NS(type="tool_use", name="k8s__kubectl_read", input={}, id="t1")], "tool_use"))
     second = FakeStream(["Xong"], message([text_block("Xong")]))
     p, calls = anthropic_provider([first, second])
     out = []
@@ -319,7 +319,7 @@ USAGE = {"id": "c", "object": "chat.completion.chunk", "created": 1, "model": "m
 
 
 def test_openai_stream_assembles_tool_call_fragments():
-    first = sse(delta({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "k8s__list_pods", "arguments": ""}}]}),
+    first = sse(delta({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "k8s__kubectl_read", "arguments": ""}}]}),
                 delta({"tool_calls": [{"index": 0, "function": {"arguments": '{"names'}}]}),
                 delta({"tool_calls": [{"index": 0, "function": {"arguments": 'pace": "default"}'}}]}, "tool_calls"), USAGE)
     second = sse(delta({"content": "Đã "}), delta({"content": "xong"}, "stop"), USAGE)
@@ -331,7 +331,7 @@ def test_openai_stream_assembles_tool_call_fragments():
         return {"status": "ok"}
 
     result = p.run_agent("x", "c", [], call_tool, on_text=out.append)
-    assert called == [("k8s.list_pods", {"namespace": "default"})]
+    assert called == [("k8s.kubectl_read", {"namespace": "default"})]
     assert "".join(out) == "Đã xong" == result["answer"] and result["tokens"] == 14
     assert seen[0]["stream"] is True and seen[0]["stream_options"] == {"include_usage": True}
     assert seen[1]["messages"][-2]["tool_calls"][0]["function"]["arguments"] == '{"namespace": "default"}'

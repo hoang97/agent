@@ -233,3 +233,58 @@ def run_admin(p, args):
 
 def check_admin(p, args):
     return _run(p, args, "admin", dry=True)
+
+
+# Kết quả coi là tin cậy khi chỉ gồm tên, trạng thái, số liệu do Kubernetes sinh ra, không có chuỗi tự do người khác ghi được
+# (log, annotation, message của event, nội dung configmap, cột in của CRD, mô tả schema).
+TABLE_KINDS = {"pods", "pod", "po", "deployments", "deployment", "deploy", "replicasets", "replicaset", "rs", "statefulsets", "statefulset", "sts",
+               "daemonsets", "daemonset", "ds", "services", "service", "svc", "nodes", "node", "no", "namespaces", "namespace", "ns", "jobs", "job",
+               "cronjobs", "cronjob", "cj", "persistentvolumeclaims", "persistentvolumeclaim", "pvc", "persistentvolumes", "persistentvolume", "pv",
+               "endpoints", "ep", "ingresses", "ingress", "ing", "horizontalpodautoscalers", "horizontalpodautoscaler", "hpa", "serviceaccounts",
+               "serviceaccount", "sa", "storageclasses", "storageclass", "sc", "poddisruptionbudgets", "poddisruptionbudget", "pdb"}
+TRUSTED_KEYS = {"top", "version", "api-versions", "api-resources", "auth can-i", "auth whoami", "rollout status"}
+MUTATIONS = DRY_RUN - {"run"}  # kết quả mặc định chỉ là "kind/tên đã làm gì"
+
+
+def _positionals(argv: list[str]) -> list[str]:
+    out, skip = [], False
+    for a in argv[1:]:
+        if a == "--":
+            break
+        if skip:
+            skip = False
+        elif a.startswith("-"):
+            skip = "=" not in a and a in ("-n", "--namespace", "-l", "--selector", "-c", "--container", "-o", "--output", "-L", "--label-columns",
+                                          "--sort-by", "-p", "--patch", "--field-selector", "--replicas", "--type")
+        else:
+            out.append(a)
+    return out
+
+
+def _output(argv: list[str]) -> str | None:
+    for i, a in enumerate(argv):
+        if a in ("-o", "--output"):
+            return argv[i + 1] if i + 1 < len(argv) else ""
+        if a.startswith(("-o=", "--output=")):
+            return a.split("=", 1)[1]
+    return None
+
+
+def trusted_output(args: dict) -> bool:
+    """Lệnh này chỉ trả dữ liệu có cấu trúc (bảng tên/trạng thái, xác nhận thay đổi), nên không làm 'nhiễm' hội thoại."""
+    try:
+        argv, info = parse(args.get("command"), "admin")
+    except ConnectorError:
+        return False
+    if any(a == "--raw" or a.startswith(("--raw=", "--template", "--show-managed-fields")) for a in argv):
+        return False
+    output = _output(argv)
+    if info["key"] in TRUSTED_KEYS:
+        return output in (None, "wide", "name")
+    if info["sub"] == "get":
+        pos = _positionals(argv)
+        kinds = [k.split("/")[0].split(".")[0].lower() for k in (pos[0].split(",") if pos else [""])]
+        return output in (None, "wide", "name") and all(k in TABLE_KINDS for k in kinds)
+    if info["key"] in MUTATIONS or info["sub"] in MUTATIONS:
+        return output in (None, "name")
+    return False

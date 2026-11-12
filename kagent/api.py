@@ -75,7 +75,7 @@ def seed() -> None:
         policy = {
             "environments": {"prod": {"auto_execute": "read_only"}},
             "matrix": {"R2": {"staging": "ask"}},
-            "deny": [{"tool": "k8s.exec", "env": "prod"}, {"tool": "*.delete*", "env": "prod"}, {"tool": "k8s.get_secret_value", "env": "*"}],
+            "deny": [{"tool": "k8s.kubectl_admin", "env": "prod"}, {"tool": "*.delete*", "env": "prod"}, {"tool": "k8s.get_secret_value", "env": "*"}],
         }
         tenants = {}
         for name in ("team-platform", "team-finance"):

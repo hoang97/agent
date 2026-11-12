@@ -73,14 +73,14 @@ def test_agent_loop_runs_tools_through_callback_and_marks_untrusted():
 
 
 def test_agent_invalid_tool_arguments_not_executed():
-    p, seen = provider(completion(tool_calls=[tool_call("k8s__list_pods", "{khong-json")], finish="tool_calls"), completion("thôi"))
+    p, seen = provider(completion(tool_calls=[tool_call("k8s__kubectl_read", "{khong-json")], finish="tool_calls"), completion("thôi"))
     calls = []
     p.run_agent("x", "c", [], lambda n, a: calls.append(n))
     assert calls == [] and "invalid" in seen[1]["body"]["messages"][-1]["content"]
 
 
 def test_agent_step_limit_ends_with_summary():
-    replies = [completion(tool_calls=[tool_call("k8s__list_pods", "{}")], finish="tool_calls") for _ in range(settings.max_agent_steps)]
+    replies = [completion(tool_calls=[tool_call("k8s__kubectl_read", "{}")], finish="tool_calls") for _ in range(settings.max_agent_steps)]
     p, fake = provider(*replies, completion("tổng kết"))
     assert p.run_agent("x", "c", [], lambda n, a: {"status": "ok"})["answer"] == "tổng kết"
 

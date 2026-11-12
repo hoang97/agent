@@ -55,13 +55,13 @@ def _ctx(users, name="alice", tainted=False):
 
 def test_inline_filter_is_applied_before_result_reaches_agent(users):
     with db.session() as conn:
-        step = gateway.invoke(conn, _ctx(users), "k8s.list_pods", {"_filter": {"fields": ["name"], "limit": 1}})
-    assert step["status"] == "ok" and step["result"]["items"] == [{"name": step["result"]["items"][0]["name"]}] and step["result"]["matched"] >= 1
+        step = gateway.invoke(conn, _ctx(users), "logs.list_indices", {"_filter": {"fields": ["index"], "limit": 1}})
+    assert step["status"] == "ok" and step["result"]["items"] == [{"index": step["result"]["items"][0]["index"]}] and step["result"]["matched"] >= 1
 
 
 def test_bad_inline_filter_is_invalid(users):
     with db.session() as conn:
-        step = gateway.invoke(conn, _ctx(users), "k8s.list_pods", {"_filter": {"where": "x"}})
+        step = gateway.invoke(conn, _ctx(users), "logs.list_indices", {"_filter": {"where": "x"}})
     assert step["status"] == "invalid" and "_filter" in step["reasons"][0]
 
 
@@ -122,18 +122,18 @@ def test_learned_tool_keeps_inline_filter_but_skips_data_steps(users):
     with db.session() as conn:
         ctx = _ctx(users)
         rid = results.save(conn, alice.tenant, ctx.user_id, None, "x", LOGS, False)
-    ep = alice.run("xem pod trong namespace default")
+    ep = alice.run("xem index")
     with db.session() as conn:
         trace = json.loads(conn.execute("SELECT trace FROM episode WHERE id=?", (ep["id"],)).fetchone()["trace"])
     step = next(s for s in trace if s["type"] == "tool_call")
-    step["args"]["_filter"] = {"fields": ["name"]}
+    step["args"]["_filter"] = {"fields": ["index"]}
     trace.append({"type": "tool_call", "tool": "data.query", "args": {"result_id": rid}, "status": "ok", "result": {}})
     from kagent import learned
     with db.session() as conn:
         conn.execute("DROP TRIGGER episode_append_only")
         conn.execute("UPDATE episode SET trace=? WHERE id=?", (json.dumps(trace), ep["id"]))
-        tool = learned.from_episode(conn, alice.tenant, ctx.user_id, ep["id"], "pod_names", None, "user")
-    assert [s["tool"] for s in tool["steps"]] == ["k8s.list_pods"] and tool["steps"][0]["args"]["_filter"] == {"fields": ["name"]}
+        tool = learned.from_episode(conn, alice.tenant, ctx.user_id, ep["id"], "index_names", None, "user")
+    assert [s["tool"] for s in tool["steps"]] == ["logs.list_indices"] and tool["steps"][0]["args"]["_filter"] == {"fields": ["index"]}
 
 
 def test_purge_removes_old_results(users):
@@ -148,7 +148,7 @@ def test_filtered_call_keeps_large_raw_result_for_requery(users, monkeypatch):
     real = gateway._run
     from kagent import connections
     monkeypatch.setattr(connections, "resolve", lambda conn, t, name: (None, None, type("S", (), {"check": None, "run": staticmethod(lambda p, a: big),
-                                                                                                    "untrusted_output": True})(), {}))
+                                                                                                    "untrusted_output": True, "untrusted": lambda self, args: True})(), {}))
     with db.session() as conn:
         out = real(conn, users["alice"].tenant, "logs.search_logs", {"_filter": {"group_by": "source.level"}}, user_id=_ctx(users).user_id)
         assert out["groups"] == [{"key": "ERROR", "count": 100}, {"key": "INFO", "count": 100}]
@@ -185,7 +185,7 @@ def test_agent_proposes_tool_that_waits_for_review(users):
 
 
 @pytest.mark.parametrize("steps, message", [
-    ([{"tool": "logs.search_logs", "args": {"query": "x"}}, {"tool": "k8s.list_pods", "args": {"namespace": "{{step:1}}"}}], "chỉ công cụ data"),
+    ([{"tool": "logs.search_logs", "args": {"query": "x"}}, {"tool": "k8s.kubectl_read", "args": {"command": "{{step:1}}"}}], "chỉ công cụ data"),
     ([{"tool": "data.query", "args": {"result_id": "{{step:1}}"}}], "bước đứng trước"),
 ])
 def test_step_refs_only_feed_local_tools(users, steps, message):

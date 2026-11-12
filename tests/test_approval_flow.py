@@ -126,10 +126,12 @@ def test_history_carries_full_result_of_latest_approved_commands(users):
 def test_tainted_r0_read_runs_in_dev_but_asks_in_staging(users):
     alice = users["alice"]
     cid = _tainted_conversation(alice)
-    step = done(chat(alice, "xem pod", cid))["message"]["steps"][0]
-    assert step["tool"] == "k8s.list_pods" and step["status"] == "ok" and gateway.UNTRUSTED_REASON not in step["reasons"]
+    step = done(chat(alice, "tìm dashboard", cid))["message"]["steps"][0]
+    assert step["tool"] == "grafana.search_dashboards" and step["status"] == "ok" and gateway.UNTRUSTED_REASON not in step["reasons"]
+    # kubectl_read là R1 (đọc được log) nên vượt mức R0 mặc định của dev
+    assert done(chat(alice, "xem pod", cid))["message"]["steps"][0]["status"] == "pending"
     cid = _tainted_conversation(alice, env="staging")
-    step = done(chat(alice, "xem pod", cid, env="staging"))["message"]["steps"][0]
+    step = done(chat(alice, "tìm dashboard", cid, env="staging"))["message"]["steps"][0]
     assert step["status"] == "pending" and gateway.UNTRUSTED_REASON in step["reasons"]
 
 

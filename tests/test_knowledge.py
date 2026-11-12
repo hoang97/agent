@@ -58,11 +58,11 @@ def test_procedure_needs_two_independent_episodes(users):
 def test_tool_error_becomes_lesson(users):
     alice, admin = users["alice"], users["admin"]
     alice.run("xem pod trong namespace default")
-    ep = alice.run("scale deployment web lên 99 replica")
+    ep = alice.run("xem log của pod khong-co")
     assert ep["outcome"] == "failure"
     admin.post("/api/learning/run")
     lessons = alice.get("/api/ku?kind=lesson").json()
-    assert any("replicas" in k["content"] and "tool:k8s.scale" in k["entities"] for k in lessons)
+    assert any("NotFound" in k["content"] and "tool:k8s.kubectl_read" in k["entities"] for k in lessons)
 
 
 def test_feedback_after_learning_does_not_double_count(users):

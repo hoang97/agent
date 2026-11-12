@@ -692,7 +692,7 @@ function k8sRbacPanel(c) {
     appendKids(box, [
       h("p", { class: "small" }, info.applied ? `Đã áp dụng ${fmtTime(info.applied_at)}. ` : "Chưa áp dụng: công cụ kubectl_* chưa chạy được, các công cụ cũ đang dùng tài khoản của kết nối. ",
         "Mỗi nhóm có quy tắc thì được một ServiceAccount riêng, tên ", h("code", {}, info.base_name + "-<nhóm>"), ", nhãn ", h("code", {}, info.label),
-        ". Nhóm ghi có thêm quyền của nhóm đọc, nhóm quản trị có thêm quyền của cả hai. Sau khi áp dụng, các công cụ cũ (list_pods, scale, delete_pod...) cũng chạy bằng ServiceAccount của nhóm tương ứng."),
+        ". Nhóm ghi có thêm quyền của nhóm đọc, nhóm quản trị có thêm quyền của cả hai."),
       h("div", { class: "tool-perms" }, ids),
       h("label", { class: "field" }, "Namespace chứa ServiceAccount (tự tạo nếu chưa có)", saNs),
       RBAC_GROUPS.map(([p, name, tool, verbs]) => h("div", { class: "card" },

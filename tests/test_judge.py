@@ -69,7 +69,7 @@ def test_pending_or_cancelled_episode_is_not_judged(users):
     ep = alice.run("viết giới thiệu ngắn gọn")
     judge = Judges("failure")
     with db.session() as conn:
-        for extra in ({"type": "tool_call", "tool": "k8s.scale", "status": "pending"}, {"type": "cancelled"}):
+        for extra in ({"type": "tool_call", "tool": "k8s.kubectl_write", "status": "pending"}, {"type": "cancelled"}):
             episode = _episode(conn, alice.tenant, ep["id"])
             episode["trace"] = [*episode["trace"], extra]
             learning._judge(conn, alice.tenant, judge, episode)
