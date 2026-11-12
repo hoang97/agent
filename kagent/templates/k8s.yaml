@@ -11,6 +11,7 @@ fields:
   - {name: ca_cert, type: text, description: Chứng chỉ CA dạng PEM nếu cụm dùng CA riêng}
   - {name: verify_tls, type: boolean, default: true, description: Kiểm tra chứng chỉ TLS}
   - {name: namespace, type: string, default: default, description: "Namespace mặc định của kubectl khi lệnh không có -n"}
+  - {name: proxy, type: string, default: auto, description: "auto = theo file PAC ở Cài đặt → Proxy; none = đi thẳng; hoặc http://host:port"}
 tools:
   # Ba công cụ kubectl chạy bằng ServiceAccount riêng của từng nhóm quyền, do kagent tạo trong cụm (Công cụ → Kết nối → Quyền Kubernetes).
   # RBAC của cụm là giới hạn thật; mức rủi ro của công cụ khớp với nhóm quyền nên không cần đọc lệnh để đoán.

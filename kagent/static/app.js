@@ -722,7 +722,7 @@ async function connectionsView(main) {
       let r;
       try { r = await api("POST", `/api/connections/${c.id}/test`); } catch (e) { result.replaceChildren(); throw e; }  // không để spinner quay mãi khi request lỗi
       result.className = "small " + (r.ok ? "ok-text" : "warn-text");
-      result.textContent = r.ok ? "Kết nối được: " + JSON.stringify(r.detail) : "Lỗi: " + r.error;
+      result.textContent = (r.ok ? "Kết nối được: " + JSON.stringify(r.detail) : "Lỗi: " + r.error) + (r.route ? ` · đường đi: ${r.route}` : "");
     });
     const rbacBox = h("div");
     const rbacOpen = `rbac-open:${c.id}`;
@@ -1241,7 +1241,37 @@ async function refreshMe() {
   renderShell();
 }
 
-VIEWS.settings = (main) => subTabs(main, [["policy", "Chính sách", policyView], ...(state.me.is_org_admin ? [["llm", "LLM", llmSettingsView]] : [])]);
+VIEWS.settings = (main) => subTabs(main, [["policy", "Chính sách", policyView], ...(state.me.is_org_admin ? [["llm", "LLM", llmSettingsView], ["proxy", "Proxy", proxySettingsView]] : [])]);
+
+async function proxySettingsView(main) {
+  let st = await api("GET", "/api/settings/proxy");
+  const url = h("input", { class: "wide", value: st.url || "", placeholder: "https://…/proxy.pac", "aria-label": "URL file PAC" });
+  const statusBox = h("div", { class: "small" });
+  const testUrl = h("input", { class: "wide", placeholder: "https://alertmanager.devtest.vcloud.internal", "aria-label": "URL cần thử" });
+  persist(testUrl, "proxy:test-url");
+  const testOut = h("div", { class: "small" });
+  function paintStatus() {
+    const err = st.error;
+    statusBox.className = "small " + (err ? "warn-text" : st.loaded ? "ok-text" : "");
+    statusBox.textContent = !st.url ? "Chưa khai file PAC: mọi kết nối để proxy = auto đang đi thẳng."
+      : (st.loaded ? `Đã nạp ${st.bytes} byte (sha256 ${st.sha256}), tải lúc ${fmtTime(st.fetched_at * 1000)}, tự tải lại sau ${st.ttl_seconds / 60} phút.` : "Chưa nạp được: các kết nối auto đang đi thẳng.")
+        + (err ? ` Lỗi lần tải gần nhất: ${err}` + (st.loaded ? " (đang dùng bản đã nạp trước đó)." : "") : "");
+  }
+  const save = guard(async () => { st = await api("PUT", "/api/settings/proxy", { url: url.value.trim() || null }); paintStatus(); toast("Đã lưu URL file PAC"); });
+  const reload = guard(async () => { st = await api("POST", "/api/settings/proxy/reload"); paintStatus(); });
+  const test = guard(async () => {
+    testOut.className = "small"; testOut.replaceChildren(busy("Đang tra…"));
+    try { const r = await api("POST", "/api/settings/proxy/test", { url: testUrl.value.trim() }); testOut.className = "small ok-text"; testOut.textContent = `${r.url}: ${r.text}`; }
+    catch (e) { testOut.replaceChildren(); throw e; }
+  });
+  paintStatus();
+  main.append(h("div", { class: "card" }, h("h3", {}, "Proxy tự động (PAC)"),
+    h("p", { class: "small" }, "kagent tải file PAC từ URL này, giữ 5 phút rồi tải lại; tải lỗi thì dùng bản đã nạp trước đó. Kết nối có ô proxy = auto (mặc định) đi theo file này; none là đi thẳng; hoặc điền http://host:port. Postgres, MySQL luôn đi thẳng. Ai sửa được file PAC là đổi được đường đi của mọi kết nối, nên chỉ dùng URL do bên quản trị mạng giữ."),
+    h("div", { class: "row" }, url, h("button", { type: "button", onclick: save }, "Lưu"), h("button", { type: "button", class: "ghost", onclick: reload }, "Tải lại ngay")),
+    statusBox,
+    h("h3", {}, "Thử một địa chỉ"),
+    h("div", { class: "row" }, testUrl, h("button", { type: "button", class: "ghost", onclick: test }, "Tra")), testOut));
+}
 
 async function llmSettingsView(main) {
   const s = await api("GET", "/api/settings/llm-key");

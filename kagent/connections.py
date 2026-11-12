@@ -12,7 +12,9 @@ import json
 import logging
 import re
 
-from . import db, net, vault
+import httpx
+
+from . import db, net, proxy, vault
 from .connectors.base import ConnectorError
 from .tools import ENVS, ROLE_CHOICES, TEMPLATES, TIERS, Template, max_tier, spec_of
 
@@ -100,6 +102,19 @@ def _clean(template: Template, params: dict, secrets: dict, old_params: dict, ol
             template.validate({**clean, **hidden, "_allow_private": allow_private})
         except (ConnectorError, net.NetError) as exc:
             raise _err(str(exc)) from exc
+    if clean.get("proxy") not in (None, "auto", "none"):
+        try:
+            mode = proxy.check_mode(clean["proxy"])
+            pu = httpx.URL(mode)
+            net.check_host(pu.host, pu.port or net.default_port(pu.scheme), allow_private)
+        except (proxy.ProxyError, net.NetError) as exc:
+            raise _err(f"proxy: {exc}") from exc
+        clean["proxy"] = mode
+    elif "proxy" in clean:
+        try:
+            clean["proxy"] = proxy.check_mode(clean["proxy"])
+        except proxy.ProxyError as exc:
+            raise _err(f"proxy: {exc}") from exc
     if "host" in clean:  # kết nối CSDL: kiểm tra địa chỉ ngay khi tạo
         try:
             net.check_host(clean["host"], int(clean.get("port") or 0) or 5432, allow_private)
@@ -274,16 +289,36 @@ def set_internal(conn, row: dict, params: dict | None = None, secrets: dict | No
                  (json.dumps(merged_params, ensure_ascii=False), _encrypt(merged_secrets), db.iso(), row["id"]))
 
 
+def _route(tpl: Template, params: dict) -> str | None:
+    """Đường đi tới địa chỉ chính của kết nối, để nút Kiểm tra cho biết đi thẳng hay qua proxy nào."""
+    if "proxy" not in {f.name for f in tpl.fields}:
+        return None
+    url = next((params.get(f.name) for f in tpl.fields if f.type == "url" and params.get(f.name)), None)
+    if url is None and tpl.name == "k8s":
+        from .connectors import k8s
+        try:
+            url = k8s._conn(params)["api_url"]
+        except ConnectorError:
+            return None
+    if not url:
+        return None
+    try:
+        return net.describe_route(proxy.routes(url, params.get("proxy"))[0])
+    except proxy.ProxyError as exc:
+        return f"lỗi proxy: {exc}"
+
+
 def test(conn, tenant_id: str, connection_id: str, user_id: str) -> dict:
     row = get(conn, tenant_id, connection_id)
     if row is None or row["status"] == "removed" or (row["scope"] == "user" and row["owner_user"] != user_id):
         raise _err("không tìm thấy kết nối", 404)
     tpl = TEMPLATES[row["template"]]
     params = {**row["params"], **_decrypt(row["secrets"]), "_allow_private": bool(row["allow_private"])}
+    route = _route(tpl, params)
     try:
-        return {"ok": True, "detail": tpl.ping(params, {})}
+        return {"ok": True, "detail": tpl.ping(params, {}), **({"route": route} if route else {})}
     except (ConnectorError, net.NetError) as exc:
-        return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": str(exc), **({"route": route} if route else {})}
     except Exception as exc:
         log.exception("lỗi khi kiểm tra kết nối %s", row["name"])
         return {"ok": False, "error": f"lỗi không xác định ({exc.__class__.__name__})"}

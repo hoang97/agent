@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 
+import httpx
 import yaml
 
 from .. import net
@@ -129,15 +130,27 @@ def parse(command, profile: str) -> tuple[list[str], dict]:
 
 
 def kubeconfig(p: dict, token: str) -> str:
+    from .. import proxy
     c = k8s._conn(p)
     u = net.check_url(c["api_url"], c["allow_private"])
     port = u.port or net.default_port(u.scheme)
     ip = net.check_host(u.host, port, c["allow_private"])
-    cluster = {"server": f"{u.scheme}://{f'[{ip}]' if ':' in ip else ip}:{port}{u.path.rstrip('/')}"}
+    try:
+        route = proxy.routes(c["api_url"], p.get("proxy"))[0]  # kubectl chỉ nhận một proxy, không thử đường dự phòng
+    except proxy.ProxyError as exc:
+        raise net.NetError(str(exc)) from exc
+    if route == "DIRECT":
+        cluster = {"server": f"{u.scheme}://{f'[{ip}]' if ':' in ip else ip}:{port}{u.path.rstrip('/')}"}
+    else:
+        if p.get("proxy") not in (None, "", "auto"):
+            pu = httpx.URL(route)
+            net.check_host(pu.host, pu.port or net.default_port(pu.scheme), c["allow_private"])
+        # Qua proxy thì proxy kết nối theo tên máy, không ghim IP được; đích vẫn đã qua kiểm tra IP ở trên.
+        cluster = {"server": f"{u.scheme}://{u.host}:{port}{u.path.rstrip('/')}", "proxy-url": route}
     if not c["verify_tls"]:
         cluster["insecure-skip-tls-verify"] = True
     else:
-        if ip != u.host:
+        if route == "DIRECT" and ip != u.host:
             cluster["tls-server-name"] = u.host
         if c["ca_cert"]:
             cluster["certificate-authority-data"] = base64.b64encode(c["ca_cert"].encode()).decode()

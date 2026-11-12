@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import agent as agent_mod
-from . import compiler, connections, db, entities, gateway, knowledge, learned, learning, llm, net, tools, vault
+from . import compiler, connections, db, entities, gateway, knowledge, learned, learning, llm, net, proxy, tools, vault
 from .connectors import k8s_rbac
 from .connectors.base import ConnectorError
 from .config import settings
@@ -268,6 +268,53 @@ def require_org_admin(principal: Principal = Depends(current_user)) -> Principal
     if not principal.is_org_admin:
         raise HTTPException(403, "cần quyền org_admin")
     return principal
+
+
+class ProxyBody(BaseModel):
+    url: str | None = Field(default=None, max_length=2000)
+
+
+def _proxy_status(load: bool) -> dict:
+    if load and proxy.configured_url():
+        proxy._current()
+    return proxy.status()
+
+
+@app.get("/api/settings/proxy")
+def proxy_get(_: Principal = Depends(require_org_admin)):
+    return _proxy_status(load=False)
+
+
+@app.put("/api/settings/proxy")
+def proxy_put(body: ProxyBody, principal: Principal = Depends(require_org_admin), conn=Depends(get_conn)):
+    try:
+        with db.tx(conn):
+            proxy.set_url(conn, body.url)
+    except proxy.ProxyError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    log.info("%s đặt URL file PAC: %s", principal.username, body.url or "(bỏ)")
+    return _proxy_status(load=True)
+
+
+@app.post("/api/settings/proxy/reload")
+def proxy_reload(_: Principal = Depends(require_org_admin)):
+    proxy.reset()
+    return _proxy_status(load=True)
+
+
+class ProxyTest(BaseModel):
+    url: str = Field(max_length=2000)
+
+
+@app.post("/api/settings/proxy/test")
+def proxy_test(body: ProxyTest, _: Principal = Depends(require_org_admin)):
+    try:
+        routes = proxy.routes(body.url, "auto")
+    except proxy.ProxyError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(400, f"URL không hợp lệ ({exc.__class__.__name__})") from exc
+    return {"url": body.url, "routes": routes, "text": "; ".join(net.describe_route(r) for r in routes)}
 
 
 class LLMKey(BaseModel):

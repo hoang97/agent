@@ -91,7 +91,7 @@ def _client(p, token: str | None = None):
     token, client_cert = (token, None) if token else (c["token"], c["client_cert"])
     headers = {"Accept": "application/json", **({"Authorization": f"Bearer {token}"} if token else {})}
     return net.client(c["api_url"], allow_private=c["allow_private"], verify=c["verify_tls"], ca_pem=c["ca_cert"] or None,
-                      client_cert=client_cert, headers=headers)
+                      client_cert=client_cert, headers=headers, proxy=p.get("proxy"))
 
 
 def ping(p, args=None):

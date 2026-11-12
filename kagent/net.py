@@ -4,6 +4,7 @@
 - Mạng nội bộ (RFC 1918, ULA...) chỉ được dùng khi kết nối có allow_private do org admin bật.
 - Phân giải DNS một lần, kiểm tra mọi IP rồi ghim kết nối vào IP đã kiểm tra (chống DNS rebinding).
 - Không tự theo redirect: connector nào cần thì tự theo và kiểm tra lại từng bước.
+- Proxy theo file PAC hoặc theo cấu hình của kết nối (xem proxy.py và RoutingTransport).
 """
 from __future__ import annotations
 
@@ -81,6 +82,55 @@ class PinnedTransport(httpx.HTTPTransport):
         return super().handle_request(request)
 
 
+class RoutingTransport(httpx.BaseTransport):
+    """Chọn đường cho từng request theo proxy.routes: DIRECT thì ghim IP như PinnedTransport, còn lại đi qua proxy (CONNECT với https).
+
+    Đích đi qua proxy vẫn phải phân giải được và qua kiểm tra IP như khi đi thẳng; chỉ việc kết nối là do proxy làm.
+    Proxy lấy từ file PAC do org admin khai được dùng luôn; proxy khai tay trên kết nối phải qua kiểm tra địa chỉ như mọi đích khác.
+    Đường lỗi kết nối thì thử đường kế tiếp trong danh sách PAC trả về.
+    """
+
+    def __init__(self, allow_private: bool, mode: str | None, verify):
+        self.allow_private, self.mode, self.verify = allow_private, mode, verify
+        self.direct = PinnedTransport(allow_private=allow_private, verify=verify)
+        self.via: dict[str, httpx.HTTPTransport] = {}
+        self.last_route: str | None = None
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        from . import proxy
+        try:
+            paths = proxy.routes(str(request.url), self.mode)
+        except proxy.ProxyError as exc:
+            raise NetError(str(exc)) from exc
+        request.read()
+        last: Exception | None = None
+        for route in paths:
+            self.last_route = route
+            attempt = httpx.Request(request.method, request.url, headers=request.headers, content=request.content, extensions=dict(request.extensions))
+            try:
+                if route == "DIRECT":
+                    return self.direct.handle_request(attempt)
+                check_host(request.url.host, request.url.port or default_port(request.url.scheme), self.allow_private)
+                if self.mode not in (None, "", "auto"):
+                    pu = httpx.URL(route)
+                    check_host(pu.host, pu.port or default_port(pu.scheme), self.allow_private)
+                if route not in self.via:
+                    self.via[route] = httpx.HTTPTransport(proxy=route, verify=self.verify)
+                return self.via[route].handle_request(attempt)
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ProxyError) as exc:
+                last = exc
+        raise last  # type: ignore[misc]
+
+    def close(self) -> None:
+        self.direct.close()
+        for t in self.via.values():
+            t.close()
+
+
+def describe_route(route: str | None) -> str:
+    return "" if not route else "đi thẳng" if route == "DIRECT" else f"qua proxy {route}"
+
+
 def tls_context(verify: bool = True, ca_pem: str | None = None, client_cert: tuple[str, str] | None = None) -> ssl.SSLContext:
     """Dùng bộ CA của certifi (như httpx mặc định) để chạy giống nhau trên mọi hệ điều hành; CA riêng được nạp thêm.
 
@@ -117,11 +167,13 @@ def _load_client_cert(ctx: ssl.SSLContext, cert_pem: str, key_pem: str) -> None:
 
 
 def client(base_url: str | None, *, allow_private: bool, verify: bool = True, ca_pem: str | None = None,
-           headers: dict | None = None, timeout: float = 20.0, auth=None, client_cert: tuple[str, str] | None = None) -> httpx.Client:
+           headers: dict | None = None, timeout: float = 20.0, auth=None, client_cert: tuple[str, str] | None = None,
+           proxy: str | None = None) -> httpx.Client:
+    """proxy: chế độ proxy của kết nối, auto (theo file PAC trong Cài đặt) | none | http://host:port."""
     if transport_override is not None:
         def guard(request: httpx.Request) -> None:
             check_host(request.url.host, request.url.port or default_port(request.url.scheme), allow_private)
         return httpx.Client(base_url=base_url or "", headers=headers, timeout=timeout, transport=transport_override(),
                             follow_redirects=False, event_hooks={"request": [guard]}, auth=auth)
-    transport = PinnedTransport(allow_private=allow_private, verify=tls_context(verify, ca_pem, client_cert))
+    transport = RoutingTransport(allow_private, proxy, tls_context(verify, ca_pem, client_cert))
     return httpx.Client(base_url=base_url or "", headers=headers, timeout=timeout, transport=transport, follow_redirects=False, auth=auth)

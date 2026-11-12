@@ -10,6 +10,7 @@ fields:
   - {name: index_pattern, type: string, default: "logs-*", description: Mẫu index mặc định khi tìm log}
   - {name: verify_tls, type: boolean, default: true}
   - {name: ca_cert, type: text, description: Chứng chỉ CA dạng PEM nếu dùng CA riêng}
+  - {name: proxy, type: string, default: auto, description: "auto = theo file PAC ở Cài đặt → Proxy; none = đi thẳng; hoặc http://host:port"}
 tools:
   - name: search_logs
     description: Tìm log bằng cú pháp query string trong N phút gần nhất

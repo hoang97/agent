@@ -31,6 +31,15 @@ def host_hint(host: str) -> str:
             "Dùng địa chỉ mà máy chủ kagent truy cập được (IP, NodePort, LoadBalancer, Ingress)")
 
 
+def _route_hint(client: httpx.Client) -> str:
+    route = getattr(getattr(client, "_transport", None), "last_route", None)
+    if route is None:
+        return ""
+    if route == "DIRECT":
+        return " (đi thẳng, không qua proxy; nếu mạng này cần proxy, khai file PAC ở Cài đặt → Proxy hoặc điền ô proxy của kết nối)"
+    return f" (qua proxy {route})"
+
+
 def as_list(value) -> list[str]:
     if not value:
         return []
@@ -70,7 +79,7 @@ def integer(args: dict, key: str, default: int, low: int, high: int, clamp: bool
 
 def http(params: dict, base_field: str, headers: dict | None = None, auth=None) -> httpx.Client:
     return net.client(params[base_field], allow_private=params.get("_allow_private", False), verify=params.get("verify_tls", True),
-                      ca_pem=params.get("ca_cert") or None, headers=headers, auth=auth)
+                      ca_pem=params.get("ca_cert") or None, headers=headers, auth=auth, proxy=params.get("proxy"))
 
 
 def call(client: httpx.Client, method: str, path: str, *, params=None, json_body=None, headers=None, ok=(200, 201, 202), as_text: bool = False,
@@ -87,9 +96,9 @@ def call(client: httpx.Client, method: str, path: str, *, params=None, json_body
     except net.NetError:
         raise
     except httpx.TimeoutException as exc:
-        raise ConnectorError("hết thời gian chờ phản hồi" + host_hint(client.base_url.host)) from exc
+        raise ConnectorError("hết thời gian chờ phản hồi" + _route_hint(client) + host_hint(client.base_url.host)) from exc
     except httpx.HTTPError as exc:
-        raise ConnectorError(f"lỗi kết nối ({exc.__class__.__name__})" + host_hint(client.base_url.host)) from exc
+        raise ConnectorError(f"lỗi kết nối ({exc.__class__.__name__})" + _route_hint(client) + host_hint(client.base_url.host)) from exc
     text = data.decode("utf-8", "replace")
     if with_status:
         return status, resp_headers, text

@@ -6,6 +6,7 @@ fields:
   - {name: allowed_domains, type: list, description: "Chỉ cho đọc các tên miền này, cách nhau dấu phẩy; để trống là mọi tên miền công khai"}
   - {name: max_chars, type: integer, default: 20000, description: Số ký tự tối đa trả về}
   - {name: user_agent, type: string, default: "KnowledgeAgent/1.0"}
+  - {name: proxy, type: string, default: auto, description: "auto = theo file PAC ở Cài đặt → Proxy; none = đi thẳng; hoặc http://host:port"}
 tools:
   - name: fetch_page
     description: Đọc một trang web và trả về tiêu đề cùng phần chữ

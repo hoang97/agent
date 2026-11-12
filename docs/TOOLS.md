@@ -42,6 +42,15 @@ Khi tạo kết nối, công cụ đọc được bật ngay; công cụ ghi, x�
   - Mạng nội bộ (10.x, 172.16-31.x, 192.168.x...) chỉ được dùng khi org_admin bật cho kết nối đó.
   - DNS được phân giải và kiểm tra trước, rồi kết nối được ghim vào IP đã kiểm tra (chống DNS rebinding). TLS vẫn xác thực theo tên máy gốc, dùng bộ CA của certifi, CA riêng của kết nối được nạp thêm.
   - Không tự theo redirect; công cụ Web tự theo tối đa 5 lần và kiểm tra lại từng bước.
+- **Proxy:**
+  - Org admin khai URL file PAC ở **Cài đặt → Proxy**. kagent tự tải file về, giữ 5 phút rồi tải lại; tải lỗi thì dùng bản đã nạp trước đó, và lỗi được ghi nhớ nên không tải lại ở mọi request. Ô **Thử một địa chỉ** cho biết PAC trả đường nào.
+  - Mỗi kết nối HTTP và Kubernetes có ô `proxy`: `auto` (mặc định, theo PAC; chưa khai PAC thì đi thẳng), `none` (đi thẳng), hoặc `http://host:port`.
+  - Mã PAC chạy bằng `pypac`/`dukpy` trong tiến trình con có hạn 5 giây, nên PAC lỗi hay treo không làm treo kagent. Kết quả tra theo tên máy được giữ 5 phút.
+  - Đường `PROXY a; PROXY b; DIRECT` được thử lần lượt khi gặp lỗi kết nối. SOCKS chưa hỗ trợ. kubectl chỉ nhận đường đầu tiên, qua `proxy-url` trong kubeconfig tạm.
+  - Đích đi qua proxy vẫn phải phân giải được ở máy kagent và qua các kiểm tra IP như khi đi thẳng; chỉ việc kết nối là do proxy làm, nên không ghim IP được. HTTPS đi qua CONNECT, TLS xác thực đầu cuối theo tên máy gốc.
+  - Proxy lấy từ PAC (do org admin khai) được dùng luôn, kể cả khi nằm trong mạng nội bộ. Proxy khai tay trên kết nối phải qua kiểm tra địa chỉ như mọi đích khác.
+  - Postgres, MySQL luôn đi thẳng. Lỗi hết thời gian chờ có ghi rõ là đã đi thẳng hay qua proxy nào; nút **Kiểm tra** cũng hiện đường đi.
+  - Ai sửa được file PAC là đổi được đường đi của mọi kết nối, kể cả nơi token được gửi tới và nội dung các kết nối `http://` không mã hóa. Vì vậy chỉ dùng URL do bên quản trị mạng giữ.
 - **Giới hạn:**
   - Phản hồi tối đa 2 MB, timeout 20 giây.
   - SQL đọc chạy trong giao dịch chỉ đọc.

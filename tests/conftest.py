@@ -75,7 +75,11 @@ def infra(monkeypatch, tmp_path):
     monkeypatch.setattr(net, "transport_override", fake.transport)
     monkeypatch.setattr(sql_connector, "_open", fakes.sqlite_open(tmp_path / "shop.db"))
     monkeypatch.setattr(kubectl, "runner", fakes.kubectl_runner(fake))
-    return fake
+    from kagent import proxy
+    proxy.reset()
+    monkeypatch.setattr(proxy, "fetcher", lambda url: (_ for _ in ()).throw(AssertionError("test chưa khai file PAC giả")))
+    yield fake
+    proxy.reset()
 
 
 def create_connections(tenant_id: str, enable_all: bool = True) -> None:

@@ -9,6 +9,7 @@ fields:
   - {name: allowed_paths, type: list, description: "Chỉ cho gọi các đường dẫn bắt đầu bằng các tiền tố này, ví dụ /v1/status"}
   - {name: verify_tls, type: boolean, default: true}
   - {name: ca_cert, type: text, description: Chứng chỉ CA dạng PEM nếu dùng CA riêng}
+  - {name: proxy, type: string, default: auto, description: "auto = theo file PAC ở Cài đặt → Proxy; none = đi thẳng; hoặc http://host:port"}
 tools:
   - name: get
     description: Gửi GET tới một đường dẫn của API

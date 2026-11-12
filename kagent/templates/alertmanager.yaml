@@ -10,6 +10,7 @@ fields:
   - {name: tenant_header, type: string, description: "Giá trị header X-Scope-OrgID cho Mimir/Cortex Alertmanager đa tenant"}
   - {name: verify_tls, type: boolean, default: true}
   - {name: ca_cert, type: text, description: Chứng chỉ CA dạng PEM nếu dùng CA riêng}
+  - {name: proxy, type: string, default: auto, description: "auto = theo file PAC ở Cài đặt → Proxy; none = đi thẳng; hoặc http://host:port"}
 tools:
   - name: list_alerts
     description: >-

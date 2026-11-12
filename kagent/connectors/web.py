@@ -62,7 +62,8 @@ def fetch_page(p, args):
     for _ in range(MAX_REDIRECTS + 1):
         u = net.check_url(url, p.get("_allow_private", False))
         _allowed(p, u.host)
-        with net.client(None, allow_private=p.get("_allow_private", False), headers={"User-Agent": p.get("user_agent") or "KnowledgeAgent/1.0"}) as c:
+        with net.client(None, allow_private=p.get("_allow_private", False), headers={"User-Agent": p.get("user_agent") or "KnowledgeAgent/1.0"},
+                        proxy=p.get("proxy")) as c:
             status, headers, text = call(c, "GET", str(u), with_status=True)
         if status in (301, 302, 303, 307, 308) and headers.get("location"):
             url = str(u.join(headers["location"]))
