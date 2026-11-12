@@ -444,13 +444,20 @@ def _investigate_run(conn, tenant_id: str, incident_id: str, inc, user: str, tas
     from . import agent, gateway, llm
     try:
         ep = agent.run_task(conn, tenant_id, user, task, env=inc["env"], agent_id="alert-agent", read_only=True, conversation_id=conversation_id,
-                            episode_id=run.id, on_event=run.emit)
+                            episode_id=run.id, on_event=run.emit, cancelled=run.stop)
     except agent.QuotaExceeded as exc:
         with db.tx(conn):
             conn.execute("UPDATE incident SET stage='error', updated_at=? WHERE id=?", (db.iso(), incident_id))
             _event(conn, tenant_id, incident_id, "error", f"không điều tra được: {exc}")
         return {}
     steps = [s for s in ep["trace"] if s["type"] == "tool_call"]
+    if run.stop.is_set():
+        who = conn.execute("SELECT username FROM app_user WHERE id=?", (run.stop.by,)).fetchone() if run.stop.by else None
+        with db.tx(conn):
+            conn.execute("UPDATE incident SET stage='needs_human', episode_id=?, updated_at=? WHERE id=?", (ep["id"], db.iso(), incident_id))
+            _event(conn, tenant_id, incident_id, "stopped", f"điều tra bị dừng bởi {who['username'] if who else 'người dùng'} sau {len(steps)} lệnh đọc",
+                   {"by": run.stop.by, "episode_id": ep["id"]})
+        return {}
     tainted = any(s.get("untrusted") for s in steps)
     roles = gateway.user_roles(conn, tenant_id, user)
     tools = _write_tools(conn, tenant_id, user, inc["env"], roles)
@@ -632,7 +639,7 @@ def list_incidents(conn, tenant_id: str, status: str = "open", limit: int = 100)
     return out
 
 
-SHOWN_EVENTS = ("investigated", "verified", "resolved", "closed", "no_action")
+SHOWN_EVENTS = ("investigated", "verified", "resolved", "closed", "no_action", "stopped")
 
 
 def timeline(conn, inc: dict, alerts: list[dict]) -> list[dict]:

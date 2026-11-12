@@ -4,10 +4,10 @@ from __future__ import annotations
 import contextvars
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import replace
 
-from . import compiler, connections, db, gateway, learned, llm, results
+from . import compiler, connections, db, gateway, learned, live, llm, results
 from .config import settings
 from .retrieval import retrieve
 from .tools import callable_by
@@ -255,6 +255,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
     emit = on_event or (lambda event: None)
     history = load_history(conn, tenant_id, conversation_id)
 
+    live.current_stop.set(cancelled)
     roles = gateway.user_roles(conn, tenant_id, user_id)
     ctx = gateway.CallContext(tenant_id, user_id, env, task, episode_id, tainted=history["tainted"], roles=roles)
 
@@ -283,21 +284,49 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         with db.session() as c:
             return run_one(c, name, args)
 
+    def is_read(name: str) -> bool:
+        r = conn.execute("SELECT action_class FROM tool_registry WHERE tenant_id=? AND tool=?", (tenant_id, name)).fetchone()
+        return bool(r and r["action_class"] == "read")
+
+    def wait_or_stop(futures: list, calls: list[tuple[str, dict]]) -> list[dict]:
+        """Đợi các lệnh chạy xong. Bấm dừng thì bỏ ngay nếu chỉ còn lệnh đọc (kết quả bỏ đi, kubectl bị giết);
+        còn lệnh ghi đang chạy thì đợi nó xong rồi mới dừng, vì ngắt giữa chừng không hoàn tác được thay đổi đã gửi đi."""
+        told = False
+        while True:
+            pending = [i for i, f in enumerate(futures) if not f.done()]
+            if not pending:
+                return [f.result() for f in futures]
+            if cancelled is not None and cancelled.is_set():
+                writes = [calls[i][0] for i in pending if not is_read(calls[i][0])]
+                if not writes:
+                    raise llm.Cancelled()
+                if not told:
+                    emit({"type": "stopping", "waiting_for": writes})
+                    told = True
+            wait(futures, timeout=0.2, return_when=FIRST_COMPLETED)
+
     def batch(calls: list[tuple[str, dict]]) -> list[dict]:
         """Các lệnh trong một lượt được lập kế hoạch cùng lúc nên chạy song song; kết quả untrusted chỉ ảnh hưởng các lượt sau."""
         llm.check_cancelled(cancelled)
         calls = [(name, args if isinstance(args, dict) else {}) for name, args in calls]
         for name, args in calls:
             emit({"type": "tool_start", "tool": name, "args": args})
-        if len(calls) == 1:
+        if cancelled is None and len(calls) == 1:
             steps = [run_one(conn, *calls[0])]
         else:
-            batches["n"] += 1
-            with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, len(calls)), thread_name_prefix="tool") as pool:
+            if len(calls) > 1:
+                batches["n"] += 1
+            # Mỗi lệnh chạy ở luồng riêng để nút dừng có tác dụng ngay. Không dùng with: dừng thì không đợi luồng đã bỏ.
+            pool = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, len(calls)), thread_name_prefix="tool")
+            try:
                 # copy_context để lần gọi LLM kiểm tra độc lập trong luồng con vẫn được đo vào lượt này.
-                steps = list(pool.map(lambda call: contextvars.copy_context().run(run_isolated, *call), calls))
-            for step in steps:
-                step["parallel"] = batches["n"]
+                futures = [pool.submit(contextvars.copy_context().run, run_isolated, *call) for call in calls]
+                steps = wait_or_stop(futures, calls)
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+            if len(calls) > 1:
+                for step in steps:
+                    step["parallel"] = batches["n"]
         for step in steps:
             step["result_chars"] = len(json.dumps(step.get("result"), ensure_ascii=False)) if step.get("result") is not None else 0
             small = results.compact(conn, tenant_id, user_id, episode_id, step["tool"], step.get("result"), bool(step.get("untrusted")))
@@ -307,6 +336,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
             statuses.append(step["status"])
         if any(step.get("untrusted") for step in steps):
             ctx.tainted = True
+        llm.check_cancelled(cancelled)  # lệnh ghi đã chạy xong và được ghi lại; giờ mới dừng
         return steps
 
     def call_tool(name: str, args: dict) -> dict:
@@ -344,7 +374,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         elif any(s == "ok" for s in statuses):
             outcome, outcome_src = "partial", "metric"
     except llm.Cancelled:
-        trace.append({"type": "cancelled"})
+        trace.append({"type": "cancelled", **({"by": cancelled.by} if getattr(cancelled, "by", None) else {})})
         output = "".join(partial) or "(đã dừng)"
     except llm.LLMError as exc:
         trace.append({"type": "error", "message": str(exc)})

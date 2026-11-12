@@ -241,8 +241,16 @@ def test_chat_static_assets(client):
 
 class FakeStream:
     def __init__(self, chunks, final):
-        self.text_stream = iter(chunks)
+        self.chunks = list(chunks)
         self.final = final
+        self.closed = False
+
+    def __iter__(self):
+        for text in self.chunks:
+            yield NS(type="content_block_delta", delta=NS(type="text_delta", text=text))
+
+    def close(self):
+        self.closed = True
 
     def __enter__(self):
         return self

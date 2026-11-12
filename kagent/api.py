@@ -578,12 +578,12 @@ def chat(body: ChatBody, t: Tenant = Depends(current_tenant), conn=Depends(get_c
         conn.execute("INSERT INTO conversation(id,tenant_id,user_id,title,created_at,updated_at) VALUES (?,?,?,?,?,?)",
                      (conversation_id, t.tenant_id, t.user_id, title, now, now))
     run_id = db.new_id()
-    cancelled = threading.Event()
+    run = live.start(conversation_id, run_id, message, continuation=bool(continuation_of), owner=t.user_id)
+    cancelled = run.stop
     with _runs_lock:
         _runs[run_id] = (t.tenant_id, t.user_id, cancelled, conversation_id)
     events: queue.Queue = queue.Queue()
     events.put({"type": "start", "run_id": run_id, "conversation_id": conversation_id})
-    run = live.start(conversation_id, run_id, message, continuation=bool(continuation_of))
 
     def emit(event: dict) -> None:
         events.put(event)
@@ -628,7 +628,24 @@ def chat_cancel(run_id: str, t: Tenant = Depends(current_tenant)):
         run = _runs.get(run_id)
     if run is None or run[0] != t.tenant_id or run[1] != t.user_id:
         raise HTTPException(404, "không có lượt đang chạy")
-    run[2].set()
+    flag = run[2]
+    flag.stop(t.user_id) if isinstance(flag, live.StopFlag) else flag.set()
+    return {"ok": True}
+
+
+@app.post("/api/conversations/{conversation_id}/stop")
+def conversation_stop(conversation_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    """Dừng lượt đang chạy của hội thoại. Hội thoại riêng: chủ lượt; hội thoại của sự cố: mọi thành viên có quyền ghi."""
+    c = _own_conversation(conn, t, conversation_id)
+    run = live.current(conversation_id)
+    if run is None:
+        raise HTTPException(404, "không có lượt đang chạy")
+    if run.owner != t.user_id:
+        if not c.get("incident_id"):
+            raise HTTPException(403, "chỉ người mở lượt này được dừng")
+        t.require_writer()
+    run.stop.stop(t.user_id)
+    log.info("tenant %s: %s dừng lượt %s của hội thoại %s", t.tenant_id, t.principal.username, run.id, conversation_id)
     return {"ok": True}
 
 

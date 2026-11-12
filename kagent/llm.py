@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 import re
 import socket
+import threading
 from types import SimpleNamespace
 from typing import Callable
 from urllib.parse import urlsplit
@@ -260,6 +261,39 @@ def _run_calls(call_tool, calls: list[tuple[str, dict]]) -> list[dict]:
 
 class Cancelled(Exception):
     """Người dùng bấm dừng."""
+
+
+@contextmanager
+def abort_on(cancelled, close):
+    """Bấm dừng thì đóng kết nối stream từ luồng khác, kể cả lúc model chưa trả token nào (đang nghĩ, đang chọn lệnh).
+
+    Luồng đang đọc stream sẽ gặp lỗi kết nối; lỗi đó được đổi thành Cancelled.
+    """
+    if cancelled is None:
+        yield
+        return
+    done = threading.Event()
+
+    def watch():
+        while not done.is_set():
+            if cancelled.wait(0.2):
+                try:
+                    close()
+                except Exception:  # đóng từ luồng khác có thể lỗi nếu stream vừa xong; không sao
+                    pass
+                return
+
+    threading.Thread(target=watch, name="llm-abort", daemon=True).start()
+    try:
+        yield
+    except Cancelled:
+        raise
+    except Exception:
+        if cancelled.is_set():
+            raise Cancelled() from None
+        raise
+    finally:
+        done.set()
 
 
 def check_cancelled(cancelled) -> None:
@@ -656,10 +690,12 @@ class AnthropicProvider(_StructuredProvider):
             if on_text is None:
                 response = api.create(model=model, **extra, **params)
             else:
-                with api.stream(model=model, **extra, **params) as stream:
-                    for text in stream.text_stream:
+                with api.stream(model=model, **extra, **params) as stream, abort_on(cancelled, stream.close):
+                    for event in stream:  # mọi sự kiện, không chỉ chữ: lúc model đang chọn lệnh vẫn kiểm tra được cờ dừng
                         check_cancelled(cancelled)
-                        on_text(text)
+                        delta = getattr(event, "delta", None)
+                        if event.type == "content_block_delta" and getattr(delta, "type", None) == "text_delta":
+                            on_text(delta.text)
                     response = stream.get_final_message()
         except anthropic.AuthenticationError as exc:
             raise LLMError("API key không hợp lệ") from exc
@@ -768,25 +804,31 @@ class OpenAIProvider(_StructuredProvider):
         content: list[str] = []
         calls: dict[int, dict] = {}
         finish, usage = None, None
-        for chunk in self.client.chat.completions.create(stream=True, **params):
-            check_cancelled(cancelled)
-            usage = getattr(chunk, "usage", None) or usage
-            if not chunk.choices:
-                continue
-            choice = chunk.choices[0]
-            finish = choice.finish_reason or finish
-            if choice.delta.content:
-                content.append(choice.delta.content)
-                on_text(choice.delta.content)
-            for delta in choice.delta.tool_calls or []:
-                call = calls.setdefault(delta.index, {"id": "", "name": "", "arguments": ""})
-                call["id"] = delta.id or call["id"]
-                if delta.function:
-                    call["name"] += delta.function.name or ""
-                    call["arguments"] += delta.function.arguments or ""
+        chunks = self.client.chat.completions.create(stream=True, **params)
+        with abort_on(cancelled, getattr(chunks, "close", lambda: None)):
+            for chunk in chunks:
+                check_cancelled(cancelled)
+                self._take(chunk, content, calls, on_text)
+                usage = getattr(chunk, "usage", None) or usage
+                finish = (chunk.choices[0].finish_reason if chunk.choices else None) or finish
         tool_calls = [SimpleNamespace(id=c["id"], function=SimpleNamespace(name=c["name"], arguments=c["arguments"])) for _, c in sorted(calls.items())]
         message = SimpleNamespace(content="".join(content) or None, tool_calls=tool_calls or None)
         return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason=finish)], usage=usage)
+
+    @staticmethod
+    def _take(chunk, content: list, calls: dict, on_text) -> None:
+        if not chunk.choices:
+            return
+        choice = chunk.choices[0]
+        if choice.delta.content:
+            content.append(choice.delta.content)
+            on_text(choice.delta.content)
+        for delta in choice.delta.tool_calls or []:
+            call = calls.setdefault(delta.index, {"id": "", "name": "", "arguments": ""})
+            call["id"] = delta.id or call["id"]
+            if delta.function:
+                call["name"] += delta.function.name or ""
+                call["arguments"] += delta.function.arguments or ""
 
     def _complete(self, on_text=None, cancelled=None, **params):
         try:

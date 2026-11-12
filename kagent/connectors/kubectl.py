@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 
 import httpx
 import yaml
@@ -159,7 +160,8 @@ def kubeconfig(p: dict, token: str) -> str:
                            "users": [{"name": "kagent", "user": {"token": token}}], "contexts": [{"name": "kagent", "context": ctx}]})
 
 
-def _exec(argv: list[str], config: str, stdin: str | None, timeout: int) -> tuple[int, str, str, bool]:
+def _exec(argv: list[str], config: str, stdin: str | None, timeout: int, interruptible: bool = False) -> tuple[int, str, str, bool]:
+    """interruptible: lệnh chỉ đọc, bấm dừng thì giết ngay. Lệnh ghi luôn chạy tới hết để biết chắc nó đã làm gì."""
     exe = shutil.which(KUBECTL)
     if exe is None and runner is None:
         _fail("máy chủ kagent chưa cài kubectl")
@@ -173,11 +175,27 @@ def _exec(argv: list[str], config: str, stdin: str | None, timeout: int) -> tupl
         full = [exe or KUBECTL, f"--request-timeout={timeout}s", f"--cache-dir={os.path.join(d, 'cache')}", *argv]
         if runner is not None:
             return runner(full, env, stdin, timeout)
-        try:
-            proc = subprocess.run(full, input=(stdin or "").encode(), capture_output=True, timeout=timeout + 5, env=env, cwd=d)
-        except subprocess.TimeoutExpired as exc:
-            return -1, (exc.stdout or b"").decode("utf-8", "replace"), (exc.stderr or b"").decode("utf-8", "replace"), True
-        return proc.returncode, proc.stdout.decode("utf-8", "replace"), proc.stderr.decode("utf-8", "replace"), False
+        from .. import live
+        # Nhóm tiến trình riêng để giết được cả tiến trình con (plugin, credential helper) khi dừng hoặc hết giờ.
+        proc = subprocess.Popen(full, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=d, start_new_session=True)
+        deadline = time.monotonic() + timeout + 5
+        data = (stdin or "").encode()
+        while True:
+            try:
+                out, err = proc.communicate(input=data, timeout=0.25)
+                return proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace"), False
+            except subprocess.TimeoutExpired:
+                data = None  # đã gửi stdin ở lần gọi đầu
+                stopped = interruptible and live.stopping()
+                if stopped or time.monotonic() > deadline:
+                    try:
+                        os.killpg(proc.pid, 9)
+                    except ProcessLookupError:
+                        pass
+                    out, err = proc.communicate()
+                    if stopped:
+                        _fail("đã dừng theo yêu cầu")
+                    return -1, out.decode("utf-8", "replace"), err.decode("utf-8", "replace"), True
 
 
 _KLOG = re.compile(r"^[EWI]\d{4} \d{2}:\d{2}:\d{2}\.\d+\s+\d+ \S+:\d+\] ")
@@ -219,7 +237,7 @@ def _run(p: dict, args: dict, profile: str, dry: bool = False) -> dict:
             _fail(f"kubectl {info['key']} không có chế độ chạy thử phía server")
         argv = _with_dry_run(argv)
     timeout = integer(args, "timeout_seconds", 30, 1, 120)
-    code, out, err, timed_out = _exec(argv, kubeconfig(p, _token(p, profile)), manifest, timeout)
+    code, out, err, timed_out = _exec(argv, kubeconfig(p, _token(p, profile)), manifest, timeout, interruptible=info["read_only"] or dry)
     result = {"command": "kubectl " + shlex.join(argv), "exit_code": code, "stdout": clip(out), "stderr": clip(err, 5000)}
     if timed_out:
         result["timed_out"] = True

@@ -336,10 +336,11 @@ function chatView(main) {
     await send(text);
   }
 
+  // Dừng theo hội thoại: dùng được cả cho lượt đang xem tiếp sau khi tải lại, và lượt của người khác trong hội thoại sự cố.
   async function stop() {
-    if (!activeRun || !activeRun.id) return;
+    if (!activeRun || !state.conversationId) return;
     sendBtn.disabled = true;
-    try { await api("POST", `/api/chat/${activeRun.id}/cancel`); } catch (e) { toast(e.message, true); sendBtn.disabled = false; }
+    try { await api("POST", `/api/conversations/${state.conversationId}/stop`); } catch (e) { toast(e.message, true); sendBtn.disabled = false; }
   }
 
   // Dựng khung của một lượt (câu hỏi + vùng trả lời đang chạy) và trả về hàm xử lý sự kiện stream; dùng cho lượt mới gửi
@@ -406,6 +407,10 @@ function chatView(main) {
         scroll();
         refreshConversations();
         if (ev.message.approvals.some((a) => a.status === "pending")) pollApprovals();
+      } else if (ev.type === "stopping") {
+        // Lệnh ghi đã gửi đi thì ngắt giữa chừng không hoàn tác được: đợi nó xong rồi mới dừng.
+        approvalsSlot.append(h("div", { class: "small warn-text" }, `Đang đợi ${ev.waiting_for.join(", ")} chạy xong rồi dừng…`));
+        scroll();
       } else if (ev.type === "error") fail(ev.message);
     };
     return { handle, fail, liveEl, stopPaint: () => { if (frame) cancelAnimationFrame(frame); } };
@@ -454,7 +459,7 @@ function chatView(main) {
     const conv = state.conversationId;
     let turn = null;
     let episodeId = null;
-    activeRun = { id: null };  // không gửi lượt mới chồng lên; lượt của người khác (vd. kagent-alerts) không dừng được từ đây
+    activeRun = { id: null };  // không gửi lượt mới chồng lên; nút Dừng dừng theo hội thoại nên vẫn dùng được
     syncSend();
     try {
       const res = await fetch(`/api/conversations/${conv}/live`, { headers: { "X-Tenant-Id": state.tenant.id }, credentials: "same-origin" });
