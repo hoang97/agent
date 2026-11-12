@@ -256,6 +256,12 @@ class LLMError(Exception):
     pass
 
 
+def _review(call_tool, text: str) -> str | None:
+    """Lời nhắc của runner cho câu kết thúc của model (call_tool.review_answer), hoặc None để kết thúc lượt."""
+    review = getattr(call_tool, "review_answer", None)
+    return review(text) if review is not None else None
+
+
 def _run_calls(call_tool, calls: list[tuple[str, dict]]) -> list[dict]:
     """Chạy song song nếu runner hỗ trợ (call_tool.batch), ngược lại chạy lần lượt."""
     batch = getattr(call_tool, "batch", None)
@@ -552,6 +558,11 @@ AGENT_SYSTEM = ("Bạn là agent vận hành. Dùng công cụ để hoàn thàn
                 "Lệnh bị auto mode chặn (lý do bắt đầu bằng \"auto mode chặn\") là vì vượt điều người dùng nhờ hoặc vi phạm luật: đọc lý do, "
                 "chọn cách an toàn hơn trong phạm vi yêu cầu, hoặc hỏi lại người dùng; không lách luật, không gọi lại đúng lệnh đó. "
                 "Lệnh pending hoặc bị chặn vì lý do khác thì không tìm đường vòng; báo lại cho người dùng. "
+                "Chỉ nói một lệnh đang chờ duyệt khi công cụ vừa trả status pending trong chính lượt này; muốn chạy lệnh thì phải gọi công cụ, "
+                "không viết lệnh ra chữ rồi bảo người dùng duyệt. Lệnh người dùng từng từ chối kèm ghi chú: ghi chú là chỉ dẫn, làm theo; "
+                "khi điều kiện trong ghi chú đã thỏa mà vẫn cần lệnh đó thì gọi lại công cụ, hệ thống tạo thẻ duyệt mới. "
+                "Với lệnh ghi, điền _why: một câu nói lệnh làm gì và vì sao, người duyệt đọc câu này trên thẻ. "
+                "Cần người dùng chọn giữa các cách làm thì dùng ask_user thay vì liệt kê lựa chọn trong câu trả lời. "
                 "Giao diện đã hiện thẻ duyệt kèm tham số và lý do cho mỗi lệnh pending, nên chỉ nói một câu ngắn lệnh nào đang chờ duyệt và để làm gì; "
                 "không chép lại approval_id, trạng thái hay lý do chặn. Sau khi được duyệt, bạn sẽ tự được chạy tiếp với kết quả, không cần người dùng nhắn lại. "
                 "Khi các lệnh độc lập với nhau, hãy gọi chúng cùng lúc trong một lượt để chạy song song. "
@@ -796,7 +807,11 @@ class AnthropicProvider(_StructuredProvider):
                 continue
             calls = [b for b in response.content if b.type == "tool_use"]
             if not calls:
-                break
+                nudge = _review(call_tool, text)
+                if nudge is None:
+                    break
+                messages.append({"role": "user", "content": nudge})
+                continue
             steps = _run_calls(call_tool, [(block.name.replace("__", "."), block.input) for block in calls])
             # Mọi tool_result của một lượt phải nằm trong cùng một message user.
             results = [{"type": "tool_result", "tool_use_id": block.id, "content": _tool_payload(step),
@@ -931,7 +946,11 @@ class OpenAIProvider(_StructuredProvider):
             if message.content:
                 parts.append(message.content)
             if not message.tool_calls:
-                return {"answer": "\n\n".join(parts) or "(không có nội dung trả lời)", "tokens": total}
+                nudge = _review(call_tool, message.content or "")
+                if nudge is None:
+                    return {"answer": "\n\n".join(parts) or "(không có nội dung trả lời)", "tokens": total}
+                messages += [{"role": "assistant", "content": message.content or ""}, {"role": "user", "content": nudge}]
+                continue
             messages.append({"role": "assistant", "content": message.content, "tool_calls": [
                 {"id": c.id, "type": "function", "function": {"name": c.function.name, "arguments": c.function.arguments}} for c in message.tool_calls]})
             parsed: list[tuple] = []

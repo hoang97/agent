@@ -98,7 +98,7 @@ def test_approval_result_visible_in_next_turn_history(users):
     assert [m["role"] for m in messages] == ["user", "assistant", "user"]
     assert "[Lệnh" not in messages[1]["content"] and "approved" not in messages[1]["content"]
     content = messages[2]["content"]
-    assert content.startswith("[Hệ thống]") and "- k8s.kubectl_write {" in content and ": approved {" in content
+    assert content.startswith("[Hệ thống]") and "- k8s.kubectl_write {" in content and ": đã duyệt và chạy {" in content
     assert alice.get(f"/api/conversations/{cid}").json()["messages"][0]["approvals"][0]["status"] == "approved"
 
 
@@ -396,3 +396,40 @@ def test_reload_replays_running_turn_then_streams_rest(users):
     assert alice.get(f"/api/conversations/{cid}").json()["running"] is False
     assert events(alice.get(f"/api/conversations/{cid}/live")) == [{"type": "end", "episode_id": None}]
     assert bob.get(f"/api/conversations/{cid}/live").status_code == 404  # hội thoại riêng của alice
+
+
+def test_timeline_keeps_text_and_tools_in_order(users):
+    """Đoạn chữ agent viết giữa các lệnh được lưu theo thứ tự, để giao diện xếp xen kẽ như Claude Code."""
+    from kagent import llm
+
+    class Talky(llm.HeuristicProvider):
+        def run_agent(self, task, context, tools, call_tool, on_text=None, **kw):
+            on_text("Tôi sẽ xem pod. ")
+            call_tool("k8s.kubectl_read", {"command": "get pods -n default"})
+            on_text("Có 3 pod đang chạy.")
+            return {"answer": "Tôi sẽ xem pod. Có 3 pod đang chạy.", "tokens": 0}
+
+    llm.set_provider(Talky())
+    try:
+        message = done(chat(users["alice"], "xem pod"))["message"]
+    finally:
+        llm.set_provider(None)
+    assert message["timeline"] == [{"text": "Tôi sẽ xem pod."}, {"step": 0}, {"text": "Có 3 pod đang chạy."}]
+    step = message["steps"][0]
+    assert step["action_class"] == "read" and isinstance(step["ms"], int)
+    assert users["alice"].get("/api/conversations").json()[0]["pending"] == 0
+
+
+def test_old_turn_without_text_segments_has_no_timeline(users):
+    message = done(chat(users["alice"], "xem pod trong namespace default"))["message"]
+    assert message["timeline"] is None or all("step" in i or "text" in i for i in message["timeline"])
+
+
+def test_conversation_list_counts_pending_approvals(users):
+    alice = users["alice"]
+    cid = chat(alice, "scale deployment web lên 4 replica trong namespace default")[0]["conversation_id"]
+    assert next(c for c in alice.get("/api/conversations").json() if c["id"] == cid)["pending"] == 1
+    approval = alice.get(f"/api/conversations/{cid}").json()["messages"][0]["approvals"][0]
+    assert alice.get("/api/approvals?status=pending").json()[0]["conversation_id"] == cid
+    alice.post(f"/api/approvals/{approval['id']}/decide", json={"action": "deny"})
+    assert next(c for c in alice.get("/api/conversations").json() if c["id"] == cid)["pending"] == 0

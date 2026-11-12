@@ -167,7 +167,8 @@ function conversationItem(c) {
     if (state.conversationId === c.id) go("chat", null); else refreshConversations();
   });
   const item = h("div", { class: "conv" + (state.tab === "chat" && state.conversationId === c.id ? " active" : "") },
-    h("button", { type: "button", class: "conv-open", title: c.title, onclick: () => { closeSidebar(); go("chat", c.id); } }, c.title),
+    h("button", { type: "button", class: "conv-open", title: c.pending ? `${c.title} · ${c.pending} lệnh chờ duyệt` : c.title, onclick: () => { closeSidebar(); go("chat", c.id); } },
+      c.pending ? h("span", { class: "dot-wait", "aria-label": `${c.pending} lệnh chờ duyệt` }) : null, c.title),
     iconButton("edit", "Đổi tên", rename), iconButton("trash", "Xóa", remove));
   return item;
 }
@@ -175,6 +176,8 @@ function conversationItem(c) {
 async function refreshConversations() {
   if (!conversationList) return;
   const list = await api("GET", "/api/conversations");
+  const waiting = list.reduce((n, c) => n + (c.pending || 0), 0);
+  document.title = (waiting ? `(${waiting}) ` : "") + "Knowledge Agent";
   const groups = new Map();
   for (const c of list) { const g = dateGroup(c.updated_at); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(c); }
   conversationList.replaceChildren(...(list.length ? [...groups].flatMap(([g, items]) => [h("div", { class: "group" }, g), ...items.map(conversationItem)]) : [h("div", { class: "small pad" }, "Chưa có hội thoại nào.")]));
@@ -571,15 +574,15 @@ VIEWS.approvals = async (main) => {
   const list = await api("GET", "/api/approvals");
   const pending = list.filter((a) => a.status === "pending");
   const others = list.filter((a) => a.status !== "pending");
-  const card = (a) => {
-    const reason = h("input", { placeholder: "Lý do từ chối", "aria-label": "Lý do từ chối" });
-    const act = (action) => guard(async () => { const r = await api("POST", `/api/approvals/${a.id}/decide`, { action, reason: reason.value || null }); toast(r.status === "pending" ? "Đã ghi nhận, cần thêm người duyệt" : "Đã xử lý: " + (LABEL[r.status] || r.status)); renderShell(); });
-    return h("div", { class: "card" }, h("div", { class: "row spread" }, h("h3", {}, a.tool), h("div", {}, h("span", { class: "badge" }, a.risk_tier), h("span", { class: "badge" }, a.env), h("span", { class: "badge" }, `${a.decided_by.length}/${a.required_approvals} duyệt`))),
-      h("div", {}, "Yêu cầu gốc: ", a.original_request), h("div", { class: "small" }, `Người yêu cầu: ${a.requester} · hết hạn ${fmtTime(a.expires_at)}`), h("div", { class: "small" }, "Lý do cần duyệt: " + a.reasons.join("; ")),
-      h("pre", {}, JSON.stringify(a.args, null, 1)), a.dry_run && h("pre", {}, "Dry-run: " + JSON.stringify(a.dry_run)), a.rollback_hint && h("div", { class: "small" }, "Cách hoàn tác: " + a.rollback_hint),
-      a.can_decide ? h("div", { class: "row" }, h("button", { onclick: act("approve_once") }, a.mine ? "Chạy lệnh" : "Duyệt một lần"), h("button", { class: "ghost", onclick: act("approve_session") }, "Cho phép trong 1 giờ"), reason, h("button", { class: "danger", onclick: act("deny") }, "Từ chối"))
-        : h("div", { class: "small" }, a.mine ? "Tenant này yêu cầu người khác duyệt lệnh của bạn." : "Bạn không có quyền duyệt yêu cầu này."));
+  // Cùng thẻ với khung chat, thêm yêu cầu gốc, người yêu cầu và đường về hội thoại.
+  const decide = async (a, action, note) => {
+    const r = await api("POST", `/api/approvals/${a.id}/decide`, { action, reason: note });
+    toast(r.status === "pending" ? "Đã ghi nhận, cần thêm người duyệt" : "Đã xử lý: " + (LABEL[r.status] || r.status));
+    renderShell();
   };
+  const card = (a) => approvalCard(a, decide, false, h("div", { class: "small" },
+    `Yêu cầu của ${a.requester}: `, h("em", {}, a.original_request), ` · hết hạn ${fmtTime(a.expires_at)}`,
+    a.conversation_id && a.mine ? [" · ", h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("chat", a.conversation_id); } }, "Mở hội thoại")] : null));
   main.append(h("h2", {}, `Chờ duyệt (${pending.length})`), pending.length ? pending.map(card) : h("div", { class: "card muted" }, "Không có lệnh nào chờ duyệt."),
     others.length > 0 && h("h2", {}, "Đã xử lý"), others.length > 0 && h("div", { class: "card scroll" }, h("table", {}, h("tbody", {}, others.map((a) => h("tr", {}, h("td", {}, fmtTime(a.decided_at)), h("td", {}, a.tool), h("td", {}, a.env), h("td", {}, badge(a.status)), h("td", {}, a.deny_reason || "")))))));
 };

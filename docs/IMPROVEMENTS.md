@@ -287,3 +287,18 @@ Theo cách của auto mode trong Claude Code.
   - `auto_rules` cho luồng sự cố: luật tự xử lý đứng ở chỗ lời người dùng;
   - chạy thử phía server lỗi thì bắt buộc hỏi.
 
+## Đợt 36 — 2026-11-12: duyệt lại lệnh đã từ chối, thẻ duyệt và câu hỏi kiểu Claude
+
+- **Lỗi:** người dùng từ chối lệnh rollback, kèm lý do "kiểm tra registry trước". Lượt sau, agent kiểm tra xong rồi viết "lệnh rollback đang chờ duyệt", nhưng không gọi công cụ, nên không có thẻ nào để duyệt.
+  - Nguyên nhân 1: model chép mẫu câu "… đang chờ duyệt" từ lịch sử.
+  - Nguyên nhân 2: từ chối không làm agent chạy tiếp.
+- **Sửa:**
+  - Runner nhắc agent một lần khi câu kết thúc nói có lệnh chờ duyệt mà lượt đó không có lệnh nào chờ.
+  - Lịch sử ghi rõ "người dùng từ chối, ghi chú: …; khi đã làm theo mà vẫn cần thì gọi lại công cụ".
+  - Từ chối kèm ghi chú thì agent tự làm tiếp; từ chối không ghi chú thì dừng, như Claude Code.
+- **Thẻ duyệt:**
+  - Có câu mô tả `_why` của agent.
+  - Nút grant ghi rõ phạm vi.
+  - Một ô ghi chú cho cả Chạy và Từ chối; ghi chú khi chạy được gửi cho agent sau kết quả. Từ chối không còn bắt buộc lý do.
+- **Công cụ `ask_user`:** agent hỏi bằng nút lựa chọn, có ô "Khác".
+

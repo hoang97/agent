@@ -524,17 +524,19 @@ def _continued(conn, tenant_id: str, episode_id: str) -> bool:
 
 
 def _check_continuable(conn, t: "Tenant", conversation_id: str, episode_id: str) -> str:
-    """Chỉ chạy tiếp lượt mới nhất của hội thoại, khi nó không còn lệnh chờ, có ít nhất một lệnh đã chạy, và chưa được chạy tiếp."""
+    """Chỉ chạy tiếp lượt mới nhất của hội thoại, khi nó không còn lệnh chờ, chưa được chạy tiếp, và có lệnh đã chạy
+    hoặc lệnh bị từ chối kèm ghi chú (như Claude Code: từ chối có ghi chú thì agent làm tiếp theo ghi chú, không ghi chú thì dừng)."""
     latest = conn.execute("SELECT id FROM episode WHERE tenant_id=? AND conversation_id=? ORDER BY started_at DESC, rowid DESC LIMIT 1",
                           (t.tenant_id, conversation_id)).fetchone()
     if latest is None or latest["id"] != episode_id:
         raise HTTPException(409, "chỉ chạy tiếp được lượt mới nhất của hội thoại")
-    counts = conn.execute("SELECT coalesce(sum(status='pending'),0) pending, coalesce(sum(status='approved'),0) approved "
+    counts = conn.execute("SELECT coalesce(sum(status='pending'),0) pending, coalesce(sum(status='approved'),0) approved, "
+                          "coalesce(sum(status='denied' AND coalesce(trim(deny_reason),'')!=''),0) noted "
                           "FROM approval_request WHERE tenant_id=? AND episode_id=?", (t.tenant_id, episode_id)).fetchone()
     if counts["pending"]:
         raise HTTPException(409, "lượt này còn lệnh chờ duyệt")
-    if not counts["approved"]:
-        raise HTTPException(409, "lượt này không có lệnh nào đã được duyệt để chạy tiếp")
+    if not counts["approved"] and not counts["noted"]:
+        raise HTTPException(409, "lượt này không có lệnh nào đã được duyệt hoặc từ chối kèm ghi chú để chạy tiếp")
     if _continued(conn, t.tenant_id, episode_id):
         raise HTTPException(409, "lượt này đã được chạy tiếp")
     return episode_id
@@ -657,24 +659,45 @@ def _approval_views(conn, t: "Tenant", rows: list[dict]) -> list[dict]:
     return rows
 
 
+def _timeline(trace: list[dict]) -> list[dict] | None:
+    """Chữ và lệnh theo thứ tự đã xảy ra: {"text"} hoặc {"step": chỉ số trong steps}. Lượt cũ không lưu đoạn chữ thì None."""
+    if not any(s["type"] == "text" for s in trace):
+        return None
+    out, n = [], 0
+    for s in trace:
+        if s["type"] == "text":
+            text = agent_mod.clean_answer(s["text"])
+            if text:
+                out.append({"text": text})
+        elif s["type"] == "tool_call":
+            out.append({"step": n})
+            n += 1
+    return out
+
+
 def _chat_message(conn, t: "Tenant", ep: dict) -> dict:
     tenant_id = t.tenant_id
     approvals = db.rows(conn.execute(
         "SELECT a.id, a.tool, a.env, a.args, a.dry_run, a.risk_tier, a.confidence, a.reasons, a.rollback_hint, a.status, a.required_approvals, a.decided_by, "
-        "a.deny_reason, a.result, a.expires_at, a.requester_id FROM approval_request a WHERE a.episode_id=? AND a.tenant_id=? ORDER BY a.created_at, a.rowid",
+        "a.deny_reason, a.note, a.why, a.result, a.expires_at, a.requester_id FROM approval_request a WHERE a.episode_id=? AND a.tenant_id=? ORDER BY a.created_at, a.rowid",
         (ep["id"], tenant_id)).fetchall(), "args", "dry_run", "reasons", "decided_by", "result")
     approvals = _approval_views(conn, t, approvals)
     return {"id": ep["id"], "task": ep["input"]["task"], "output": ep["output"], "outcome": ep["outcome"], "outcome_src": ep["outcome_src"], "env": ep["env"],
             "task_type": ep["task_type"], "started_at": ep["started_at"], "tokens": ep["tokens"], "ku_used": len(ep["ku_used"]),
             "edited": ep["human_edit"] is not None, "cancelled": any(s["type"] == "cancelled" for s in ep["trace"]),
-            "steps": [s for s in ep["trace"] if s["type"] == "tool_call"], "error": next((s["message"] for s in ep["trace"] if s["type"] == "error"), None),
+            "steps": [s for s in ep["trace"] if s["type"] == "tool_call"], "timeline": _timeline(ep["trace"]),
+            "error": next((s["message"] for s in ep["trace"] if s["type"] == "error"), None),
             "approvals": approvals, "continuation": bool(ep["input"].get("continuation_of")), "continued": _continued(conn, tenant_id, ep["id"])}
 
 
 @app.get("/api/conversations")
 def conversations(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     # Hội thoại của sự cố hiện ở danh sách của người đã nhắn vào đó; người khác mở từ trang sự cố.
-    return db.rows(conn.execute("SELECT id, title, created_at, updated_at, incident_id FROM conversation c WHERE tenant_id=? AND archived_at IS NULL AND "
+    gateway.expire_approvals(conn, t.tenant_id)
+    # pending: số lệnh đang chờ duyệt của hội thoại, để sidebar đánh dấu hội thoại đang chờ bạn.
+    return db.rows(conn.execute("SELECT id, title, created_at, updated_at, incident_id, (SELECT count(*) FROM approval_request a JOIN episode e ON e.id=a.episode_id "
+                                "WHERE e.conversation_id=c.id AND a.tenant_id=c.tenant_id AND a.status='pending') pending "
+                                "FROM conversation c WHERE tenant_id=? AND archived_at IS NULL AND "
                                 "(user_id=? OR (incident_id IS NOT NULL AND EXISTS (SELECT 1 FROM episode e WHERE e.conversation_id=c.id AND e.user_id=?))) "
                                 "ORDER BY updated_at DESC, rowid DESC LIMIT 200", (t.tenant_id, t.user_id, t.user_id)).fetchall())
 
@@ -1219,7 +1242,8 @@ def golden_add(body: Golden, t: Tenant = Depends(current_tenant), conn=Depends(g
 @app.get("/api/approvals")
 def approvals(status: str | None = None, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     gateway.expire_approvals(conn, t.tenant_id)
-    sql = "SELECT a.*, u.username AS requester FROM approval_request a LEFT JOIN app_user u ON u.id=a.requester_id WHERE a.tenant_id=?"
+    sql = ("SELECT a.*, u.username AS requester, e.conversation_id FROM approval_request a LEFT JOIN app_user u ON u.id=a.requester_id "
+           "LEFT JOIN episode e ON e.id=a.episode_id WHERE a.tenant_id=?")
     args: list = [t.tenant_id]
     if status:
         sql += " AND a.status=?"

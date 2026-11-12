@@ -92,6 +92,18 @@ Theo cách của auto mode trong Claude Code. Lệnh dừng ở bước đầu t
    - **Ô luôn hỏi:** classifier vẫn chạy, nhưng chỉ ghi nhận xét vào lý do cho người duyệt xem.
 5. **Grant "cho phép trong 1 giờ":** cùng người, cùng công cụ, cùng môi trường và namespace thì tự chạy, trừ khi có lý do ở bước 2.
 
+## Thẻ duyệt và câu hỏi trong chat
+
+Theo cách Claude Code hỏi và chờ người dùng.
+- **Thẻ duyệt:** hiện câu agent tự mô tả lệnh (tham số `_why` của công cụ ghi), lệnh cụ thể, lý do cần duyệt, kết quả chạy thử và cách hoàn tác. `_why` chỉ để người duyệt đọc: không gửi tới connector, không vào classifier, không vào công cụ học được.
+- **Các lựa chọn:** **Chạy**; **Chạy, và cho phép `<công cụ>` ở `<môi trường>`, namespace `<ns>` trong 1 giờ** (nút ghi rõ phạm vi của grant); **Từ chối**. Ô ghi chú dùng chung cho cả ba:
+  - Từ chối kèm ghi chú thì agent tự làm tiếp theo ghi chú. Ví dụ "kiểm tra registry trước": agent kiểm tra, rồi gọi lại lệnh để có thẻ duyệt mới.
+  - Từ chối không kèm ghi chú thì lượt dừng.
+  - Chạy kèm ghi chú thì agent nhận ghi chú cùng kết quả.
+  - Ghi chú từ chối thành bài học (KU lesson). Ghi chú của cả hai loại được đưa vào ý người dùng cho auto mode.
+- **Agent không được nói "đang chờ duyệt" khi lượt đó không có lệnh nào chờ.** Câu kết thúc nói vậy thì runner nhắc agent một lần, để agent gọi công cụ hoặc viết lại câu trả lời.
+- **`ask_user`:** agent hỏi 1–4 câu, mỗi câu 2–4 lựa chọn (lựa chọn khuyên dùng đứng đầu), giao diện tự thêm ô "Khác". Chỉ có một câu chọn một thì bấm là gửi luôn. Câu trả lời đi như tin nhắn của người dùng ở lượt sau. Gọi `ask_user` xong, các lệnh khác trong lượt bị chặn. Không có `ask_user` trong lượt điều tra sự cố.
+
 ## Quyền Kubernetes và công cụ kubectl
 
 Ba công cụ `kubectl_read`, `kubectl_write`, `kubectl_admin` chạy được mọi lệnh kubectl trong phạm vi quyền của nhóm tương ứng. Kiểm soát quyền giao cho RBAC của cụm thay vì kagent đọc lệnh để đoán, nên mức rủi ro của từng công cụ là cố định:

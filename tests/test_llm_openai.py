@@ -179,3 +179,18 @@ def test_low_effort_turns_off_thinking_and_falls_back_once():
     assert p.route("xem pod")["task_type"] == "k8s_ops" and p.route("xem pod")["task_type"] == "k8s_ops"
     assert seen[0]["body"]["chat_template_kwargs"] == {"enable_thinking": False}
     assert "chat_template_kwargs" not in seen[1]["body"] and "chat_template_kwargs" not in seen[2]["body"] and len(seen) == 3
+
+
+def test_final_answer_review_gets_one_more_round():
+    """Runner nhắc model khi câu kết thúc nói có lệnh chờ duyệt mà chưa gọi công cụ; model gọi công cụ ở vòng sau."""
+    p, seen = provider(completion("Lệnh rollback đang chờ duyệt."), completion(None, [tool_call("k8s__kubectl_write", '{"command": "rollout undo deploy/web"}')]),
+                       completion("Đã gửi lệnh để duyệt."))
+    calls = []
+
+    def call_tool(name, args):
+        calls.append(name)
+        return {"status": "pending"}
+    call_tool.review_answer = lambda text: "NHẮC" if not calls else None
+    out = p.run_agent("rollback", "", [{"tool": "k8s.kubectl_write", "description": "d", "input_schema": {"type": "object"}}], call_tool)
+    assert calls == ["k8s.kubectl_write"] and out["answer"].endswith("Đã gửi lệnh để duyệt.")
+    assert seen[1]["body"]["messages"][-1] == {"role": "user", "content": "NHẮC"}

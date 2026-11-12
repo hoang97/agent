@@ -2,6 +2,7 @@
   --bg: #ffffff; --panel: #ffffff; --side: #f6f7f9; --text: #1b2430; --muted: #5f6b7a; --line: #e2e6eb; --hover: #eceff3; --accent: #1f5fbf; --accent-text: #fff;
   --ok: #17693a; --ok-bg: #e2f4e8; --warn: #8a5a00; --warn-bg: #fdf1d6; --bad: #a12626; --bad-bg: #fbe4e4; --info-bg: #e5eefb; --code: #f1f3f6; --bubble: #eef1f5;
   --page: #f6f7f9; --shadow: 0 2px 10px rgba(20, 30, 45, .08);
+  --scroll: rgba(27, 36, 48, .14); --scroll-hover: rgba(27, 36, 48, .32);
   /* Màu series cho biểu đồ: thứ tự cố định, đã kiểm CVD/độ tương phản trên nền thẻ (#ffffff / #1d232b). */
   --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100; --series-5: #e87ba4; --series-6: #008300; --series-other: #9aa3ad;
 }
@@ -10,6 +11,7 @@
     --bg: #15191f; --panel: #1d232b; --side: #10141a; --text: #e6eaf0; --muted: #9aa6b4; --line: #2d3641; --hover: #252c35; --accent: #6ea4f4; --accent-text: #0c1420;
     --ok: #7ad69c; --ok-bg: #16331f; --warn: #eec26a; --warn-bg: #3a2c0e; --bad: #f29a9a; --bad-bg: #3d1a1a; --info-bg: #1b2d47; --code: #242c36; --bubble: #262e38;
     --page: #15191f; --shadow: 0 2px 12px rgba(0, 0, 0, .35);
+    --scroll: rgba(230, 234, 240, .12); --scroll-hover: rgba(230, 234, 240, .3);
     --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-5: #d55181; --series-6: #008300; --series-other: #6b7682;
   }
 }
@@ -96,7 +98,6 @@ header.top { display: flex; align-items: center; gap: 8px; padding: 8px 16px; mi
 .activity { margin-bottom: 8px; }
 .activity summary { padding: 3px 0; }
 .activity.running summary { color: var(--text); }
-.tool-row { padding: 6px 0 6px 12px; border-left: 2px solid var(--line); margin: 4px 0 4px 6px; font-size: 14px; }
 .tool-title { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .approval { border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; margin-bottom: 10px; font-size: 14px; }
 .approval.warn { border-color: var(--warn); background: var(--warn-bg); }
@@ -280,3 +281,74 @@ input.narrow { width: 70px; }
 .timeline { list-style: none; padding: 0; margin: 0; }
 .timeline li { padding: 3px 0; border-left: 2px solid var(--line); padding-left: 10px; }
 @media (max-width: 700px) { .incident-table { display: block; overflow-x: auto; } }
+
+.approval.done { opacity: .85; }
+.approval-why { margin: 4px 0 2px; font-weight: 500; }
+.approval-actions { display: grid; gap: 6px; margin-top: 8px; }
+.choice-list { display: grid; gap: 4px; }
+.choice { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: transparent; color: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+.choice:hover, .choice:focus-visible { border-color: var(--accent); background: var(--hover); }
+.choice.primary { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.choice.deny:hover, .choice.deny:focus-visible { border-color: var(--bad); color: var(--bad); }
+.question { border: 1px solid var(--accent); border-radius: 12px; padding: 10px 14px; margin: 10px 0; font-size: 14px; display: grid; gap: 10px; }
+.question.done { border-color: var(--line); opacity: .8; }
+.question-item { display: grid; gap: 6px; }
+.question-options { display: grid; gap: 6px; }
+.question .option { display: grid; gap: 2px; text-align: left; justify-items: start; background: transparent; color: inherit; border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+.question .option:hover:not(:disabled), .question .option.on { border-color: var(--accent); }
+.question .option.on { background: var(--code); }
+
+/* Dòng thời gian của một lượt: chữ và lệnh xen kẽ theo thứ tự đã xảy ra. */
+.flow { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }  /* minmax(0): dòng lệnh dài phải cắt bằng …, không kéo rộng cột */
+.flow > .prose { margin: 4px 0; }
+.tool-row { min-width: 0; font-size: 13.5px; border-left: 2px solid var(--line); margin: 0 0 0 4px; padding-left: 8px; }
+.tool-row.k-write { border-left-color: var(--warn); }
+.tool-row.k-danger { border-left-color: var(--bad); }
+.tool-line { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; text-align: left; background: transparent; color: inherit; border: 0; border-radius: 6px; padding: 3px 6px 3px 2px; }
+.tool-line:hover { background: var(--code); }
+.tool-line .icon { margin-left: auto; flex: none; transition: transform .12s; opacity: .6; }
+.tool-row.open > .tool-line .icon { transform: rotate(90deg); }
+.tool-icon { flex: none; width: 16px; text-align: center; font-weight: 600; color: var(--muted); }
+.tool-icon.s-ok, .tool-icon.s-approved { color: var(--ok); }
+.tool-icon.s-error, .tool-icon.s-invalid, .tool-icon.s-blocked, .tool-icon.s-denied { color: var(--bad); }
+.tool-icon.s-expired { color: var(--warn); }
+.tool-icon .spinner { width: 11px; height: 11px; }
+.tool-name { flex: none; font-weight: 500; }
+.tool-summary { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); background: none !important; padding: 0 !important; font: 12.5px ui-monospace, Consolas, monospace; }
+.tool-meta { flex: none; font-size: 12px; color: var(--muted); }
+.tool-note { font-size: 13px; color: var(--muted); padding: 0 0 4px 26px; }
+.tool-row.s-blocked .tool-note, .tool-row.s-invalid .tool-note, .tool-row.s-denied .tool-note, .tool-row.s-error .tool-note { color: var(--bad); overflow-wrap: anywhere; }
+.tool-detail { padding: 4px 0 8px 26px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }  /* như .flow: log dài cuộn trong khung, không kéo rộng cột */
+.tool-detail > *, .approval-args > *, .approval { min-width: 0; }
+.tool-detail[hidden] { display: none; }
+.tool-detail pre { margin: 0; max-height: 360px; overflow: auto; font-size: 12.5px; }
+.tool-output { white-space: pre; }  /* bảng của kubectl, SQL giữ cột thẳng, cuộn ngang trong khung */
+.tool-args { opacity: .85; }
+.result-table { overflow-x: auto; }
+.result-table table { font-size: 12.5px; }
+.result-table td, .result-table th { padding: 2px 8px; white-space: nowrap; max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
+.thread.focus .tool-row { display: none; }
+.live-status { min-height: 20px; margin-top: 4px; }
+
+/* Thẻ chờ duyệt: nổi bật, chọn được bằng bàn phím (1/2/3). */
+.approval.waiting { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; margin: 6px 0; }
+.approval.waiting:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.approval-head strong { font-weight: 600; }
+.approval-more summary { cursor: pointer; }
+.approval-more[open] { display: grid; gap: 4px; }
+.approval kbd { font: 11px ui-monospace, Consolas, monospace; border: 1px solid currentColor; border-radius: 4px; padding: 0 4px; opacity: .7; }
+
+.pending-bar { display: block; margin: 0 auto 6px; border-radius: 999px; padding: 5px 14px; font-size: 13px; background: var(--accent); color: var(--accent-text); }
+.pending-bar.hidden { display: none; }
+.focus-toggle { margin-left: 6px; }
+.dot-wait { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 6px; vertical-align: middle; }
+@media (prefers-reduced-motion: reduce) { .tool-line .icon { transition: none; } }
+
+/* Thanh cuộn mảnh, nhạt, nền trong suốt; đậm lên khi rê chuột vào vùng cuộn. Chrome 121+, Firefox dùng thuộc tính chuẩn;
+   ::-webkit-scrollbar chỉ còn cho Safari, vì trình duyệt đã nhận scrollbar-color thì bỏ qua pseudo-element. */
+* { scrollbar-width: thin; scrollbar-color: var(--scroll) transparent; }
+*:hover { scrollbar-color: var(--scroll-hover) transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
+:hover::-webkit-scrollbar-thumb { background-color: var(--scroll-hover); }

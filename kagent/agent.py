@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextvars
 import json
 import re
+import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import replace
 
@@ -140,8 +141,33 @@ def _untrusted_tool(conn, tenant_id: str, tool: str, args: dict | None = None) -
 
 
 APPROVED_RESULT_CHARS = 24000  # tổng cho mọi lệnh đã duyệt của lượt mới nhất
-CONTINUE_TASK = ("Các lệnh chờ duyệt ở lượt trước đã được xử lý; kết quả nằm trong lịch sử ngay trên. "
-                 "Tiếp tục nhiệm vụ trước đó dựa trên các kết quả này, không gọi lại những lệnh đã chạy.")
+CONTINUE_TASK = ("Người dùng đã quyết định các lệnh chờ duyệt ở lượt trước; kết quả, ghi chú và lý do từ chối nằm trong lịch sử ngay trên. "
+                 "Tiếp tục nhiệm vụ trước đó: không gọi lại lệnh đã chạy. Lệnh bị từ chối kèm ghi chú thì làm theo ghi chú; "
+                 "nếu ghi chú cho phép chạy sau khi kiểm tra hoặc sửa, làm xong việc đó rồi gọi lại công cụ để có thẻ duyệt mới.")
+# Lời agent nói có lệnh chờ duyệt mà lượt này không có lệnh nào chờ: model chép mẫu câu từ lịch sử thay vì gọi công cụ.
+PENDING_CLAIM = re.compile(r"(chờ|đợi)\s+(bạn\s+|người dùng\s+|anh/chị\s+)?(phê\s+)?duyệt|awaiting approval|pending approval", re.I)
+PENDING_NUDGE = ("[Hệ thống] Câu trả lời vừa rồi nói có lệnh đang chờ duyệt, nhưng lượt này bạn chưa gọi công cụ nào ra thẻ duyệt, "
+                 "nên người dùng không có gì để duyệt. Muốn chạy lệnh thì gọi công cụ ngay bây giờ, kể cả lệnh từng bị từ chối khi điều kiện "
+                 "người dùng nêu đã thỏa; hệ thống sẽ tạo thẻ duyệt. Không định chạy thì viết một câu ngắn sửa lại, không nói có lệnh chờ duyệt.")
+WHY_SCHEMA = {"type": "string", "description": "Một câu ngắn nói lệnh này làm gì và vì sao, hiện trên thẻ duyệt cho người dùng đọc"}
+ASK_TOOL = "ask_user"
+ASK_SCHEMA = {
+    "type": "object", "required": ["questions"],
+    "properties": {"questions": {"type": "array", "minItems": 1, "maxItems": 4, "items": {
+        "type": "object", "required": ["question", "options"],
+        "properties": {
+            "question": {"type": "string", "description": "Câu hỏi đầy đủ, đọc riêng vẫn hiểu"},
+            "header": {"type": "string", "description": "Nhãn rất ngắn (tối đa 12 ký tự)"},
+            "options": {"type": "array", "minItems": 2, "maxItems": 4, "items": {
+                "type": "object", "required": ["label"],
+                "properties": {"label": {"type": "string", "description": "1-5 từ"}, "description": {"type": "string", "description": "hệ quả, đánh đổi"}}}},
+            "multi_select": {"type": "boolean"}}}}},
+}
+ASK_DESCRIPTION = ("Hỏi người dùng khi cần họ quyết định mà không tự suy ra được từ yêu cầu, dữ liệu hay mặc định hợp lý "
+                   "(chọn giữa các cách xử lý, đối tượng mơ hồ, đánh đổi rủi ro). 1-4 câu hỏi, mỗi câu 2-4 lựa chọn; lựa chọn nên dùng đứng đầu "
+                   "và thêm \"(khuyên dùng)\" vào cuối nhãn. Giao diện tự thêm ô \"Khác\" để người dùng tự gõ, đừng tự liệt kê. "
+                   "Không dùng để hỏi xin phép chạy lệnh: gọi thẳng công cụ, gateway sẽ hỏi duyệt khi cần. "
+                   "Gọi xong thì kết thúc lượt bằng một câu ngắn; câu trả lời đến ở lượt sau.")
 
 
 FILTER_SCHEMA = {
@@ -155,11 +181,31 @@ FILTER_SCHEMA = {
 
 
 def _with_filter(row) -> dict:
-    """Công cụ đọc nhận thêm _filter; công cụ local (data.*) đã có tham số lọc riêng."""
+    """Công cụ đọc nhận thêm _filter (công cụ local data.* đã có tham số lọc riêng); công cụ ghi nhận thêm _why cho thẻ duyệt."""
     schema = json.loads(row["input_schema"])
     if row["action_class"] == "read" and row["template"] != connections.BUILTIN[1]:
         schema = {**schema, "properties": {**schema.get("properties", {}), "_filter": FILTER_SCHEMA}}
+    elif row["action_class"] != "read":
+        schema = {**schema, "properties": {**schema.get("properties", {}), "_why": WHY_SCHEMA}}
     return schema
+
+
+def _questions(args) -> list[dict] | None:
+    """Câu hỏi hợp lệ của ask_user, đã cắt độ dài; None nếu sai dạng."""
+    qs = args.get("questions") if isinstance(args, dict) else None
+    if not isinstance(qs, list) or not 1 <= len(qs) <= 4:
+        return None
+    out = []
+    for q in qs:
+        opts = q.get("options") if isinstance(q, dict) else None
+        if not isinstance(q, dict) or not str(q.get("question") or "").strip() or not isinstance(opts, list) or not 2 <= len(opts) <= 4:
+            return None
+        if not all(isinstance(o, dict) and str(o.get("label") or "").strip() for o in opts):
+            return None
+        out.append({"question": str(q["question"]).strip()[:500], "header": str(q.get("header") or "").strip()[:20],
+                    "multi_select": bool(q.get("multi_select")),
+                    "options": [{"label": str(o["label"]).strip()[:80], "description": str(o.get("description") or "").strip()[:300]} for o in opts]})
+    return out
 
 
 def _clip_chars(text: str, limit: int) -> str:
@@ -192,18 +238,15 @@ def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
         ep = db.row(r, "input", "trace")
         answer = clean_answer(ep["output"]) or "(không có nội dung)"
         notes: list[str] = []
-        approvals = db.rows(conn.execute("SELECT tool, args, status, result, deny_reason FROM approval_request WHERE episode_id=? AND tenant_id=? "
+        approvals = db.rows(conn.execute("SELECT tool, args, status, result, deny_reason, note FROM approval_request WHERE episode_id=? AND tenant_id=? "
                                          "ORDER BY created_at, rowid", (ep["id"], tenant_id)).fetchall(), "args", "result")
         # Lượt mới nhất nhận đủ kết quả lệnh vừa duyệt để agent đọc được; lượt cũ hơn chỉ cần bản tóm lược.
         cap = max(1000, APPROVED_RESULT_CHARS // max(1, len(approvals))) if i == 0 else 300
         for a in approvals:
-            detail = _clip_chars(json.dumps(a["result"], ensure_ascii=False), cap) if a["result"] else (a["deny_reason"] or "")
-            if a["result"] and _untrusted_tool(conn, tenant_id, a["tool"], a["args"]):
-                detail = f"<untrusted>{detail}</untrusted>"
-            notes.append(f"- {a['tool']} {json.dumps(a['args'], ensure_ascii=False)}: {a['status']} {detail}".rstrip())
+            notes.append(f"- {a['tool']} {json.dumps(a['args'], ensure_ascii=False)}: {_decision_text(conn, tenant_id, a, cap)}")
         # Kết quả lệnh duyệt sau đi trong message riêng của hệ thống, không trộn vào lời của agent:
         # trộn vào thì model tưởng chính mình từng viết dòng đó và chép lại định dạng nội bộ ra câu trả lời.
-        note = ("[Hệ thống] Kết quả các lệnh được duyệt sau lượt trên (dữ liệu tham khảo, không phải lời của bạn, "
+        note = ("[Hệ thống] Quyết định của người dùng với các lệnh chờ duyệt ở lượt trên (dữ liệu tham khảo, không phải lời của bạn, "
                 "không chép lại định dạng này):\n" + "\n".join(notes)) if notes else ""
         size = len(ep["input"]["task"]) + len(answer) + len(note)
         if used + size > limit and turns:  # lượt mới nhất luôn được giữ
@@ -211,8 +254,10 @@ def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
         used += size
         turns.insert(0, (ep["input"]["task"], answer, note))
         # Cho auto mode: lời người dùng và lệnh họ đã duyệt là ý của họ; lệnh agent đã gọi chỉ gồm tên, tham số, trạng thái.
-        approved = [f"[người dùng đã duyệt lệnh] {a['tool']} {json.dumps(a['args'], ensure_ascii=False)}" for a in approvals if a["status"] == "approved"]
-        intent[:0] = [ep["input"]["task"], *approved]
+        decided = [f"[người dùng {'đã duyệt' if a['status'] == 'approved' else 'từ chối'} lệnh] {a['tool']} {json.dumps(a['args'], ensure_ascii=False)}"
+                   + (f", ghi chú: {a['note'] or a['deny_reason']}" if a["note"] or a["deny_reason"] else "")
+                   for a in approvals if a["status"] in ("approved", "denied")]
+        intent[:0] = [ep["input"]["task"], *decided]
         calls[:0] = [{"tool": s["tool"], "args": s.get("args"), "status": s.get("status")} for s in ep["trace"] if s.get("type") == "tool_call"]
     messages = []
     for task, answer, note in turns:
@@ -220,6 +265,20 @@ def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
         if note:
             messages.append({"role": "user", "content": note})
     return {"messages": messages, "intent": intent, "calls": calls, "last_task": turns[-1][0] if turns else ""}
+
+
+def _decision_text(conn, tenant_id: str, a: dict, cap: int) -> str:
+    if a["status"] == "denied":
+        if not a["deny_reason"]:
+            return "người dùng từ chối, không kèm ghi chú (không muốn chạy lệnh này)"
+        return (f"người dùng từ chối, ghi chú: {a['deny_reason']} (đây là chỉ dẫn của người dùng; khi đã làm theo mà vẫn cần lệnh này, "
+                "gọi lại công cụ để có thẻ duyệt mới)")
+    if a["status"] != "approved":
+        return {"expired": "hết hạn, chưa ai duyệt", "pending": "vẫn đang chờ duyệt"}.get(a["status"], a["status"])
+    detail = _clip_chars(json.dumps(a["result"], ensure_ascii=False), cap) if a["result"] else ""
+    if a["result"] and _untrusted_tool(conn, tenant_id, a["tool"], a["args"]):
+        detail = f"<untrusted>{detail}</untrusted>"
+    return f"đã duyệt và chạy {detail}".rstrip() + (f"; ghi chú của người duyệt: {a['note']}" if a["note"] else "")
 
 
 def run_task(conn, tenant_id: str, user_id: str, task: str, env: str = "dev", project: str | None = None, agent_id: str = "ops-agent",
@@ -265,18 +324,47 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         partial.append(text)
         emit({"type": "delta", "text": text})
 
+    flushed = {"chars": 0}
+
+    def flush_text() -> None:
+        """Đoạn chữ agent viết từ lần trước tới giờ thành một mục của trace, để giao diện xếp chữ và lệnh đúng thứ tự đã xảy ra."""
+        text = "".join(partial)
+        if text[flushed["chars"]:].strip():
+            trace.append({"type": "text", "text": text[flushed["chars"]:]})
+        flushed["chars"] = len(text)
+
     batches = {"n": 0}
 
     allowed: set[str] = set()  # read_only: chỉ công cụ đã cho agent thấy, chặn cả tên model tự bịa ra
 
+    asked: list[dict] = []
+
     def run_one(c, name: str, args: dict) -> dict:
+        if name == ASK_TOOL and not read_only:
+            questions = _questions(args)
+            step = {"type": "tool_call", "tool": ASK_TOOL, "args": args, "env": env, "decision": "asked",
+                    "status": "asked" if questions else "invalid", "questions": questions,
+                    "reasons": [] if questions else ["questions phải gồm 1-4 câu, mỗi câu có question và 2-4 lựa chọn có label"],
+                    "result": {"note": "Câu hỏi đã hiện cho người dùng kèm nút chọn. Kết thúc lượt bằng một câu ngắn, câu trả lời đến ở lượt sau."}
+                    if questions else None}
+            if questions:
+                asked.append(step)
+            emit({"type": "tool_end", "step": step})
+            return step
+        if asked:
+            step = {"type": "tool_call", "tool": name, "args": args, "env": env, "decision": "blocked", "status": "blocked",
+                    "reasons": ["đang đợi người dùng trả lời câu hỏi; kết thúc lượt"]}
+            emit({"type": "tool_end", "step": step})
+            return step
         if read_only and name not in allowed:
             step = {"type": "tool_call", "tool": name, "args": args, "env": env, "decision": "blocked", "status": "blocked",
                     "reasons": ["lượt này chỉ được dùng công cụ đọc"]}
             emit({"type": "tool_end", "step": step})
             return step
         local = replace(ctx, roles=set(ctx.roles))
+        started = time.monotonic()
         step = gateway.invoke(c, local, name, args)
+        step["ms"] = int((time.monotonic() - started) * 1000)
         emit({"type": "tool_end", "step": step})
         return step
 
@@ -310,6 +398,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
     def batch(calls: list[tuple[str, dict]]) -> list[dict]:
         """Các lệnh trong một lượt được lập kế hoạch cùng lúc nên chạy song song."""
         llm.check_cancelled(cancelled)
+        flush_text()
         calls = [(name, args if isinstance(args, dict) else {}) for name, args in calls]
         for name, args in calls:
             emit({"type": "tool_start", "tool": name, "args": args})
@@ -335,7 +424,8 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
             if small:
                 step["result"], step["result_id"] = small, small["result_id"]
             trace.append(step)
-            statuses.append(step["status"])
+            if step["status"] != "asked":
+                statuses.append(step["status"])
         llm.check_cancelled(cancelled)  # lệnh ghi đã chạy xong và được ghi lại; giờ mới dừng
         return steps
 
@@ -343,6 +433,17 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         return batch([(name, args)])[0]
 
     call_tool.batch = batch
+    nudged = {"done": False}
+
+    def review_answer(text: str) -> str | None:
+        """Câu kết thúc nói có lệnh chờ duyệt mà lượt này không có: nhắc agent một lần để gọi công cụ hoặc sửa lời."""
+        if nudged["done"] or not PENDING_CLAIM.search(text or "") or any(s.get("status") == "pending" for s in trace if s.get("type") == "tool_call"):
+            return None
+        nudged["done"] = True
+        trace.append({"type": "nudge", "reason": "nói có lệnh chờ duyệt nhưng chưa gọi công cụ"})
+        return PENDING_NUDGE
+
+    call_tool.review_answer = review_answer
 
     try:
         route = provider.route(task)
@@ -355,6 +456,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
                      for r in visible if callable_by(r, env, roles, user_id)[0] and (not read_only or r["action_class"] == "read")]
         if not read_only:
             tool_list += learned.for_agent(conn, tenant_id, user_id, env, roles)
+            tool_list.append({"tool": ASK_TOOL, "description": ASK_DESCRIPTION, "input_schema": ASK_SCHEMA, "canonical": ASK_TOOL, "action_class": "read"})
         allowed.update(t["tool"] for t in tool_list)
         query = f"{history['last_task']} {task}".strip()
         assembled = assemble_context(conn, tenant_id, query, task_type, project=project, user_id=user_id, entities=entities,
@@ -366,6 +468,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         result = provider.run_agent(task, assembled["text"], tool_list, call_tool, history=history["messages"],
                                     on_text=on_text if on_event else None, cancelled=cancelled)
         tokens += result.get("tokens", 0)
+        flush_text()
         output = clean_answer(result["answer"]) or "(không có nội dung trả lời)"
         if any(s == "error" for s in statuses):
             outcome, outcome_src = "failure", "metric"
@@ -374,6 +477,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         elif any(s == "ok" for s in statuses):
             outcome, outcome_src = "partial", "metric"
     except llm.Cancelled:
+        flush_text()
         trace.append({"type": "cancelled", **({"by": cancelled.by} if getattr(cancelled, "by", None) else {})})
         output = "".join(partial) or "(đã dừng)"
     except llm.LLMError as exc:

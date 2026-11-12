@@ -116,53 +116,201 @@ function renderMarkdown(text) {
   return frag;
 }
 
-function activityView(steps, running) {
-  running = running || [];
-  if (!steps.length && !running.length) return null;
-  const parallel = steps.filter((s) => s.parallel).length;
-  const summary = running.length ? busy(`Đang chạy ${running.join(", ")}…`)
-    : `Đã dùng ${steps.length} công cụ` + (parallel ? ` · ${parallel} chạy song song` : "");
-  const rows = steps.map((s) => h("div", { class: "tool-row" },
-    h("div", { class: "tool-title" }, h("code", {}, s.tool), s.risk_tier && h("span", { class: "badge" }, s.risk_tier), badge(s.status),
-      s.parallel && h("span", { class: "badge info" }, "song song"), s.learned && h("span", { class: "badge info" }, "công cụ học được"),
-      s.untrusted && h("span", { class: "badge warn" }, "nội dung ngoài")),
-    s.reasons && s.reasons.length > 0 && h("div", { class: "small" }, s.reasons.join("; ")),
-    s.steps && h("div", { class: "sub-steps" }, s.steps.map((sub) => h("div", { class: "small" }, "↳ ", h("code", {}, sub.tool), " ", badge(sub.status)))),
-    h("pre", {}, JSON.stringify(s.result || s.args, null, 1))));
-  return h("details", { class: "activity" + (running ? " running" : "") }, h("summary", {}, icon("chevron"), summary), rows);
+// ---------- hành động của agent: dòng gọn, xếp xen kẽ với chữ theo thứ tự đã xảy ra (như Claude Code trên VS Code) ----------
+
+const SUMMARY_KEYS = ["command", "query", "expr", "sql", "url", "path", "matchers", "index", "name"];
+const STATUS_ICON = { ok: "✓", error: "✕", blocked: "⊘", invalid: "✕", denied: "✕", pending: "…", asked: "?", running: "" };
+
+function shortTool(tool) { return String(tool || "").split(".").pop(); }
+
+// Một dòng tóm tắt tham số: lệnh, query, URL... thay cho JSON.
+function argSummary(args) {
+  if (!args || typeof args !== "object") return "";
+  const key = SUMMARY_KEYS.find((k) => typeof args[k] === "string" && args[k].trim());
+  const main = key ? args[key] : Object.values(args).find((v) => typeof v === "string") || "";
+  const extra = args.service ? `${args.service} ${args.method || "GET"} ` : "";
+  return (extra + main).replace(/\s+/g, " ").trim();
 }
 
-function approvalCard(a, onDecide, streaming) {
+// CSS cắt dòng dài bằng …; di chuột vào để xem đủ lệnh.
+function summaryEl(text) {
+  return h("code", { class: "tool-summary", title: text || "" }, text || "");
+}
+
+function fmtMs(ms) { return ms === undefined || ms === null ? "" : ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`; }
+
+// Kết quả: chữ dài cắt 20 dòng, danh sách object thành bảng nhỏ, còn lại JSON gọn.
+function resultView(result) {
+  if (result === undefined || result === null) return null;
+  const text = typeof result === "string" ? result : typeof result.stdout === "string" ? result.stdout : typeof result.text === "string" ? result.text : null;
+  if (text !== null) return clippedPre(text, result.stderr);
+  const list = Array.isArray(result) ? result : Object.values(result).find((v) => Array.isArray(v) && v.length && v.every((x) => x && typeof x === "object" && !Array.isArray(x)));
+  if (list && list.length) {
+    const cols = [...new Set(list.slice(0, 20).flatMap((r) => Object.keys(r)))].slice(0, 6);
+    const cell = (v) => (v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v)).slice(0, 120);
+    return h("div", { class: "result-table" },
+      h("table", {}, h("thead", {}, h("tr", {}, cols.map((c) => h("th", {}, c)))), h("tbody", {}, list.slice(0, 20).map((r) => h("tr", {}, cols.map((c) => h("td", {}, cell(r[c]))))))),
+      list.length > 20 && h("div", { class: "small muted" }, `… còn ${list.length - 20} dòng`),
+      h("details", { class: "raw" }, h("summary", { class: "small muted" }, "JSON đầy đủ"), h("pre", {}, JSON.stringify(result, null, 1))));
+  }
+  return clippedPre(JSON.stringify(result, null, 1));
+}
+
+function clippedPre(text, stderr) {
+  const lines = String(text).split("\n");
+  const pre = h("pre", { class: "tool-output" }, lines.slice(0, 20).join("\n"));
+  const more = lines.length > 20 && h("button", { type: "button", class: "ghost small-btn", onclick: (e) => { pre.textContent = text; e.currentTarget.remove(); } }, `Xem đủ ${lines.length} dòng`);
+  return h("div", {}, pre, more, stderr && stderr.trim() && h("pre", { class: "tool-output warn-text" }, stderr.trim().split("\n").slice(-10).join("\n")));
+}
+
+// Dòng của một lệnh: ký hiệu trạng thái, tên công cụ, tóm tắt, thời gian; bấm để mở kết quả.
+function toolRow(step) {
+  const status = step.status || "running";
+  const kind = step.action_class && step.action_class !== "read" ? (step.action_class === "write" ? "k-write" : "k-danger") : "k-read";
+  const stopped = status === "blocked" || status === "invalid";
+  const line = h("button", { type: "button", class: "tool-line", "aria-expanded": "false" },
+    h("span", { class: "tool-icon s-" + status, "aria-label": LABEL[status] || status }, status === "running" ? h("span", { class: "spinner" }) : STATUS_ICON[status] || "•"),
+    h("span", { class: "tool-name" }, shortTool(step.tool)),
+    summaryEl(argSummary(step.args)),
+    h("span", { class: "tool-meta" }, status === "running" ? h("span", { class: "elapsed" }, "0s") : fmtMs(step.ms)),
+    step.untrusted && h("span", { class: "badge warn", title: "Kết quả chứa nội dung người ngoài ghi được (log, trang web...)" }, "nội dung ngoài"),
+    status !== "running" && icon("chevron"));
+  const detail = h("div", { class: "tool-detail", hidden: "" });
+  const row = h("div", { class: `tool-row ${kind} s-${status}` }, line,
+    stopped && step.reasons && step.reasons.length > 0 && h("div", { class: "tool-note" }, step.reasons.join("; ")),
+    status === "error" && step.result && step.result.error && h("div", { class: "tool-note" }, String(step.result.error).split("\n")[0].slice(0, 300)),
+    detail);
+  let filled = false;
+  line.addEventListener("click", () => {
+    if (status === "running") return;
+    if (!filled) {
+      filled = true;
+      appendKids(detail, [h("div", { class: "small muted" }, `${step.tool} · ${step.env || ""}${step.risk_tier ? " · " + step.risk_tier : ""}${step.parallel ? " · chạy song song" : ""}`),
+        h("pre", { class: "tool-args" }, JSON.stringify(step.args, null, 1)),
+        !stopped && step.reasons && step.reasons.length > 0 && h("div", { class: "small muted" }, step.reasons.join("; ")),
+        step.steps && h("div", { class: "sub-steps" }, step.steps.map((sub) => h("div", { class: "small" }, "↳ ", h("code", {}, sub.tool), " ", badge(sub.status)))),
+        resultView(step.result)]);
+    }
+    detail.hidden = !detail.hidden;
+    line.setAttribute("aria-expanded", String(!detail.hidden));
+    row.classList.toggle("open", !detail.hidden);
+  });
+  return row;
+}
+
+// Phạm vi của "Cho phép trong 1 giờ" phải hiện rõ trên nút, như Claude Code: người dùng thấy hết những gì quyền đó sẽ cho phép.
+function grantScope(a) {
+  const cmd = a.args && typeof a.args.command === "string" ? a.args.command : "";
+  const m = cmd.match(/(?:^|\s)(?:-n|--namespace)[= ](\S+)/);
+  const ns = (a.args && a.args.namespace) || (m && m[1]);
+  return `${shortTool(a.tool)} ở ${a.env}${ns ? `, namespace ${ns}` : ""}`;
+}
+
+// Lệnh kiểu kubectl hiện thành một dòng shell; tham số khác hiện theo từng trường.
+function commandView(a) {
+  const args = a.args || {};
+  if (typeof args.command === "string") {
+    const rest = Object.entries(args).filter(([k]) => k !== "command");
+    return h("div", { class: "approval-args" }, h("pre", { class: "approval-code" }, "$ " + args.command),
+      rest.map(([k, v]) => h("div", {}, h("span", { class: "muted" }, k + ": "), typeof v === "string" && v.includes("\n") ? h("pre", { class: "approval-code" }, v) : h("code", {}, typeof v === "string" ? v : JSON.stringify(v)))));
+  }
+  const entries = Object.entries(args);
+  if (!entries.length) return null;
+  return h("div", { class: "approval-args" }, entries.map(([k, v]) => typeof v === "string" && v.includes("\n")
+    ? h("div", {}, h("span", { class: "muted" }, k + ":"), h("pre", { class: "approval-code" }, v))  // code của data.script: giữ xuống dòng để người duyệt đọc được
+    : h("div", {}, h("span", { class: "muted" }, k + ": "), h("code", {}, typeof v === "string" ? v : JSON.stringify(v)))));
+}
+
+// Thẻ duyệt: chờ duyệt thì đầy đủ (mô tả, lệnh, nút, ghi chú, chi tiết gập); đã quyết thì gọn như một dòng lệnh.
+function approvalCard(a, onDecide, streaming, context) {
   const done = a.status !== "pending";
   const result = a.result && a.result.result;
   const failed = a.result && a.result.status === "error";
-  const heading = failed ? "Lệnh đã duyệt nhưng chạy lỗi" : done ? `Lệnh ${LABEL[a.status] || a.status}` : "Lệnh đang chờ duyệt";
-  return h("div", { class: "approval " + (failed ? "bad" : CLASS[a.status] || "") },
-    h("div", { class: "approval-head" }, h("strong", {}, heading), badge(failed ? "error" : a.status)),
-    h("div", {}, h("code", {}, a.tool), ` ở ${a.env} · ${a.risk_tier}`),
-    a.args && Object.keys(a.args).length > 0 && h("div", { class: "approval-args" },
-      Object.entries(a.args).map(([k, v]) => typeof v === "string" && v.includes("\n")
-        ? h("div", {}, h("span", { class: "muted" }, k + ":"), h("pre", { class: "approval-code" }, v))  // code của data.script: giữ xuống dòng để người duyệt đọc được
-        : h("div", {}, h("span", { class: "muted" }, k + ": "), h("code", {}, typeof v === "string" ? v : JSON.stringify(v))))),
-    a.reasons.length > 0 && h("div", { class: "small" }, a.reasons.join("; ")),
-    a.status === "pending" && a.dry_run && h("div", { class: "small" + (a.dry_run.error ? " warn-text" : "") }, (a.dry_run.error ? "Chạy thử báo lỗi, lệnh nhiều khả năng sẽ thất bại: " : "Chạy thử: ") + (a.dry_run.error || JSON.stringify(a.dry_run))),
-    a.status === "pending" && a.rollback_hint && h("div", { class: "small" }, "Cách hoàn tác: " + a.rollback_hint),
-    a.status === "pending" && (streaming ? h("div", { class: "small" }, "Nút duyệt sẽ hiện khi agent trả lời xong.")
-      : a.can_decide && onDecide ? approvalActions(a, onDecide)
-      : h("div", { class: "small" }, `Đã có ${a.decided_by.length}/${a.required_approvals} người duyệt. Đang chờ người có quyền duyệt tại trang Duyệt lệnh.`)),
-    a.deny_reason && h("div", { class: "small" }, "Lý do từ chối: " + a.deny_reason),
-    result && h("details", { class: "approval-result" }, h("summary", {}, "Kết quả"), h("pre", {}, JSON.stringify(result, null, 1))));
+  if (done) {
+    const icon_ = failed ? "✕" : a.status === "approved" ? "✓" : a.status === "denied" ? "✕" : "…";
+    const head = failed ? "Đã duyệt nhưng chạy lỗi" : a.status === "approved" ? "Đã duyệt và chạy" : a.status === "denied" ? "Bạn đã từ chối" : "Hết hạn, chưa ai duyệt";
+    const detail = h("div", { class: "tool-detail", hidden: "" }, commandView(a), result && resultView(result));
+    const line = h("button", { type: "button", class: "tool-line" }, h("span", { class: "tool-icon s-" + (failed ? "error" : a.status) }, icon_),
+      h("span", { class: "tool-name" }, head), summaryEl(a.why || argSummary(a.args)), icon("chevron"));
+    line.addEventListener("click", () => { detail.hidden = !detail.hidden; });
+    return h("div", { class: `tool-row decided s-${failed ? "error" : a.status}` }, line,
+      a.status === "denied" && h("div", { class: "tool-note" }, a.deny_reason ? "Ghi chú cho agent: " + a.deny_reason : "Không kèm ghi chú, agent dừng ở đây."),
+      a.note && h("div", { class: "tool-note" }, "Ghi chú cho agent: " + a.note), detail);
+  }
+  const dryError = a.dry_run && a.dry_run.error;
+  const details = h("details", { class: "approval-more", open: dryError ? "" : null }, h("summary", { class: "small muted" }, dryError ? "Chạy thử báo lỗi" : "Chi tiết"),
+    h("div", { class: "small muted" }, `${a.tool} · ${a.env} · ${a.risk_tier}`),
+    a.reasons.length > 0 && h("div", { class: "small" }, "Cần duyệt vì: " + a.reasons.join("; ")),
+    a.dry_run && h("div", { class: "small" + (dryError ? " warn-text" : "") }, (dryError ? "Lệnh nhiều khả năng sẽ thất bại: " : "Chạy thử: ") + (dryError || JSON.stringify(a.dry_run))),
+    a.rollback_hint && h("div", { class: "small" }, "Cách hoàn tác: " + a.rollback_hint));
+  const decidable = !streaming && a.can_decide && onDecide;
+  const card = h("div", { class: "approval" + (decidable ? " waiting" : ""), tabindex: decidable ? "0" : null, "data-approval": a.id, "aria-label": "Lệnh chờ duyệt: " + (a.why || a.tool) },
+    h("div", { class: "approval-head" }, h("strong", {}, a.why || `Agent muốn chạy ${shortTool(a.tool)}`), h("span", { class: "badge " + (a.risk_tier >= "R3" ? "bad" : "warn") }, a.risk_tier)),
+    context, commandView(a),
+    streaming ? h("div", { class: "small muted" }, "Nút duyệt sẽ hiện khi agent trả lời xong.")
+      : decidable ? approvalActions(a, onDecide)
+      : h("div", { class: "small" }, `Đã có ${a.decided_by.length}/${a.required_approvals} người duyệt. Đang chờ người có quyền duyệt.`),
+    details);
+  if (decidable) {
+    // Như Claude Code: 1 chạy, 2 chạy và cho phép trong 1 giờ, 3 từ chối; chỉ khi đang chọn thẻ, không phải khi gõ ghi chú.
+    card.addEventListener("keydown", (e) => {
+      if (e.target !== card) return;
+      const action = { 1: "approve_once", 2: "approve_session", 3: "deny" }[e.key];
+      if (action) { e.preventDefault(); card.querySelector(`[data-action="${action}"]`).click(); }
+    });
+  }
+  return card;
 }
 
 function approvalActions(a, onDecide) {
-  const reason = h("input", { placeholder: "Lý do (khi từ chối)", "aria-label": "Lý do từ chối", class: "wide" });
-  const act = (action) => guard(async () => {
-    if (action === "deny" && !reason.value.trim()) throw new Error("Hãy nêu lý do từ chối để agent học");
-    await onDecide(a, action, reason.value.trim() || null);
+  const note = h("input", { placeholder: "Ghi chú cho agent (tùy chọn)", "aria-label": "Ghi chú cho agent", class: "wide" });
+  const act = (action) => guard(async () => { await onDecide(a, action, note.value.trim() || null); });
+  note.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); act(note.value.trim() ? "deny" : "approve_once")(e); } });
+  return h("div", { class: "approval-actions" },
+    h("div", { class: "choice-list", role: "group", "aria-label": "Quyết định" },
+      h("button", { type: "button", class: "choice primary", "data-action": "approve_once", onclick: act("approve_once") }, h("kbd", {}, "1"), "Chạy"),
+      h("button", { type: "button", class: "choice", "data-action": "approve_session", onclick: act("approve_session") }, h("kbd", {}, "2"), `Chạy, và cho phép ${grantScope(a)} trong 1 giờ`),
+      h("button", { type: "button", class: "choice deny", "data-action": "deny", onclick: act("deny") }, h("kbd", {}, "3"), "Từ chối")),
+    note,
+    h("div", { class: "small muted" }, "Từ chối kèm ghi chú thì agent làm tiếp theo ghi chú; không ghi chú thì agent dừng. Chạy kèm ghi chú thì agent nhận ghi chú sau kết quả."));
+}
+
+// Dựng các mục của một lượt theo thứ tự: chữ, dòng lệnh, thẻ duyệt, câu hỏi. Lượt cũ chưa lưu thứ tự thì lệnh trước, chữ sau.
+function timelineItems(m) {
+  if (m.timeline) return m.timeline;
+  return [...m.steps.map((_, i) => ({ step: i })), ...(m.output ? [{ text: m.output }] : [])];
+}
+
+// Câu hỏi của agent (công cụ ask_user), như AskUserQuestion của Claude Code: chọn nút, hoặc tự gõ ở ô "Khác".
+function questionCard(step, answerable, onAnswer) {
+  const picks = step.questions.map(() => new Set());
+  const others = step.questions.map(() => h("input", { placeholder: "Khác…", "aria-label": "Câu trả lời khác", class: "wide", disabled: !answerable }));
+  const submit = guard(async () => {
+    const lines = step.questions.map((q, i) => {
+      const chosen = [...picks[i], ...(others[i].value.trim() ? [others[i].value.trim()] : [])];
+      return chosen.length ? `${q.header || q.question}: ${chosen.join(", ")}` : null;
+    });
+    if (lines.some((l) => l === null)) throw new Error("Hãy trả lời mọi câu hỏi");
+    await onAnswer(lines.length === 1 ? lines[0] : lines.map((l) => "- " + l).join("\n"));
   });
-  return h("div", { class: "row" }, h("button", { type: "button", onclick: act("approve_once") }, "Chạy lệnh"),
-    h("button", { type: "button", class: "ghost", onclick: act("approve_session"), title: "Cùng công cụ và namespace, trong 1 giờ" }, "Cho phép trong 1 giờ"),
-    reason, h("button", { type: "button", class: "danger", onclick: act("deny") }, "Từ chối"));
+  const single = step.questions.length === 1 && !step.questions[0].multi_select;
+  const blocks = step.questions.map((q, i) => h("div", { class: "question-item" },
+    h("div", {}, q.header && h("span", { class: "badge info" }, q.header), " ", h("strong", {}, q.question)),
+    h("div", { class: "question-options" }, q.options.map((o) => {
+      const btn = h("button", { type: "button", class: "option", disabled: !answerable, title: o.description || "" },
+        h("span", {}, o.label), o.description && h("span", { class: "small muted" }, o.description));
+      btn.addEventListener("click", (e) => {
+        if (single) { picks[i] = new Set([o.label]); others[i].value = ""; submit(e); return; }
+        if (!q.multi_select) { picks[i].clear(); btn.parentElement.querySelectorAll(".option").forEach((b) => b.classList.remove("on")); }
+        if (picks[i].has(o.label)) { picks[i].delete(o.label); btn.classList.remove("on"); } else { picks[i].add(o.label); btn.classList.add("on"); }
+      });
+      return btn;
+    })),
+    others[i]));
+  if (single) others[0].addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing && others[0].value.trim()) { e.preventDefault(); submit(e); } });
+  return h("div", { class: "question" + (answerable ? "" : " done") }, h("div", { class: "approval-head" }, h("strong", {}, answerable ? "Agent hỏi bạn" : "Agent đã hỏi")),
+    blocks, answerable && !single && h("div", { class: "row" }, h("button", { type: "button", onclick: submit }, "Gửi trả lời")),
+    answerable && single && h("div", { class: "small muted" }, "Bấm một lựa chọn, hoặc gõ câu trả lời khác rồi Enter."));
 }
 
 function chatView(main) {
@@ -179,6 +327,36 @@ function chatView(main) {
   const blocks = new Map();
   let lastTask = null;
   let activeRun = null;
+
+  // Thanh "đang chờ bạn" trên ô nhập khi thẻ duyệt hay câu hỏi đã trôi khỏi màn hình; bấm để tới đó.
+  const pendingBar = h("button", { type: "button", class: "pending-bar hidden" });
+  const waitingEls = () => [...thread.querySelectorAll(".approval.waiting, .question:not(.done)")];
+  pendingBar.addEventListener("click", () => {
+    const el = waitingEls()[0];
+    if (!el) return;
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    el.focus({ preventScroll: true });
+  });
+  function updatePending() {
+    const els = waitingEls();
+    const box = scroller.getBoundingClientRect();
+    const visible = els.some((el) => { const r = el.getBoundingClientRect(); return r.bottom > box.top && r.top < box.bottom; });
+    const approvals = els.filter((el) => el.classList.contains("approval")).length;
+    pendingBar.textContent = approvals ? `${approvals} lệnh đang chờ bạn duyệt · Xem` : "Agent đang hỏi bạn · Xem";
+    pendingBar.classList.toggle("hidden", !els.length || visible);
+  }
+  scroller.addEventListener("scroll", () => requestAnimationFrame(updatePending));
+
+  // Focus view: ẩn các dòng lệnh, chỉ giữ chữ, thẻ chờ duyệt và câu hỏi. Mỗi người tự chọn, được nhớ lại.
+  const focusBtn = h("button", { type: "button", class: "ghost small-btn focus-toggle" });
+  const syncFocus = (on) => {
+    thread.classList.toggle("focus", on);
+    focusBtn.textContent = on ? "Hiện hành động" : "Ẩn hành động";
+    focusBtn.setAttribute("aria-pressed", String(on));
+    focusBtn.title = on ? "Hiện các lệnh agent đã chạy" : "Chỉ giữ câu trả lời, thẻ chờ duyệt và câu hỏi";
+  };
+  syncFocus(Boolean(store.get("focusView", false)));
+  focusBtn.addEventListener("click", () => { const on = !thread.classList.contains("focus"); store.set("focusView", on || null); syncFocus(on); });
 
   const input = h("textarea", { rows: 1, placeholder: "Nhắn cho agent…", "aria-label": "Tin nhắn" });
   const env = h("select", { "aria-label": "Môi trường", title: "Môi trường chạy công cụ" }, ["dev", "staging", "prod"].map((e) => h("option", { selected: e === state.env }, e)));
@@ -207,7 +385,7 @@ function chatView(main) {
   }
 
   function continuationNote() {
-    return h("div", { class: "continuation-note small" }, "↻ Agent tiếp tục với kết quả các lệnh vừa duyệt");
+    return h("div", { class: "continuation-note small" }, "↻ Agent làm tiếp theo quyết định của bạn");
   }
 
   function actionsRow(m) {
@@ -254,26 +432,35 @@ function chatView(main) {
   }
 
   function assistantBlock(m) {
-    const body = h("div", { class: "prose" });
-    if (m.error) body.append(h("div", { class: "msg-error" }, m.output));
-    else body.append(renderMarkdown(m.output || ""));
+    const byId = new Map(m.approvals.map((a) => [a.id, a]));
+    const latest = m.id === latestId();
+    const flow = h("div", { class: "flow" });
+    for (const item of timelineItems(m)) {
+      if (item.text !== undefined) { flow.append(h("div", { class: "prose" }, renderMarkdown(item.text))); continue; }
+      const st = m.steps[item.step];
+      if (!st) continue;
+      if (st.tool === "ask_user" && st.status === "asked" && st.questions) flow.append(questionCard(st, latest, (answer) => send(answer)));
+      else if (st.approval_id && byId.has(st.approval_id)) flow.append(approvalCard(byId.get(st.approval_id), decide));
+      else flow.append(toolRow(st));
+    }
+    if (m.error) flow.append(h("div", { class: "msg-error" }, m.output));
     const open = m.approvals.filter((a) => a.status === "pending" && a.can_decide);
     const bulk = open.length > 1 && h("div", { class: "row approval-bulk" }, h("span", { class: "small" }, `${open.length} lệnh đang chờ duyệt`),
       h("button", { type: "button", onclick: guard(() => decideAll(m, open, "approve_once")) }, "Chạy tất cả"),
-      h("button", { type: "button", class: "ghost", onclick: guard(() => decideAll(m, open, "approve_session")), title: "Cùng công cụ và namespace, trong 1 giờ" }, "Cho phép tất cả trong 1 giờ"));
-    const canContinue = !activeRun && !m.continued && m.approvals.length > 0 && !m.approvals.some((a) => a.status === "pending") && m.approvals.some((a) => a.status === "approved");
-    const resume = canContinue && h("div", { class: "row resume" }, h("button", { type: "button", class: "ghost", onclick: () => send(null, m.id) }, "Tiếp tục với kết quả các lệnh đã duyệt"));
-    const el = h("div", { class: "msg assistant", "data-ep": m.id }, activityView(m.steps, null), bulk, m.approvals.map((a) => approvalCard(a, decide)), resume, body,
-      m.cancelled && h("div", { class: "small" }, "Đã dừng"), actionsRow(m));
-    return el;
+      h("button", { type: "button", class: "ghost", onclick: guard(() => decideAll(m, open, "approve_session")), title: "Mỗi lệnh: cùng công cụ, cùng namespace, trong 1 giờ" }, "Chạy tất cả, cho phép từng lệnh trong 1 giờ"));
+    const canContinue = !activeRun && !m.continued && continuable(m);
+    const resume = canContinue && h("div", { class: "row resume" }, h("button", { type: "button", class: "ghost", onclick: () => send(null, m.id) }, "Để agent làm tiếp"));
+    return h("div", { class: "msg assistant", "data-ep": m.id }, bulk, flow, resume, m.cancelled && h("div", { class: "small muted" }, "Đã dừng"), actionsRow(m));
   }
 
   async function decide(a, action, reason) {
     const r = await api("POST", `/api/approvals/${a.id}/decide`, { action, reason });
     const failed = r.result && r.result.status === "error";
     const extra = r.also_approved && r.also_approved.length ? ` (và ${r.also_approved.length} lệnh cùng loại)` : "";
-    toast(r.status === "pending" ? "Đã ghi nhận, cần thêm người duyệt" : r.status === "denied" ? "Đã từ chối lệnh" : failed ? "Lệnh đã chạy nhưng báo lỗi" : "Đã chạy lệnh" + extra, failed);
+    toast(r.status === "pending" ? "Đã ghi nhận, cần thêm người duyệt" : r.status === "denied" ? (r.deny_reason ? "Đã từ chối, agent làm tiếp theo ghi chú" : "Đã từ chối, agent dừng")
+      : failed ? "Lệnh đã chạy nhưng báo lỗi" : "Đã chạy lệnh" + extra, failed);
     await refreshAndContinue();
+    refreshConversations();
   }
 
   async function decideAll(m, list, action) {
@@ -297,10 +484,21 @@ function chatView(main) {
     maybeContinue((await refreshBlocks()).messages);
   }
 
+  // Như Claude Code: lệnh đã chạy, hoặc bị từ chối kèm ghi chú, thì agent làm tiếp; từ chối không ghi chú thì dừng.
+  function continuable(m) {
+    if (!m.approvals.length || m.approvals.some((a) => a.status === "pending")) return false;
+    return m.approvals.some((a) => a.status === "approved" || (a.status === "denied" && a.deny_reason));
+  }
+
+  function latestId() {
+    let last = null;
+    for (const id of blocks.keys()) last = id;
+    return last;
+  }
+
   function maybeContinue(messages) {
     const last = messages[messages.length - 1];
-    if (!last || activeRun || last.continued || !last.approvals.length) return;
-    if (last.approvals.some((a) => a.status === "pending") || !last.approvals.some((a) => a.status === "approved")) return;
+    if (!last || activeRun || last.continued || !continuable(last)) return;
     send(null, last.id);
   }
 
@@ -309,15 +507,18 @@ function chatView(main) {
     const fresh = assistantBlock(m);
     blocks.set(m.id, fresh);
     if (old) old.replaceWith(fresh);
+    requestAnimationFrame(updatePending);
     return fresh;
   }
 
   function addMessage(m) {
     if (!m.continuation) lastTask = m.task;
     thread.append(m.continuation ? continuationNote() : userBubble(m.task));
+    blocks.set(m.id, null);  // giữ chỗ để assistantBlock biết đây là tin nhắn mới nhất
     const el = assistantBlock(m);
     blocks.set(m.id, el);
     thread.append(el);
+    requestAnimationFrame(updatePending);
   }
 
   function emptyState() {
@@ -348,72 +549,88 @@ function chatView(main) {
   function beginTurn(text, continueEpisode, continuation) {
     const empty = thread.querySelector(".empty");
     if (empty) empty.remove();
+    // Câu hỏi cũ chỉ trả lời được trước khi có lượt mới.
+    thread.querySelectorAll(".question:not(.done)").forEach((q) => { q.classList.add("done"); q.querySelectorAll("button, input").forEach((b) => { b.disabled = true; }); });
     if (continueEpisode || continuation) {
       if (continueEpisode) blocks.get(continueEpisode)?.querySelector(".resume")?.remove();
       thread.append(continuationNote());
     }
     else { lastTask = text; thread.append(userBubble(text)); }
-    const typing = h("div", { class: "typing", "aria-label": "Agent đang trả lời" }, h("i"), h("i"), h("i"));
-    const live = { text: "", steps: [], running: [] };
-    const activitySlot = h("div");
-    const approvalsSlot = h("div");
-    const body = h("div", { class: "prose" }, typing);
-    const liveEl = h("div", { class: "msg assistant" }, activitySlot, approvalsSlot, body);
+    // Lượt đang chạy dựng dần theo sự kiện: chữ mới nối vào đoạn cuối, mỗi lệnh thành một dòng ở đúng chỗ; dòng trạng thái ở cuối đếm thời gian.
+    const flow = h("div", { class: "flow" });
+    const status = h("div", { class: "live-status small muted", role: "status" });
+    const liveEl = h("div", { class: "msg assistant live" }, flow, status);
     thread.append(liveEl);
     stick = true;
     scroll();
 
+    let cur = null;  // đoạn chữ đang được viết
+    const running = [];  // {tool, args, row, at}
+    let lastEvent = Date.now();
     let frame = 0;
-    const paint = () => {
-      frame = 0;
-      if (live.text) body.replaceChildren(renderMarkdown(live.text));
-      scroll();
-    };
+    const paint = () => { frame = 0; if (cur) cur.el.replaceChildren(renderMarkdown(cur.text)); scroll(); };
     const queuePaint = () => { if (!frame) frame = requestAnimationFrame(paint); };
-    const paintActivity = () => {
-      const open = activitySlot.querySelector("details")?.open;
-      const view = activityView(live.steps, live.running);
-      if (view && open) view.open = true;
-      activitySlot.replaceChildren(...(view ? [view] : []));
-      scroll();
+    const secs = (t) => `${Math.max(0, Math.round((Date.now() - t) / 1000))}s`;
+    const tickStatus = () => {
+      for (const r of running) { const el = r.row.querySelector(".elapsed"); if (el) el.textContent = secs(r.at); }
+      status.replaceChildren(running.length ? busy(`Đang chạy ${running.map((r) => shortTool(r.tool)).join(", ")}… ${secs(Math.min(...running.map((r) => r.at)))}`)
+        : busy(`${cur ? "Đang viết" : "Đang suy nghĩ"}… ${secs(lastEvent)}`));
     };
-    const fail = (message) => { body.replaceChildren(h("div", { class: "msg-error" }, message)); };
+    tickStatus();
+    const ticker = setInterval(tickStatus, 1000);
+    const stopTicker = () => { clearInterval(ticker); status.replaceChildren(); };
+    const fail = (message) => { stopTicker(); flow.append(h("div", { class: "msg-error" }, message)); };
+    const sameCall = (r, step) => r.tool === step.tool && JSON.stringify(r.args || {}) === JSON.stringify(step.args || {});
 
     const handle = (ev) => {
+      lastEvent = Date.now();
       if (ev.type === "start") {
         activeRun.id = ev.run_id;
         const isNew = state.conversationId !== ev.conversation_id;
         state.conversationId = ev.conversation_id;
         syncUrl(true);
         if (isNew) refreshConversations();
-      } else if (ev.type === "delta") { live.text += ev.text; queuePaint(); }
-      else if (ev.type === "tool_start") { live.running.push(ev.tool); paintActivity(); }
-      else if (ev.type === "tool_end") {
-        const i = live.running.indexOf(ev.step.tool);
-        if (i !== -1) live.running.splice(i, 1);
-        live.steps.push(ev.step);
-        paintActivity();
-        if (ev.step.status === "pending") {
-          // Nút duyệt hiện khi lượt kết thúc; trước đó cho thấy ngay lệnh nào đang chờ để người dùng chuẩn bị quyết định.
-          approvalsSlot.append(approvalCard({ ...ev.step, id: ev.step.approval_id, status: "pending", decided_by: [], required_approvals: ev.step.required_approvals || 1,
-            reasons: ev.step.reasons || [], can_decide: false }, null, true));
-        }
-      }
-      else if (ev.type === "done") {
+      } else if (ev.type === "delta") {
+        if (!cur) { cur = { text: "", el: h("div", { class: "prose" }) }; flow.append(cur.el); }
+        cur.text += ev.text;
+        queuePaint();
+      } else if (ev.type === "tool_start") {
+        if (frame) { cancelAnimationFrame(frame); paint(); }
+        cur = null;
+        const row = toolRow({ tool: ev.tool, args: ev.args, status: "running" });
+        running.push({ tool: ev.tool, args: ev.args, row, at: Date.now() });
+        flow.append(row);
+        tickStatus();
+        scroll();
+      } else if (ev.type === "tool_end") {
+        const step = ev.step;
+        let i = running.findIndex((r) => sameCall(r, step));
+        if (i === -1) i = running.findIndex((r) => r.tool === step.tool);
+        const slot = i === -1 ? null : running.splice(i, 1)[0].row;
+        const view = step.tool === "ask_user" && step.status === "asked" && step.questions ? questionCard(step, false, () => {})
+          : step.status === "pending" ? approvalCard({ ...step, id: step.approval_id, status: "pending", decided_by: [], required_approvals: step.required_approvals || 1,
+            reasons: step.reasons || [], can_decide: false }, null, true)
+          : toolRow(step);
+        if (slot) slot.replaceWith(view); else flow.append(view);
+        tickStatus();
+        scroll();
+      } else if (ev.type === "done") {
         if (frame) cancelAnimationFrame(frame);
+        stopTicker();
         blocks.set(ev.message.id, liveEl);
         replaceBlock(ev.message);
         if (continueEpisode) refreshBlocks().catch(() => {});  // lượt gốc giờ đã "continued": bỏ nút Tiếp tục
         scroll();
         refreshConversations();
+        updatePending();
         if (ev.message.approvals.some((a) => a.status === "pending")) pollApprovals();
       } else if (ev.type === "stopping") {
         // Lệnh ghi đã gửi đi thì ngắt giữa chừng không hoàn tác được: đợi nó xong rồi mới dừng.
-        approvalsSlot.append(h("div", { class: "small warn-text" }, `Đang đợi ${ev.waiting_for.join(", ")} chạy xong rồi dừng…`));
+        flow.append(h("div", { class: "small warn-text" }, `Đang đợi ${ev.waiting_for.join(", ")} chạy xong rồi dừng…`));
         scroll();
       } else if (ev.type === "error") fail(ev.message);
     };
-    return { handle, fail, liveEl, stopPaint: () => { if (frame) cancelAnimationFrame(frame); } };
+    return { handle, fail, liveEl, stopPaint: () => { if (frame) cancelAnimationFrame(frame); stopTicker(); } };
   }
 
   async function readSSE(res, handle) {
@@ -435,7 +652,7 @@ function chatView(main) {
 
   async function send(text, continueEpisode) {
     if (activeRun) return;
-    const { handle, fail } = beginTurn(text, continueEpisode);
+    const { handle, fail, stopPaint } = beginTurn(text, continueEpisode);
     activeRun = { id: null };
     syncSend();
     try {
@@ -448,6 +665,7 @@ function chatView(main) {
     } catch (e) {
       fail("Mất kết nối. Câu trả lời vẫn có thể được lưu, hãy mở lại hội thoại sau ít phút.");
     } finally {
+      stopPaint();
       activeRun = null;
       syncSend();
       input.focus();
@@ -514,7 +732,8 @@ function chatView(main) {
     ? "Chế độ heuristic: chưa có LLM key nên agent chỉ làm theo từ khóa." + (state.me.is_org_admin ? " Nhập key ở mục Cài đặt." : "") + " "
     : "";
   const composer = h("div", { class: "composer-wrap" },
-    h("div", { class: "composer" }, input, h("div", { class: "composer-bar" }, env, h("span", { class: "spacer" }), sendBtn)),
+    pendingBar,
+    h("div", { class: "composer" }, input, h("div", { class: "composer-bar" }, env, focusBtn, h("span", { class: "spacer" }), sendBtn)),
     h("div", { class: "hint" }, notice + "Agent dùng công cụ thật qua các kết nối bạn được phép. Enter để gửi, Shift+Enter xuống dòng."));
   main.append(scroller, toBottom, composer);
 

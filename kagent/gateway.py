@@ -273,7 +273,11 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
     if tool_name.startswith("learned."):
         from . import learned  # công cụ học được: mỗi bước lại gọi invoke() này
         return learned.invoke_by_name(conn, ctx, tool_name, args)
-    step: dict = {"type": "tool_call", "tool": tool_name, "args": args, "env": ctx.env}
+    # _why là lời agent tự mô tả lệnh: chỉ hiện cho người duyệt, không tới connector, không vào classifier, không vào công cụ học được.
+    agent_why = str(args.get("_why") or "").strip()[:300] if isinstance(args, dict) else ""
+    if isinstance(args, dict) and "_why" in args:
+        args = {k: v for k, v in args.items() if k != "_why"}
+    step: dict = {"type": "tool_call", "tool": tool_name, "args": args, "env": ctx.env, **({"why": agent_why} if agent_why else {})}
     meta = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (ctx.tenant_id, tool_name)).fetchone()
     if meta is None:
         # Công cụ chưa phân loại mặc định bị coi là destructive: không chạy.
@@ -289,6 +293,7 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
         return {**step, "decision": "blocked", "status": "blocked", "risk_tier": tier, "reasons": [why]}
     from .tools import spec_of
     tool = spec_of(meta)
+    step["action_class"] = meta["action_class"]
     missing = [f for f in tool.required if f not in args]
     if missing or not isinstance(args, dict):
         audit(conn, ctx, tool_name, args, tier, "blocked", [f"thiếu tham số: {missing}"], "invalid")
@@ -371,10 +376,10 @@ def invoke(conn, ctx: CallContext, tool_name: str, args: dict) -> dict:
         approval_id = db.new_id()
         conn.execute(
             "INSERT INTO approval_request(id,tenant_id,episode_id,requester_id,original_request,tool,env,args,dry_run,risk_tier,confidence,"
-            "reasons,rollback_hint,required_approvals,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "reasons,rollback_hint,required_approvals,created_at,expires_at,why) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (approval_id, ctx.tenant_id, ctx.episode_id, ctx.user_id, ctx.task, tool_name, ctx.env, json.dumps(args, ensure_ascii=False),
              json.dumps(dry_result, ensure_ascii=False), tier, 0, json.dumps(decision.reasons, ensure_ascii=False), tool.rollback_hint,
-             required, db.iso(), db.later(minutes=settings.approval_ttl_minutes)))  # confidence = 0: cột chỉ còn cho dữ liệu cũ
+             required, db.iso(), db.later(minutes=settings.approval_ttl_minutes), agent_why or None))  # confidence = 0: cột chỉ còn cho dữ liệu cũ
         audit(conn, ctx, tool_name, args, tier, "pending", decision.reasons, "pending")
         return _called(ctx, {**step, "decision": "pending", "status": "pending", "approval_id": approval_id, "required_approvals": required})
 
@@ -426,7 +431,11 @@ def expire_approvals(conn, tenant_id: str | None = None) -> int:
 
 def decide(conn, tenant_id: str, approval_id: str, user_id: str, roles: set[str], is_org_admin: bool,
            action: str, reason: str | None = None) -> dict:
-    """action: approve_once | approve_session | deny. Hết 30 phút không trả lời coi như từ chối."""
+    """action: approve_once | approve_session | deny. Hết 30 phút không trả lời coi như từ chối.
+
+    reason là ghi chú gửi agent, như Claude Code: từ chối kèm ghi chú thì agent làm tiếp theo ghi chú; từ chối không ghi chú thì lượt dừng;
+    duyệt kèm ghi chú thì agent nhận ghi chú sau kết quả.
+    """
     if action not in ("approve_once", "approve_session", "deny"):
         raise ApprovalError("hành động không hợp lệ")
     expire_approvals(conn, tenant_id)
@@ -450,14 +459,15 @@ def decide(conn, tenant_id: str, approval_id: str, user_id: str, roles: set[str]
         if action != "deny" and (meta is None or not callable_by(meta, req["env"], user_roles(conn, tenant_id, req["requester_id"]), req["requester_id"])[0]):
             raise ApprovalError("công cụ đã bị tắt, gỡ hoặc thu hẹp quyền sau khi yêu cầu được tạo; không thể thực thi", 409)
 
+        note = (reason or "").strip()[:2000] or None
         if action == "deny":
-            if not reason or not reason.strip():
-                raise ApprovalError("phải nêu lý do từ chối")
             conn.execute("UPDATE approval_request SET status='denied', deny_reason=?, decided_by=?, decided_at=? WHERE id=?",
-                         (reason.strip(), json.dumps(req["decided_by"] + [user_id]), db.iso(), approval_id))
-            audit(conn, ctx, req["tool"], req["args"], req["risk_tier"], "denied", [reason], "denied")
+                         (note, json.dumps(req["decided_by"] + [user_id]), db.iso(), approval_id))
+            audit(conn, ctx, req["tool"], req["args"], req["risk_tier"], "denied", [note] if note else [], "denied")
         else:
             decided = req["decided_by"] + [user_id]
+            if note:
+                conn.execute("UPDATE approval_request SET note=trim(coalesce(note || char(10), '') || ?) WHERE id=?", (note, approval_id))
             if len(decided) < req["required_approvals"]:
                 conn.execute("UPDATE approval_request SET decided_by=? WHERE id=?", (json.dumps(decided), approval_id))
             else:

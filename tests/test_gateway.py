@@ -117,11 +117,10 @@ def test_self_approval_makes_prod_r3_single_confirmation(users):
     assert alice.post(f"/api/approvals/{step['approval_id']}/decide", json={"action": "approve_once"}).json()["status"] == "approved"
 
 
-def test_self_deny_requires_reason_and_becomes_lesson(users):
+def test_self_deny_note_becomes_lesson(users):
     alice, admin = users["alice"], users["admin"]
     step = tool_steps(alice.run("scale deployment web lên 9 replica"))[0]
     url = f"/api/approvals/{step['approval_id']}/decide"
-    assert alice.post(url, json={"action": "deny"}).status_code == 400
     assert alice.post(url, json={"action": "deny", "reason": "nhầm số replica"}).json()["status"] == "denied"
     admin.post("/api/learning/run")
     assert any("nhầm số replica" in k["content"] for k in alice.get("/api/ku?kind=lesson").json())
@@ -178,15 +177,15 @@ def test_session_grant_skips_next_ask(users):
     assert second["status"] == "ok"
 
 
-def test_deny_requires_reason_and_creates_lesson(users):
+def test_deny_note_creates_lesson_and_deny_without_note_does_not(users):
     alice, bob, admin = users["alice"], users["bob"], users["admin"]
-    step = tool_steps(alice.run("scale deployment web lên 9 replica"))[0]
-    url = f"/api/approvals/{step['approval_id']}/decide"
-    assert bob.post(url, json={"action": "deny"}).status_code == 400
-    assert bob.post(url, json={"action": "deny", "reason": "đang giờ cao điểm"}).json()["status"] == "denied"
+    noted = tool_steps(alice.run("scale deployment web lên 9 replica"))[0]
+    silent = tool_steps(alice.run("scale deployment web lên 7 replica"))[0]
+    assert bob.post(f"/api/approvals/{silent['approval_id']}/decide", json={"action": "deny"}).json()["deny_reason"] is None
+    assert bob.post(f"/api/approvals/{noted['approval_id']}/decide", json={"action": "deny", "reason": "đang giờ cao điểm"}).json()["status"] == "denied"
     admin.post("/api/learning/run")
     lessons = alice.get("/api/ku?kind=lesson").json()
-    assert any("đang giờ cao điểm" in k["content"] for k in lessons)
+    assert any("đang giờ cao điểm" in k["content"] for k in lessons) and not any(k["content"].endswith("từ chối: ") for k in lessons)
 
 
 def test_expired_approval_cannot_be_used(users, client):

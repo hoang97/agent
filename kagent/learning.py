@@ -170,7 +170,7 @@ def learn_from_denials(conn, tenant_id: str) -> int:
     for r in rs:
         reason = r["deny_reason"] or ""
         env = r["env"]
-        if r["episode_id"]:
+        if r["episode_id"] and reason.strip():  # từ chối không ghi chú (chỉ dừng lượt) thì không có gì để học
             knowledge.add(conn, tenant_id, kind="lesson", title=f"{r['tool']} bị từ chối ở {env}", content=f"Lệnh {r['tool']} ở {env} từng bị từ chối: {reason}",
                           applies_when=f"khi định dùng {r['tool']} ở {env}", entities=[f"tool:{r['tool']}"], source_eps=[r["episode_id"]],
                           source_trust="user", domain="k8s_ops" if r["tool"].startswith("k8s") else "general", reason="lý do từ chối của người duyệt")
