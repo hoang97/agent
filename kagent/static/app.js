@@ -609,6 +609,101 @@ function connectionForm(templates, existing, onDone) {
     fieldsBox, h("div", { class: "row" }, h("button", { type: "submit" }, existing ? "Lưu" : "Tạo kết nối"), existing && h("button", { type: "button", class: "ghost", onclick: onDone }, "Đóng")));
 }
 
+// Quyền Kubernetes: 3 nhóm cố định, mỗi nhóm một ServiceAccount do kagent tạo trong cụm, ứng với một công cụ kubectl_*.
+const RBAC_GROUPS = [
+  ["read", "Đọc", "kubectl_read · R1", ["get", "list", "watch"]],
+  ["write", "Ghi", "kubectl_write · R3, chạy thử trước", ["get", "list", "watch", "create", "update", "patch"]],
+  ["admin", "Quản trị", "kubectl_admin · R4, luôn cần duyệt", ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection", "*"]],
+];
+const csv = (v) => v.split(",").map((x) => x.trim()).filter(Boolean);
+const groupsIn = (v) => { const out = csv(v).map((g) => (g === "core" ? "" : g)); return out.length ? out : [""]; };
+const groupsOut = (gs) => gs.map((g) => (g === "" ? "core" : g)).join(", ");
+
+function k8sRbacPanel(c) {
+  const box = h("div", { class: "rbac" }, busy("Đang tải quyền…"));
+  const draftKey = `rbac:${c.id}`;
+  let info, cfg;
+  const load = async () => {
+    info = await api("GET", `/api/connections/${c.id}/k8s-rbac`);
+    cfg = store.get(draftKey, null) || JSON.parse(JSON.stringify(info.config));
+    paint();
+  };
+  const save = () => store.set(draftKey, cfg);
+  const result = h("div");
+  function ruleRow(profile, verbs, rule, idx) {
+    const field = (label, value, onchange, placeholder) => h("label", { class: "field" }, label,
+      h("input", { value, placeholder, disabled: !info.can_manage, oninput: (e) => { onchange(e.target.value); save(); } }));
+    const chips = h("div", { class: "tool-perms" }, verbs.map((v) => {
+      const on = rule.verbs.includes(v);
+      return h("button", { type: "button", class: "chip" + (on ? " on" : ""), "aria-pressed": on ? "true" : "false", disabled: !info.can_manage,
+        onclick: () => { rule.verbs = on ? rule.verbs.filter((x) => x !== v) : [...rule.verbs, v]; save(); paint(); } }, v);
+    }));
+    return h("div", { class: "rbac-rule" },
+      h("div", { class: "row" },
+        field("Namespace (* = toàn cụm)", rule.namespaces.join(", "), (v) => { rule.namespaces = csv(v); }, "app-a, app-b"),
+        field("API group (core = nhóm lõi)", groupsOut(rule.api_groups), (v) => { rule.api_groups = groupsIn(v); }, "core, apps"),
+        info.can_manage && h("button", { type: "button", class: "ghost small-btn", "aria-label": "Xóa quy tắc",
+          onclick: () => { cfg.profiles[profile].splice(idx, 1); save(); paint(); } }, "Xóa")),
+      field("Resource", rule.resources.join(", "), (v) => { rule.resources = csv(v); }, "pods, pods/log, deployments"),
+      h("div", { class: "row small" }, "Verb", chips));
+  }
+  function paintPlan(r, applied) {
+    const cls = { create: "ok", update: "warn", delete: "bad", unchanged: "" };
+    const label = { create: "tạo", update: "sửa", delete: "xóa", unchanged: "giữ nguyên" };
+    result.replaceChildren(h("div", { class: "card" },
+      h("strong", {}, applied ? `Đã áp dụng (${r.changes} thay đổi)` : r.changes ? `Sẽ có ${r.changes} thay đổi trong cụm` : "Cụm đã khớp với cấu hình"),
+      r.errors.length ? h("ul", { class: "warn-text small" }, r.errors.map((e) => h("li", {}, e))) : null,
+      r.warnings.length ? h("ul", { class: "small" }, r.warnings.map((w) => h("li", {}, "⚠ " + w))) : null,
+      h("table", { class: "small" }, h("tbody", {}, r.items.filter((i) => i.action !== "unchanged" || !applied).map((i) => h("tr", {},
+        h("td", {}, h("span", { class: "badge " + cls[i.action] }, label[i.action])), h("td", {}, i.kind),
+        h("td", {}, h("code", {}, (i.namespace ? i.namespace + "/" : "") + i.name)), h("td", {}, i.summary || ""),
+        h("td", { class: "warn-text" }, i.error || "")))))));
+  }
+  function paint() {
+    const ids = RBAC_GROUPS.map(([p, name]) => h("span", { class: "badge " + (info.identities[p] ? "ok" : "") }, `${name}: ${info.identities[p] ? "đã có SA" : "chưa có"}`));
+    const preview = guard(async () => {
+      result.replaceChildren(busy("Đang so sánh với cụm và chạy thử…"));
+      try { paintPlan(await api("POST", `/api/connections/${c.id}/k8s-rbac/plan`, { config: cfg }), false); } catch (e) { result.replaceChildren(); throw e; }
+    });
+    const apply = guard(async () => {
+      result.replaceChildren(busy("Đang áp dụng vào cụm…"));
+      let r;
+      try { r = await api("POST", `/api/connections/${c.id}/k8s-rbac/apply`, { config: cfg }); } catch (e) { result.replaceChildren(); throw e; }
+      store.set(draftKey, null);
+      toast("Đã áp dụng quyền Kubernetes. Bật các công cụ kubectl_* ở trang Danh mục & quyền nếu cần.");
+      await load();
+      paintPlan(r, true);
+    });
+    const remove = h("button", { type: "button", class: "danger small-btn", onclick: guard(async () => {
+      if (!remove.dataset.confirm) { remove.dataset.confirm = "1"; remove.textContent = "Bấm lần nữa để gỡ khỏi cụm"; setTimeout(() => { delete remove.dataset.confirm; remove.textContent = "Gỡ khỏi cụm"; }, 4000); return; }
+      const r = await api("DELETE", `/api/connections/${c.id}/k8s-rbac`);
+      store.set(draftKey, null);
+      toast(`Đã gỡ ${r.removed} object khỏi cụm`);
+      result.replaceChildren();
+      await load();
+    }) }, "Gỡ khỏi cụm");
+    const saNs = h("input", { value: cfg.sa_namespace, disabled: !info.can_manage, "aria-label": "Namespace chứa ServiceAccount",
+      oninput: (e) => { cfg.sa_namespace = e.target.value.trim(); save(); } });
+    box.replaceChildren(
+      h("p", { class: "small" }, info.applied ? `Đã áp dụng ${fmtTime(info.applied_at)}. ` : "Chưa áp dụng: công cụ kubectl_* chưa chạy được, các công cụ cũ đang dùng tài khoản của kết nối. ",
+        "Mỗi nhóm có quy tắc thì được một ServiceAccount riêng, tên ", h("code", {}, info.base_name + "-<nhóm>"), ", nhãn ", h("code", {}, info.label),
+        ". Nhóm ghi có thêm quyền của nhóm đọc, nhóm quản trị có thêm quyền của cả hai. Sau khi áp dụng, các công cụ cũ (list_pods, scale, delete_pod...) cũng chạy bằng ServiceAccount của nhóm tương ứng."),
+      h("div", { class: "tool-perms" }, ids),
+      h("label", { class: "field" }, "Namespace chứa ServiceAccount (tự tạo nếu chưa có)", saNs),
+      RBAC_GROUPS.map(([p, name, tool, verbs]) => h("div", { class: "card" },
+        h("div", { class: "tool-head" }, h("strong", {}, `Nhóm ${name}`), h("span", { class: "badge" }, tool), h("span", { class: "spacer" }),
+          info.can_manage && h("button", { type: "button", class: "ghost small-btn", onclick: () => {
+            cfg.profiles[p].push({ namespaces: [c.params.namespace || "default"], api_groups: [""], resources: [], verbs: verbs.slice(0, 3) }); save(); paint(); } }, "+ Thêm quy tắc")),
+        cfg.profiles[p].length ? cfg.profiles[p].map((rule, i) => ruleRow(p, verbs, rule, i)) : h("div", { class: "small muted" }, "Chưa có quy tắc: nhóm này không có ServiceAccount."))),
+      info.can_manage && h("div", { class: "row" }, h("button", { type: "button", onclick: preview }, "Xem trước"), h("button", { type: "button", onclick: apply }, "Áp dụng"),
+        h("button", { type: "button", class: "ghost", onclick: () => { store.set(draftKey, null); cfg = JSON.parse(JSON.stringify(info.config)); result.replaceChildren(); paint(); } }, "Bỏ thay đổi"),
+        info.applied && remove),
+      result);
+  }
+  load().catch((e) => box.replaceChildren(h("div", { class: "warn-text small" }, e.message)));
+  return box;
+}
+
 async function connectionsView(main) {
   const [templates, list] = await Promise.all([api("GET", "/api/templates"), api("GET", "/api/connections")]);
   const editor = h("div");
@@ -624,20 +719,29 @@ async function connectionsView(main) {
       result.className = "small " + (r.ok ? "ok-text" : "warn-text");
       result.textContent = r.ok ? "Kết nối được: " + JSON.stringify(r.detail) : "Lỗi: " + r.error;
     });
+    const rbacBox = h("div");
+    const rbacOpen = `rbac-open:${c.id}`;
+    const toggleRbac = () => {
+      const open = !rbacBox.childElementCount;
+      store.set(rbacOpen, open);
+      rbacBox.replaceChildren(...(open ? [k8sRbacPanel(c)] : []));
+    };
+    if (c.template === "k8s" && store.get(rbacOpen, false)) rbacBox.append(k8sRbacPanel(c));
     const remove = h("button", { type: "button", class: "danger small-btn", onclick: () => {
-      if (remove.dataset.confirm) action(c, () => api("DELETE", `/api/connections/${c.id}`))();
+      if (remove.dataset.confirm) action(c, async () => { const r = await api("DELETE", `/api/connections/${c.id}`); if (r.warning) toast(r.warning, true); })();
       else { remove.dataset.confirm = "1"; remove.textContent = "Bấm lần nữa để gỡ"; setTimeout(() => { delete remove.dataset.confirm; remove.textContent = "Gỡ"; }, 4000); }
     } }, "Gỡ");
     return h("div", { class: "card" },
       h("div", { class: "tool-head" }, h("strong", {}, c.title), h("code", {}, c.name), h("span", { class: "badge" }, c.template_title), h("span", { class: "badge " + (c.personal ? "info" : "") }, c.personal ? "cá nhân" : "dùng chung"),
         badge(c.status === "active" ? "active" : "disabled"), c.allow_private ? h("span", { class: "badge warn" }, "mạng nội bộ") : null, h("span", { class: "spacer" }),
         h("button", { type: "button", class: "ghost small-btn", onclick: test }, "Kiểm tra"),
+        c.template === "k8s" && h("button", { type: "button", class: "ghost small-btn", onclick: toggleRbac }, "Quyền Kubernetes"),
         c.can_manage && h("button", { type: "button", class: "ghost small-btn", onclick: () => { openEditor(c); editor.scrollIntoView(); } }, "Sửa"),
         c.can_manage && h("button", { type: "button", class: "ghost small-btn", onclick: action(c, () => api("PATCH", `/api/connections/${c.id}`, { status: c.status === "active" ? "disabled" : "active" })) }, c.status === "active" ? "Tạm tắt" : "Bật lại"),
         c.can_manage && remove),
       h("div", { class: "small" }, `Môi trường: ${c.envs.join(", ")}` + (c.personal ? "" : ` · vai trò: ${c.roles.join(", ")}`)),
       h("div", { class: "tool-perms" }, c.tools.map((t) => h("span", { class: "badge " + (t.enabled ? "ok" : "") }, `${t.tool.split(".")[1]} ${t.risk_tier}${t.enabled ? "" : " · tắt"}`))),
-      result);
+      result, rbacBox);
   }
   const closeEditor = () => { store.set("conn:editing", null); reload(); };
   function openEditor(c) { store.set("conn:editing", c.id); editor.replaceChildren(connectionForm(templates, c, closeEditor)); }

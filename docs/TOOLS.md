@@ -10,7 +10,7 @@ Agent chỉ dùng công cụ thật. Mỗi công cụ được tạo từ một 
 
 | Template | Công cụ (mức rủi ro) | Tham số chính |
 | --- | --- | --- |
-| `k8s` Kubernetes | list_pods R0, list_deployments R0, pod_logs R1, scale R2, rollout_restart R3, delete_pod R3, exec R4 | kubeconfig (+ context) hoặc api_url + token ServiceAccount, ca_cert, namespace, allowed_namespaces, max_replicas. Kubeconfig phải nhúng sẵn chứng chỉ (`kubectl config view --raw --minify --flatten`); dùng token hoặc chứng chỉ client, không hỗ trợ exec/auth-provider; api_url, token điền tay được ưu tiên hơn kubeconfig |
+| `k8s` Kubernetes | list_pods R0, list_deployments R0, pod_logs R1, scale R2, rollout_restart R3, delete_pod R3, exec R4; kubectl_read R1, kubectl_write R3 (có chạy thử), kubectl_admin R4 (xem [Quyền Kubernetes](#quyền-kubernetes-và-công-cụ-kubectl)) | kubeconfig (+ context) hoặc api_url + token ServiceAccount, ca_cert, namespace, allowed_namespaces, max_replicas. Kubeconfig phải nhúng sẵn chứng chỉ (`kubectl config view --raw --minify --flatten`); dùng token hoặc chứng chỉ client, không hỗ trợ exec/auth-provider; api_url, token điền tay được ưu tiên hơn kubeconfig |
 | `grafana` | search_dashboards, list_datasources, prometheus_query, list_alerts (R0), create_silence R3 | url, token service account, default_datasource_uid |
 | `prometheus` (cả Mimir, Thanos, VictoriaMetrics) | query, query_range, list_alerts, list_rules, list_targets, label_values, metric_metadata (R0). query_range trả min/max/avg/last và vài điểm mẫu thay vì toàn bộ chuỗi | url, token hoặc username/password, tenant_header (X-Scope-OrgID) |
 | `alertmanager` | list_alerts (gom theo alertname, severity), list_silences (R0), create_silence R3, expire_silence R3 (cả hai có chạy thử) | url, token hoặc username/password, tenant_header |
@@ -48,6 +48,48 @@ Khi tạo kết nối, công cụ đọc được bật ngay; công cụ ghi, x�
   - Namespace Kubernetes có thể bị giới hạn theo kết nối; đường dẫn HTTP API có thể bị giới hạn theo tiền tố.
 - **Nội dung chưa tin cậy:** log, trang web, kết quả SQL, HTTP API và exec được đánh dấu chưa tin cậy. Lệnh chạy sau chúng trong cùng hội thoại bị ép hỏi.
 - **Quyền tối thiểu:** nên cấp cho token của kết nối quyền nhỏ nhất cần thiết (RBAC Kubernetes, role Grafana Viewer/Editor, tài khoản CSDL chỉ đọc). Đó là lớp giới hạn ngoài cùng, giữ an toàn kể cả khi chính sách bị cấu hình sai.
+
+## Quyền Kubernetes và công cụ kubectl
+
+Ba công cụ `kubectl_read`, `kubectl_write`, `kubectl_admin` chạy được mọi lệnh kubectl trong phạm vi quyền của nhóm tương ứng. Kiểm soát quyền giao cho RBAC của cụm thay vì kagent đọc lệnh để đoán, nên mức rủi ro của từng công cụ là cố định:
+
+| Nhóm | Verb được cấp | Công cụ | Mức |
+| --- | --- | --- | --- |
+| Đọc | get, list, watch | kubectl_read: get, describe, logs, top, events, explain, auth can-i, rollout status/history | R1 |
+| Ghi | thêm create, update, patch | kubectl_write: thêm apply, create, patch, replace, label, annotate, scale, set, rollout restart/undo, cordon, taint, diff. Luôn chạy thử `--dry-run=server` trước | R3 |
+| Quản trị | bất kỳ | kubectl_admin: thêm delete, drain, exec, run, certificate approve | R4 |
+
+Cách dùng:
+
+1. Tạo kết nối Kubernetes bằng kubeconfig hoặc token của **tài khoản quản trị**: tài khoản này phải tạo được ServiceAccount, Secret, Role/ClusterRole và Binding. Kubernetes không cho cấp quyền mà tài khoản tạo đang không có, nên trên thực tế cần gần như cluster-admin. Thông tin này được lưu mã hóa để lần sau đổi quyền không phải dán lại.
+2. Bấm **Quyền Kubernetes** trên thẻ kết nối và khai quy tắc cho từng nhóm: namespace (`*` là toàn cụm), API group (`core` là nhóm lõi), resource, verb.
+3. Bấm **Xem trước**. kagent so cấu hình với cụm, liệt kê object sẽ tạo, sửa, xóa, và chạy thử từng thay đổi bằng `dryRun=All`, nhờ đó bắt sớm các lỗi như namespace không tồn tại hay cấp quyền vượt quyền đang có.
+4. Bấm **Áp dụng**. Mỗi nhóm có quy tắc được một ServiceAccount `kagent-<tên kết nối>-<8 ký tự id>-<nhóm>` trong namespace `kagent-system` (tự tạo nếu chưa có), kèm Secret token dài hạn. Mọi object mang nhãn `kagent.io/connection=<id kết nối>`.
+5. Bật các công cụ kubectl_* ở trang Danh mục & quyền, vì công cụ ghi, xóa mặc định tắt.
+
+Quy tắc:
+
+- Nhóm cao hơn được thừa hưởng quyền của nhóm thấp hơn: RoleBinding của nhóm đọc gắn cả SA ghi và SA quản trị.
+- Namespace cụ thể tạo Role + RoleBinding trong namespace đó; `*` tạo ClusterRole + ClusterRoleBinding.
+- Nhóm đọc và ghi không được cấp `secrets`, `pods/exec`, `pods/attach`, `pods/portforward`, các `*/proxy`, `serviceaccounts/token`, cũng không được dùng resource `*`. Những quyền này chỉ cấp được cho nhóm quản trị (R4).
+- Khi quy tắc ghi chạm tới workload, hệ thống cảnh báo: ai tạo được pod thì chạy được pod với ServiceAccount bất kỳ trong namespace đó.
+- Sau khi áp dụng, các công cụ cũ cũng chạy bằng SA của nhóm thấp nhất đủ cho chúng: list_pods, list_deployments, pod_logs dùng nhóm đọc; scale, rollout_restart dùng nhóm ghi; delete_pod, exec dùng nhóm quản trị. Nút **Kiểm tra** cho biết danh tính của từng SA.
+- **Gỡ khỏi cụm** xóa mọi object có nhãn của kết nối, nhưng giữ namespace. Gỡ kết nối cũng tự gỡ các object đó; nếu không gỡ được, giao diện báo nhãn để xóa tay.
+
+kagent vẫn chặn những gì RBAC không chặn được:
+
+- Lệnh phải bắt đầu bằng lệnh con, ví dụ `get pods -n app`.
+- Không có `proxy`, `port-forward`, `attach`, `cp`, `edit`, `config`, `kustomize`, `cluster-info dump` hay plugin.
+- Không đọc file trên máy chủ kagent: chỉ cho `-f -` với manifest truyền qua tham số `manifest`. Chặn `--from-file`, `--from-env-file`, `-o *-file`, `-k`.
+- Không đổi danh tính hay đích đến: chặn `--as`, `--token`, `--server`/`-s`, `--kubeconfig`, `--context`, `--username`/`--password`.
+- Không lộ token (`-v`) và không chạy kéo dài: chặn `-i`, `-t`, `--watch`, `logs -f`.
+- Flag ngắn chỉ dùng `-n -l -c -o -L -p -A -h -f`, viết tách (`-n app`); các flag khác viết dạng dài.
+
+Cách chạy kubectl:
+
+- Mỗi lần chạy, kagent tạo kubeconfig tạm (quyền 600) trỏ thẳng vào IP đã được lớp mạng kiểm tra, kèm `tls-server-name` là tên máy gốc. Nhờ vậy vẫn chặn mạng nội bộ khi chưa được phép và chống DNS rebinding.
+- kubectl chạy với env sạch, `HOME` tạm, timeout 1-120 giây (mặc định 30).
+- Image cài kubectl từ `KUBECTL_URL` (build arg, mặc định trỏ Nexus nội bộ). Ngoài mạng nội bộ, đặt `KAGENT_KUBECTL_URL` cho docker compose, hoặc cài kubectl vào PATH (biến `KAGENT_KUBECTL` để chỉ đường dẫn khác).
 
 ## Thêm một template mới
 

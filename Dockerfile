@@ -10,6 +10,11 @@ ARG PIP_TRUSTED_HOST=pypi.org
 COPY requirements.txt .
 # Cache mount giữ gói đã tải giữa các lần build, vì mạng hay đứt giữa chừng.
 RUN --mount=type=cache,target=/root/.cache/pip pip install --timeout 120 --retries 10 -r requirements.txt
+# kubectl cho công cụ kubectl_* của template k8s. Lấy từ Nexus nội bộ vì không tải được trực tiếp; ngoài mạng này truyền URL bản chính thức
+# (https://dl.k8s.io/release/v1.29.3/bin/linux/amd64/kubectl). Đặt trước COPY mã để đổi mã không phải tải lại 50MB.
+ARG KUBECTL_URL=http://10.211.137.3:8084/repository/raw-hosted/kubectl
+ADD ${KUBECTL_URL} /usr/local/bin/kubectl
+RUN chmod 755 /usr/local/bin/kubectl && kubectl version --client
 COPY kagent ./kagent
 
 # /data tạo sẵn với chủ sở hữu kagent để named volume nhận đúng quyền khi khởi tạo lần đầu.

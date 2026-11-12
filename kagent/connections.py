@@ -105,6 +105,9 @@ def _clean(template: Template, params: dict, secrets: dict, old_params: dict, ol
             net.check_host(clean["host"], int(clean.get("port") or 0) or 5432, allow_private)
         except net.NetError as exc:
             raise _err(f"host: {exc}") from exc
+    # Khóa bắt đầu bằng "_" là trạng thái do hệ thống ghi (vd. quyền Kubernetes đã áp dụng), client không đặt được nên giữ nguyên.
+    clean.update({k: v for k, v in old_params.items() if k.startswith("_")})
+    hidden.update({k: v for k, v in old_secrets.items() if k.startswith("_")})
     return clean, hidden
 
 
@@ -252,6 +255,25 @@ def resolve(conn, tenant_id: str, tool_name: str) -> tuple[dict, dict, object, d
     return dict(meta), row, spec, params
 
 
+def params_of(row: dict) -> dict:
+    return {**row["params"], **_decrypt(row["secrets"]), "_allow_private": bool(row["allow_private"])}
+
+
+def set_internal(conn, row: dict, params: dict | None = None, secrets: dict | None = None) -> None:
+    """Ghi trạng thái hệ thống ("_khóa") vào kết nối; giá trị None là xóa khóa đó."""
+    if any(not k.startswith("_") or k == "_allow_private" for k in {**(params or {}), **(secrets or {})}):
+        raise ValueError("chỉ ghi được khóa nội bộ bắt đầu bằng _")
+    merged_params, merged_secrets = dict(row["params"]), _decrypt(row["secrets"])
+    for target, changes in ((merged_params, params or {}), (merged_secrets, secrets or {})):
+        for k, v in changes.items():
+            if v is None:
+                target.pop(k, None)
+            else:
+                target[k] = v
+    conn.execute("UPDATE connection SET params=?, secrets=?, updated_at=? WHERE id=?",
+                 (json.dumps(merged_params, ensure_ascii=False), _encrypt(merged_secrets), db.iso(), row["id"]))
+
+
 def test(conn, tenant_id: str, connection_id: str, user_id: str) -> dict:
     row = get(conn, tenant_id, connection_id)
     if row is None or row["status"] == "removed" or (row["scope"] == "user" and row["owner_user"] != user_id):
@@ -271,7 +293,7 @@ def view(row: dict) -> dict:
     """Bản an toàn để trả về client: secret chỉ cho biết đã đặt hay chưa."""
     tpl = TEMPLATES.get(row["template"])
     secrets = _decrypt(row["secrets"])
-    return {k: v for k, v in row.items() if k != "secrets"} | {
+    return {k: v for k, v in row.items() if k != "secrets"} | {"params": {k: v for k, v in row["params"].items() if not k.startswith("_")},
         "personal": row["scope"] == "user", "secrets_set": {f.name: f.name in secrets for f in (tpl.fields if tpl else []) if f.secret},
         "template_title": tpl.title if tpl else row["template"]}
 

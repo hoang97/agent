@@ -4,6 +4,7 @@ Giả lập các endpoint tối thiểu của Kubernetes API, Grafana, Elasticse
 """
 from __future__ import annotations
 
+import base64
 import json
 import re
 import socket
@@ -42,6 +43,9 @@ class Infra:
         self.requests: list[httpx.Request] = []
         self.am_filters: list[list[str]] = []
         self.expired: list[str] = []
+        self.k8s_objects: dict[tuple, dict] = {}  # (kind, namespace, name) → object, cho ServiceAccount/Secret/RBAC
+        self.k8s_namespaces = {"default", "payments"}
+        self.k8s_forbid_grant = False  # giả lập tài khoản quản trị thiếu quyền nên không cấp được Role
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -73,10 +77,19 @@ class Infra:
         return httpx.Response(404)
 
     # --- Kubernetes ---
+    def sa_tokens(self) -> dict[str, str]:
+        return {base64.b64decode(o["data"]["token"]).decode(): o["metadata"]["annotations"]["kubernetes.io/service-account.name"]
+                for (kind, _, _), o in self.k8s_objects.items() if kind == "Secret" and o.get("data", {}).get("token")}
+
     def k8s(self, r: httpx.Request) -> httpx.Response:
-        if r.headers.get("authorization") != f"Bearer {K8S_TOKEN}":
+        auth = r.headers.get("authorization", "")
+        sa = self.sa_tokens().get(auth.removeprefix("Bearer "))
+        if auth != f"Bearer {K8S_TOKEN}" and sa is None:
             return self._json({"kind": "Status", "message": "Unauthorized"}, 401)
         path = r.url.path
+        rbac = self.k8s_rbac(r, path, sa)
+        if rbac is not None:
+            return rbac
         if path == "/version":
             return self._json({"gitVersion": "v1.31.0"})
         m = re.fullmatch(r"/api/v1/namespaces/([\w-]+)/pods", path)
@@ -107,6 +120,50 @@ class Infra:
                 self.deployments[ns][dep] = json.loads(r.content)["spec"]["replicas"]
             return self._json({"metadata": {"name": dep}, "spec": {"replicas": self.deployments[ns][dep]}})
         return self._json({"message": "not found"}, 404)
+
+    RBAC_KINDS = {"serviceaccounts": "ServiceAccount", "secrets": "Secret", "roles": "Role", "rolebindings": "RoleBinding",
+                  "clusterroles": "ClusterRole", "clusterrolebindings": "ClusterRoleBinding"}
+
+    def k8s_rbac(self, r: httpx.Request, path: str, sa: str | None):
+        if path == "/apis/authentication.k8s.io/v1/selfsubjectreviews":
+            return self._json({"status": {"userInfo": {"username": f"system:serviceaccount:kagent-system:{sa}" if sa else "admin"}}}, 201)
+        if sa is not None and not path.startswith("/api/v1/namespaces/default/pods"):
+            return self._json({"message": "forbidden"}, 403)
+        if path == "/api/v1/namespaces" and r.method == "POST":
+            self.k8s_namespaces.add(json.loads(r.content)["metadata"]["name"])
+            return self._json({}, 201)
+        m = re.fullmatch(r"/api/v1/namespaces/([\w-]+)", path)
+        if m:
+            return self._json({"metadata": {"name": m.group(1)}}) if m.group(1) in self.k8s_namespaces else self._json({"message": "not found"}, 404)
+        m = (re.fullmatch(r"/api/v1/(serviceaccounts|secrets)", path) or re.fullmatch(r"/apis/rbac.authorization.k8s.io/v1/(roles|rolebindings|clusterroles|clusterrolebindings)", path))
+        if m:
+            key, value = r.url.params.get("labelSelector", "=").split("=", 1)
+            kind = self.RBAC_KINDS[m.group(1)]
+            return self._json({"items": [o for (k, _, _), o in self.k8s_objects.items() if k == kind and o["metadata"].get("labels", {}).get(key) == value]})
+        m = (re.fullmatch(r"/api/v1/namespaces/([\w-]+)/(serviceaccounts|secrets)/([\w.-]+)", path)
+             or re.fullmatch(r"/apis/rbac.authorization.k8s.io/v1/namespaces/([\w-]+)/(roles|rolebindings)/([\w.-]+)", path)
+             or re.fullmatch(r"/apis/rbac.authorization.k8s.io/v1/()(clusterroles|clusterrolebindings)/([\w.-]+)", path))
+        if not m:
+            return None
+        ns, kind, name = m.group(1) or None, self.RBAC_KINDS[m.group(2)], m.group(3)
+        key = (kind, ns, name)
+        if r.method == "GET":
+            return self._json(self.k8s_objects[key]) if key in self.k8s_objects else self._json({"message": "not found"}, 404)
+        if r.method == "DELETE":
+            return self._json({"status": "Success"}) if self.k8s_objects.pop(key, None) else self._json({"message": "not found"}, 404)
+        if r.method == "PATCH":
+            assert r.headers["content-type"] == "application/apply-patch+yaml" and r.url.params["fieldManager"] == "kagent"
+            if ns and ns not in self.k8s_namespaces:
+                return self._json({"message": f'namespaces "{ns}" not found'}, 404)
+            if self.k8s_forbid_grant and kind in ("Role", "ClusterRole"):
+                return self._json({"message": "attempting to grant RBAC permissions not currently held"}, 403)
+            obj = json.loads(r.content)
+            if kind == "Secret":
+                obj["data"] = {"token": base64.b64encode(f"sa-token-{name}".encode()).decode()}
+            if r.url.params.get("dryRun") != "All":
+                self.k8s_objects[key] = obj
+            return self._json(obj)
+        return self._json({"message": "method not allowed"}, 405)
 
     # --- Grafana ---
     def grafana(self, r: httpx.Request) -> httpx.Response:

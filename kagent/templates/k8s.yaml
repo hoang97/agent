@@ -1,6 +1,6 @@
 template: k8s
 title: Kubernetes
-description: API server Kubernetes, xác thực bằng token ServiceAccount hoặc file kubeconfig. Nên cấp RBAC tối thiểu cho tài khoản dùng ở đây.
+description: "API server Kubernetes, xác thực bằng token ServiceAccount hoặc file kubeconfig. Công cụ kubectl_* chạy bằng ServiceAccount riêng theo nhóm quyền đọc/ghi/quản trị, do kagent tạo từ tài khoản này (cần quyền tạo ServiceAccount và RBAC)."
 ping: k8s:ping
 validate: k8s:validate_params
 fields:
@@ -114,3 +114,54 @@ tools:
         command: {type: string, description: Lệnh và tham số, tách theo quy tắc shell}
         timeout_seconds: {type: integer}
       required: [pod, command]
+
+  # Ba công cụ kubectl chạy bằng ServiceAccount riêng của từng nhóm quyền, do kagent tạo trong cụm (Công cụ → Kết nối → Quyền Kubernetes).
+  # RBAC của cụm là giới hạn thật; mức rủi ro của công cụ khớp với nhóm quyền nên không cần đọc lệnh để đoán.
+  - name: kubectl_read
+    description: "Chạy lệnh kubectl chỉ đọc (get, describe, logs, top, events, explain, auth can-i, rollout status/history...) bằng quyền nhóm đọc. Ví dụ command: get pods -n app -o wide"
+    handler: kubectl:run_read
+    action_class: read
+    blast_radius: cluster
+    data_sensitivity: personal
+    untrusted_output: true
+    input_schema:
+      properties:
+        command: {type: string, description: "Lệnh kubectl không kèm chữ kubectl, flag đặt sau lệnh con, flag ngắn viết tách (-n app)"}
+        timeout_seconds: {type: integer}
+      required: [command]
+
+  - name: kubectl_write
+    description: "Chạy lệnh kubectl thay đổi tài nguyên (apply, create, patch, replace, label, annotate, scale, set, rollout restart/undo, cordon...) bằng quyền nhóm ghi; không xóa được. Luôn chạy thử --dry-run=server trước"
+    handler: kubectl:run_write
+    check: kubectl:check_write
+    action_class: write
+    reversible: partial
+    blast_radius: namespace
+    data_sensitivity: internal
+    dry_run: server
+    untrusted_output: true
+    rollback_hint: "Áp lại manifest cũ, hoặc kubectl rollout undo với deployment"
+    input_schema:
+      properties:
+        command: {type: string, description: "Lệnh kubectl không kèm chữ kubectl, ví dụ: apply -f - hoặc scale deploy/web --replicas=3 -n app"}
+        manifest: {type: string, description: "Nội dung YAML/JSON khi lệnh có -f -"}
+        timeout_seconds: {type: integer}
+      required: [command]
+
+  - name: kubectl_admin
+    description: "Chạy lệnh kubectl bất kỳ trong phạm vi nhóm quản trị (delete, drain, exec, run, certificate approve và mọi lệnh của nhóm ghi, đọc). Luôn cần duyệt"
+    handler: kubectl:run_admin
+    check: kubectl:check_admin
+    action_class: destructive
+    reversible: "no"
+    blast_radius: cluster
+    data_sensitivity: secret
+    dry_run: server
+    untrusted_output: true
+    rollback_hint: "Tạo lại tài nguyên từ manifest đã lưu; object đã xóa không tự khôi phục"
+    input_schema:
+      properties:
+        command: {type: string, description: "Lệnh kubectl không kèm chữ kubectl, ví dụ: delete pod web-0 -n app hoặc exec web-0 -n app -- env"}
+        manifest: {type: string, description: "Nội dung YAML/JSON khi lệnh có -f -"}
+        timeout_seconds: {type: integer}
+      required: [command]

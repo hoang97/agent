@@ -25,7 +25,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import agent as agent_mod
-from . import compiler, connections, db, entities, gateway, knowledge, learned, learning, llm, tools, vault
+from . import compiler, connections, db, entities, gateway, knowledge, learned, learning, llm, net, tools, vault
+from .connectors import k8s_rbac
+from .connectors.base import ConnectorError
 from .config import settings
 from .retrieval import retrieve
 from .scheduler import Scheduler
@@ -1285,14 +1287,22 @@ def connection_patch(connection_id: str, body: ConnectionPatch, t: Tenant = Depe
 
 @app.delete("/api/connections/{connection_id}")
 def connection_delete(connection_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
-    """Gỡ kết nối: công cụ của nó bị chặn ngay; audit và lịch sử được giữ."""
+    """Gỡ kết nối: công cụ của nó bị chặn ngay; audit và lịch sử được giữ. ServiceAccount kagent đã tạo trong cụm được gỡ theo."""
+    row = connections.get(conn, t.tenant_id, connection_id)
+    warning = None
+    if row and row["template"] == "k8s" and row["params"].get("_rbac") and connections.can_manage(row, t.user_id, t.is_admin):
+        try:
+            k8s_rbac.remove(connections.params_of(row), row["id"])
+        except (ConnectorError, net.NetError) as exc:
+            warning = (f"không gỡ được ServiceAccount và quyền kagent đã tạo trong cụm ({exc}); "
+                       f"hãy xóa tay các object có nhãn {k8s_rbac.LABEL_CONN}={row['id']}")
     try:
         with db.tx(conn):
             connections.update(conn, t.tenant_id, connection_id, t.user_id, is_admin=t.is_admin, is_org_admin=t.principal.is_org_admin,
                                changes={"status": "removed"})
     except connections.ConnectionError_ as exc:
         raise _connection_error(exc) from exc
-    return {"ok": True}
+    return {"ok": True, **({"warning": warning} if warning else {})}
 
 
 @app.post("/api/connections/{connection_id}/test")
@@ -1301,6 +1311,75 @@ def connection_test(connection_id: str, t: Tenant = Depends(current_tenant), con
         return connections.test(conn, t.tenant_id, connection_id, t.user_id)
     except connections.ConnectionError_ as exc:
         raise _connection_error(exc) from exc
+
+
+def _k8s_connection(conn, t: Tenant, connection_id: str, manage: bool = True) -> dict:
+    row = connections.get(conn, t.tenant_id, connection_id)
+    if row is None or row["status"] == "removed" or (row["scope"] == "user" and row["owner_user"] != t.user_id):
+        raise HTTPException(404, "không tìm thấy kết nối")
+    if row["template"] != "k8s":
+        raise HTTPException(400, "chỉ kết nối Kubernetes mới có quyền Kubernetes")
+    if manage:
+        t.require_writer()
+        if not connections.can_manage(row, t.user_id, t.is_admin):
+            raise HTTPException(403, "chỉ người quản lý kết nối được đổi quyền Kubernetes")
+    return row
+
+
+def _cluster_call(fn):
+    try:
+        return fn()
+    except net.NetError as exc:
+        raise HTTPException(400, f"kết nối bị chặn: {exc}") from exc
+    except ConnectorError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/connections/{connection_id}/k8s-rbac")
+def k8s_rbac_get(connection_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    row = _k8s_connection(conn, t, connection_id, manage=False)
+    state = row["params"].get("_rbac") or {}
+    secrets = connections.params_of(row)
+    return {"config": state.get("config") or k8s_rbac.default_config(row["params"].get("namespace") or "default"),
+            "applied": bool(state.get("config")), "applied_at": state.get("applied_at"), "applied_by": state.get("applied_by"),
+            "base_name": k8s_rbac.base_name(row["id"], row["name"]), "label": f"{k8s_rbac.LABEL_CONN}={row['id']}",
+            "identities": {p: bool(secrets.get(k8s_rbac.TOKEN_KEY[p])) for p in k8s_rbac.PROFILES},
+            "can_manage": connections.can_manage(row, t.user_id, t.is_admin),
+            "limits": {"verbs": {p: list(v) if v else None for p, v in k8s_rbac.VERBS.items()}, "sensitive": list(k8s_rbac.SENSITIVE),
+                       "tools": k8s_rbac.TOOL}}
+
+
+class RbacBody(BaseModel):
+    config: dict
+
+
+@app.post("/api/connections/{connection_id}/k8s-rbac/plan")
+def k8s_rbac_plan(connection_id: str, body: RbacBody, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    row = _k8s_connection(conn, t, connection_id)
+    return _cluster_call(lambda: k8s_rbac.plan(connections.params_of(row), row["id"], row["name"], body.config))
+
+
+@app.post("/api/connections/{connection_id}/k8s-rbac/apply")
+def k8s_rbac_apply(connection_id: str, body: RbacBody, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    row = _k8s_connection(conn, t, connection_id)
+    if row["status"] != "active":
+        raise HTTPException(409, "kết nối đang tạm tắt")
+    result, tokens = _cluster_call(lambda: k8s_rbac.apply(connections.params_of(row), row["id"], row["name"], body.config))
+    with db.tx(conn):
+        connections.set_internal(conn, row, params={"_rbac": {"config": result["config"], "applied_at": db.iso(), "applied_by": t.user_id}},
+                                 secrets={k8s_rbac.TOKEN_KEY[p]: tokens[p] for p in k8s_rbac.PROFILES})
+    log.info("tenant %s: %s áp dụng quyền Kubernetes cho kết nối %s (%d thay đổi)", t.tenant_id, t.user_id, row["name"], result["changes"])
+    return result
+
+
+@app.delete("/api/connections/{connection_id}/k8s-rbac")
+def k8s_rbac_remove(connection_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    row = _k8s_connection(conn, t, connection_id)
+    removed = _cluster_call(lambda: k8s_rbac.remove(connections.params_of(row), row["id"]))
+    with db.tx(conn):
+        connections.set_internal(conn, row, params={"_rbac": None}, secrets={k8s_rbac.TOKEN_KEY[p]: None for p in k8s_rbac.PROFILES})
+    log.info("tenant %s: %s gỡ quyền Kubernetes của kết nối %s (%d object)", t.tenant_id, t.user_id, row["name"], removed)
+    return {"ok": True, "removed": removed}
 
 
 def _learned_view(conn, t: Tenant, row: dict) -> dict:
