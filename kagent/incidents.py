@@ -371,6 +371,18 @@ def _maybe_resolved(conn, tenant_id: str, incident_id: str) -> None:
 
 # ---------- điều tra và hành động ----------
 
+def ensure_conversation(conn, tenant_id: str, incident_id: str, user: str) -> str:
+    """Hội thoại điều tra của sự cố (một sự cố một hội thoại), mọi thành viên tenant mở được để hỏi thêm, duyệt, chạy tiếp."""
+    inc = conn.execute("SELECT conversation_id, title FROM incident WHERE id=?", (incident_id,)).fetchone()
+    if inc["conversation_id"]:
+        return inc["conversation_id"]
+    cid, now = db.new_id(), db.iso()
+    conn.execute("INSERT INTO conversation(id,tenant_id,user_id,title,created_at,updated_at,incident_id) VALUES (?,?,?,?,?,?,?)",
+                 (cid, tenant_id, user, f"Sự cố: {inc['title']}"[:120], now, now, incident_id))
+    conn.execute("UPDATE incident SET conversation_id=? WHERE id=?", (cid, incident_id))
+    return cid
+
+
 INVESTIGATE_TASK = """Điều tra sự cố từ các cảnh báo dưới đây. Chỉ dùng công cụ đọc (kubectl_read, Prometheus, log...) để tìm
 nguyên nhân gốc: trạng thái pod/deployment/node, sự kiện, metric liên quan quanh thời điểm cảnh báo bắt đầu, log lỗi.
 Kết thúc bằng: nguyên nhân (kèm bằng chứng cụ thể) và hành động khắc phục nhỏ nhất, đảo ngược được nếu có.
@@ -418,11 +430,12 @@ def investigate(conn, tenant_id: str, incident_id: str) -> dict:
         conn.execute("UPDATE incident SET stage='investigating', investigate_after=NULL, updated_at=? WHERE id=?", (db.iso(), incident_id))
         _event(conn, tenant_id, incident_id, "investigating", "bắt đầu điều tra (chỉ đọc)")
         user = bot_user(conn, tenant_id)
+        conversation_id = ensure_conversation(conn, tenant_id, incident_id, user)
     alerts = [_brief(r) for r in conn.execute("SELECT * FROM alert_event WHERE incident_id=? AND status='firing' ORDER BY starts_at LIMIT 20",
                                                (incident_id,)).fetchall()]
     task = INVESTIGATE_TASK.format(env=inc["env"], alerts=json.dumps(alerts, ensure_ascii=False, indent=1))
     try:
-        ep = agent.run_task(conn, tenant_id, user, task, env=inc["env"], agent_id="alert-agent", read_only=True)
+        ep = agent.run_task(conn, tenant_id, user, task, env=inc["env"], agent_id="alert-agent", read_only=True, conversation_id=conversation_id)
     except agent.QuotaExceeded as exc:
         with db.tx(conn):
             conn.execute("UPDATE incident SET stage='error', updated_at=? WHERE id=?", (db.iso(), incident_id))
@@ -442,9 +455,22 @@ def investigate(conn, tenant_id: str, incident_id: str) -> dict:
         conn.execute("UPDATE incident SET title=COALESCE(NULLIF(?,''), title), root_cause=?, confidence=?, evidence=?, episode_id=?, updated_at=? WHERE id=?",
                      (report["title"], report["root_cause"], report["confidence"], json.dumps(report["evidence"], ensure_ascii=False), ep["id"], db.iso(), incident_id))
         _event(conn, tenant_id, incident_id, "investigated",
-               f"điều tra xong: {len(steps)} lệnh đọc, độ tin {report['confidence']:.2f}" + ("; có nội dung chưa tin cậy" if tainted else ""),
-               {"episode_id": ep["id"]})
+               f"nhận định: {report['title'] or inc['title']} (độ tin {report['confidence']:.2f})",
+               {"episode_id": ep["id"], "steps": len(steps), "tainted": tainted})
     return act(conn, tenant_id, incident_id, report, user, ep["id"], tainted)
+
+
+def strip_dry_run(args: dict) -> dict:
+    """Gateway đã chạy thử trước khi hỏi; --dry-run trong lệnh được duyệt làm lệnh thật không bao giờ chạy."""
+    import shlex
+    command = args.get("command")
+    if not isinstance(command, str) or "--dry-run" not in command:
+        return args
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return args
+    return {**args, "command": shlex.join(a for a in argv if a != "--dry-run" and not a.startswith("--dry-run="))}
 
 
 def _auto_count(actions: list[dict], since: str) -> int:
@@ -477,6 +503,7 @@ def act(conn, tenant_id: str, incident_id: str, report: dict, user: str, episode
                               roles=gateway.user_roles(conn, tenant_id, user), forced=reasons)
     done = []
     for a in report["actions"]:
+        a = {**a, "args": strip_dry_run(a["args"])}
         step = gateway.invoke(conn, ctx, a["tool"], a["args"])  # như agent: không bọc giao dịch quanh lệnh gọi mạng
         entry = {"tool": a["tool"], "args": a["args"], "why": a["why"], "at": db.iso(), "status": step["status"], "decision": step.get("decision"),
                  "risk_tier": step.get("risk_tier"), "reasons": step.get("reasons") or [], "approval_id": step.get("approval_id"),
@@ -497,33 +524,53 @@ def act(conn, tenant_id: str, incident_id: str, report: dict, user: str, episode
     return report
 
 
+def _sync_approvals(conn, tenant_id: str, inc) -> None:
+    """Lệnh chờ duyệt của sự cố đã được quyết: cập nhật trạng thái; có lệnh đã chạy thì chuyển sang xác minh."""
+    cfg = settings(conn, tenant_id)
+    actions = json.loads(inc["actions"])
+    changed, executed, open_ = False, False, False
+    for a in actions:
+        if not a.get("approval_id") or a["status"] != "pending":
+            continue
+        req = conn.execute("SELECT status, result, decided_at FROM approval_request WHERE id=?", (a["approval_id"],)).fetchone()
+        if req is None or req["status"] == "pending":
+            open_ = True
+            continue
+        result = json.loads(req["result"]) if req["result"] else {}
+        a["status"] = result.get("status", "ok") if req["status"] == "approved" else req["status"]
+        a["ran_at"] = req["decided_at"] if a["status"] == "ok" else None
+        if result.get("result") is not None:
+            a["result"] = json.dumps(result.get("result"), ensure_ascii=False)[:2000]
+        changed = True
+        executed = executed or a["status"] == "ok"
+        with db.tx(conn):
+            _event(conn, tenant_id, inc["id"], "approval", f"{a['tool']}: {'đã duyệt và chạy' if a['status'] == 'ok' else a['status']}")
+    if changed:
+        stage = "verifying" if executed else "awaiting_approval" if open_ else "needs_human"
+        with db.tx(conn):
+            conn.execute("UPDATE incident SET actions=?, stage=?, verify_due=?, updated_at=? WHERE id=?",
+                         (json.dumps(actions, ensure_ascii=False), stage, _later(cfg["verify_minutes"] * 60) if executed else None, db.iso(), inc["id"]))
+
+
+def on_approval(conn, tenant_id: str, approval_id: str) -> None:
+    """Gọi ngay sau khi có người duyệt/từ chối, để sự cố không phải đợi vòng nền."""
+    req = conn.execute("SELECT episode_id FROM approval_request WHERE id=? AND tenant_id=?", (approval_id, tenant_id)).fetchone()
+    if req is None or not req["episode_id"]:
+        return
+    for inc in conn.execute("SELECT * FROM incident WHERE tenant_id=? AND stage='awaiting_approval' AND actions LIKE ?", (tenant_id, f"%{approval_id}%")).fetchall():
+        _sync_approvals(conn, tenant_id, inc)
+
+
 def follow_up(conn, tenant_id: str) -> None:
     """Theo dõi duyệt và xác minh: lệnh được duyệt thì chờ xác minh; tới hạn thì xem cảnh báo đã hết chưa."""
     cfg = settings(conn, tenant_id)
     for inc in conn.execute("SELECT * FROM incident WHERE tenant_id=? AND stage='awaiting_approval'", (tenant_id,)).fetchall():
-        actions = json.loads(inc["actions"])
-        changed, executed, open_ = False, False, False
-        for a in actions:
-            if not a.get("approval_id") or a["status"] != "pending":
-                continue
-            req = conn.execute("SELECT status, result FROM approval_request WHERE id=?", (a["approval_id"],)).fetchone()
-            if req is None or req["status"] == "pending":
-                open_ = True
-                continue
-            result = json.loads(req["result"]) if req["result"] else {}
-            a["status"] = result.get("status", "ok") if req["status"] == "approved" else req["status"]
-            a["decided_at"] = db.iso()
-            changed = True
-            executed = executed or a["status"] == "ok"
-            with db.tx(conn):
-                _event(conn, tenant_id, inc["id"], "approval", f"{a['tool']}: {'đã duyệt và chạy' if a['status'] == 'ok' else a['status']}")
-        if changed:
-            stage = "verifying" if executed else "awaiting_approval" if open_ else "needs_human"
-            with db.tx(conn):
-                conn.execute("UPDATE incident SET actions=?, stage=?, verify_due=?, updated_at=? WHERE id=?",
-                             (json.dumps(actions, ensure_ascii=False), stage, _later(cfg["verify_minutes"] * 60) if executed else None, db.iso(), inc["id"]))
+        _sync_approvals(conn, tenant_id, inc)
     now = db.iso()
-    for inc in conn.execute("SELECT * FROM incident WHERE tenant_id=? AND stage='verifying' AND verify_due<=?", (tenant_id, now)).fetchall():
+    due = conn.execute("SELECT * FROM incident WHERE tenant_id=? AND stage='verifying' AND verify_due<=?", (tenant_id, now)).fetchall()
+    if due and not cfg["enabled"] and cfg["sources"]:
+        poll(conn, tenant_id)  # luồng đang tắt thì không ai poll; cần số liệu mới để xác minh
+    for inc in due:
         left = conn.execute("SELECT count(*) n FROM alert_event WHERE incident_id=? AND status='firing'", (inc["id"],)).fetchone()["n"]
         actions = json.loads(inc["actions"])
         for a in actions:
@@ -541,6 +588,8 @@ def tick(conn) -> None:
     for t in conn.execute("SELECT id FROM tenant").fetchall():
         cfg = settings(conn, t["id"])
         if not cfg["enabled"]:
+            if conn.execute("SELECT 1 FROM incident WHERE tenant_id=? AND stage IN ('awaiting_approval','verifying') LIMIT 1", (t["id"],)).fetchone():
+                follow_up(conn, t["id"])  # lệnh đã xin duyệt trước khi tắt luồng vẫn được theo dõi
             continue
         state = _state.get(t["id"]) or {}
         if db.now().timestamp() - state.get("last_poll", 0) >= cfg["poll_seconds"] - 1:
@@ -574,6 +623,54 @@ def list_incidents(conn, tenant_id: str, status: str = "open", limit: int = 100)
     return out
 
 
+SHOWN_EVENTS = ("investigated", "verified", "resolved", "closed", "no_action")
+
+
+def timeline(conn, inc: dict, alerts: list[dict]) -> list[dict]:
+    """Diễn biến của sự cố: cảnh báo bắt đầu/hết theo giờ thật, nhận định, lệnh khắc phục đã chạy, xác minh.
+
+    Bỏ các mốc nội bộ (gộp, bắt đầu điều tra, lúc duyệt) vì không nói gì về bản thân sự cố.
+    """
+    out: list[dict] = []
+    by_name: dict[str, list[dict]] = {}
+    for a in alerts:
+        by_name.setdefault(a["alertname"] or "?", []).append(a)
+    for name, group in by_name.items():
+        start = min((a["starts_at"] or a["first_seen"]) for a in group)
+        out.append({"at": start, "kind": "alert", "text": f"{name} bắt đầu" + (f" ({len(group)} cảnh báo)" if len(group) > 1 else "")})
+        if all(a["status"] == "resolved" for a in group):
+            out.append({"at": max(a["resolved_at"] or "" for a in group), "kind": "alert_resolved", "text": f"{name} hết"})
+    for e in conn.execute("SELECT at, kind, text FROM incident_event WHERE incident_id=? AND kind IN (%s) ORDER BY id" % ",".join("?" * len(SHOWN_EVENTS)),
+                          (inc["id"], *SHOWN_EVENTS)).fetchall():
+        out.append(dict(e))
+    seen = set()
+    for a in inc["actions"]:
+        if a["status"] == "ok":
+            seen.add(a.get("approval_id"))
+            out.append({"at": a.get("ran_at") or a["at"], "kind": "fix", "text": f"chạy {_cmd(a)}" + (" (tự động)" if a.get("auto") else "")})
+    if inc.get("conversation_id"):
+        # Lệnh khắc phục người dùng chạy thêm trong hội thoại của sự cố.
+        for ep in conn.execute("SELECT id, started_at, trace FROM episode WHERE conversation_id=? ORDER BY started_at", (inc["conversation_id"],)).fetchall():
+            for s in json.loads(ep["trace"]):
+                if s.get("type") == "tool_call" and s.get("status") == "ok" and _is_write(conn, inc["tenant_id"], s["tool"]):
+                    out.append({"at": ep["started_at"], "kind": "fix", "text": f"chạy {_cmd(s)}"})
+            for r in conn.execute("SELECT id, tool, args, result, decided_at FROM approval_request WHERE episode_id=? AND status='approved'", (ep["id"],)).fetchall():
+                result = json.loads(r["result"]) if r["result"] else {}
+                if r["id"] not in seen and result.get("status") == "ok":
+                    out.append({"at": r["decided_at"], "kind": "fix", "text": f"chạy {_cmd({'tool': r['tool'], 'args': json.loads(r['args'])})}"})
+    return sorted(out, key=lambda e: e["at"] or "")
+
+
+def _cmd(step: dict) -> str:
+    args = step.get("args") or {}
+    return f"{step['tool'].split('.')[-1]} {args['command']}" if isinstance(args.get("command"), str) else f"{step['tool']} {json.dumps(args, ensure_ascii=False)}"
+
+
+def _is_write(conn, tenant_id: str, tool: str) -> bool:
+    r = conn.execute("SELECT action_class FROM tool_registry WHERE tenant_id=? AND tool=?", (tenant_id, tool)).fetchone()
+    return bool(r and r["action_class"] != "read")
+
+
 def get(conn, tenant_id: str, incident_id: str) -> dict:
     r = conn.execute("SELECT * FROM incident WHERE id=? AND tenant_id=?", (incident_id, tenant_id)).fetchone()
     if r is None:
@@ -583,7 +680,7 @@ def get(conn, tenant_id: str, incident_id: str) -> dict:
     d["investigating"] = incident_id in _running
     d["alerts"] = [{**db.row(a, "labels"), "join_label": _method_label(a["join_method"] or "")} for a in conn.execute(
         "SELECT * FROM alert_event WHERE incident_id=? ORDER BY starts_at", (incident_id,)).fetchall()]
-    d["events"] = db.rows(conn.execute("SELECT at, kind, text, data FROM incident_event WHERE incident_id=? ORDER BY id", (incident_id,)).fetchall(), "data")
+    d["timeline"] = timeline(conn, d, d["alerts"])
     for a in d["actions"]:
         if a.get("approval_id"):
             req = conn.execute("SELECT status FROM approval_request WHERE id=?", (a["approval_id"],)).fetchone()

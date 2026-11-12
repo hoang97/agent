@@ -308,6 +308,10 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE llm_call ADD COLUMN llm TEXT")  # tên cấu hình LLM đã dùng
     if "grant_policy" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
         conn.execute("ALTER TABLE tenant ADD COLUMN grant_policy TEXT NOT NULL DEFAULT '{}'")
+    if "incident_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(conversation)")}:
+        conn.execute("ALTER TABLE conversation ADD COLUMN incident_id TEXT")  # hội thoại điều tra của sự cố: mọi thành viên tenant mở được
+    if "conversation_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(incident)")}:
+        conn.execute("ALTER TABLE incident ADD COLUMN conversation_id TEXT")
     if "alert_settings" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
         conn.execute("ALTER TABLE tenant ADD COLUMN alert_settings TEXT NOT NULL DEFAULT '{}'")  # luồng tự xử lý cảnh báo (incidents.py)
     registry = {r["name"] for r in conn.execute("PRAGMA table_info(tool_registry)")}

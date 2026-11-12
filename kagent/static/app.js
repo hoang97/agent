@@ -237,7 +237,7 @@ function episodeCard(ep, onDone) {
 // ---------- Sự cố: cảnh báo được gom, điều tra, xử lý tự động ----------
 const SEV_CLASS = { critical: "bad", error: "bad", high: "bad", warning: "warn", medium: "warn" };
 const STAGE_CLASS = { handled: "ok", verifying: "info", investigating: "info", awaiting_approval: "warn", reported: "warn", needs_human: "bad", error: "bad" };
-const STEP_STATUS = { ok: "đã chạy", pending: "chờ duyệt", approved: "đã duyệt", denied: "bị từ chối", expired: "hết hạn duyệt", blocked: "bị chặn", error: "lỗi", invalid: "sai tham số" };
+const STEP_STATUS = { ok: "đã chạy", dry_run_only: "chỉ chạy thử", pending: "chờ duyệt", approved: "đã duyệt", denied: "bị từ chối", expired: "hết hạn duyệt", blocked: "bị chặn", error: "lỗi", invalid: "sai tham số" };
 function ago(iso) {
   if (!iso) return "—";
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -307,14 +307,13 @@ async function incidentDetail(main, id) {
           await api("POST", `/api/incidents/${id}/merge`, { into: into.value }); toast("Đã gộp"); go("incidents", undefined, into.value);
         }) }, "Gộp"),
         closeNote, h("button", { type: "button", class: "danger small-btn", onclick: act(() => api("POST", `/api/incidents/${id}/close`, { note: closeNote.value }), "Đã đóng sự cố") }, "Đóng")));
-    const cause = h("div", { class: "card" }, h("h3", {}, "Nguyên nhân"),
+    const openChat = d.conversation_id && h("button", { type: "button", class: "ghost small-btn", onclick: () => go("chat", d.conversation_id) },
+      busyNow ? "Xem agent đang điều tra" : "Mở cuộc điều tra trong chat");
+    const cause = h("div", { class: "card" }, h("div", { class: "tool-head" }, h("h3", {}, "Nguyên nhân"), h("span", { class: "spacer" }), openChat),
       busyNow ? busy("Agent đang điều tra bằng các lệnh chỉ đọc…")
         : d.episode_id ? [h("p", {}, d.root_cause || "Chưa rõ nguyên nhân."),
-            h("div", { class: "small" }, `Độ tin: ${(d.confidence || 0).toFixed(2)}`),
-            d.evidence.length > 0 && h("ul", {}, d.evidence.map((e) => h("li", {}, e))),
-            h("details", {}, h("summary", { class: "small" }, `Quá trình điều tra (${d.steps.length} lệnh đọc)`),
-              d.steps.map((s) => h("div", { class: "small" }, badge(s.status), " ", h("code", {}, actionText(s)), s.untrusted ? h("span", { class: "badge warn" }, "chưa tin cậy") : null)),
-              d.investigation && h("pre", {}, d.investigation))]
+            h("div", { class: "small" }, `Độ tin: ${(d.confidence || 0).toFixed(2)} · ${d.steps.length} lệnh đọc, chi tiết từng lệnh, token và câu trả lời đầy đủ ở hội thoại điều tra`),
+            d.evidence.length > 0 && h("ul", {}, d.evidence.map((e) => h("li", {}, e)))]
         : h("div", { class: "small muted" }, "Chưa điều tra."));
     const alertRows = d.alerts.map((a) => {
       const keys = ["namespace", "service", "pod", "node", "job", "instance"].filter((k) => a.labels[k]).map((k) => `${k}=${a.labels[k]}`).join(" ");
@@ -345,8 +344,10 @@ async function incidentDetail(main, id) {
               await api("POST", `/api/approvals/${a.approval_id}/decide`, { action: "deny", reason: reason.value.trim() }); toast("Đã từ chối"); await load();
             }) }, "Từ chối")));
       }) : h("div", { class: "small muted" }, d.episode_id ? "Không có hành động được đề xuất." : "Chưa có."));
+    const TL_CLASS = { alert: "warn", alert_resolved: "ok", fix: "info", verified: "ok", resolved: "ok", investigated: "", closed: "" };
     const timeline = h("div", { class: "card" }, h("h3", {}, "Dòng thời gian"),
-      h("ul", { class: "timeline" }, d.events.map((e) => h("li", {}, h("span", { class: "small" }, fmtTime(e.at)), " ", e.text))));
+      h("ul", { class: "timeline" }, d.timeline.map((e) => h("li", { class: "tl-" + e.kind }, h("span", { class: "small" }, fmtTime(e.at)), " ",
+        TL_CLASS[e.kind] ? h("span", { class: "badge " + TL_CLASS[e.kind] }, { alert: "cảnh báo", alert_resolved: "hết", fix: "khắc phục", verified: "xác minh", resolved: "đã hết" }[e.kind]) : null, " ", e.text))));
     box.replaceChildren();
     appendKids(box, [head, cause, alerts, actions, timeline]);
     if (d.status === "open" && (busyNow || ["new", "awaiting_approval", "verifying"].includes(d.stage))) refreshLater(8000, token, load);

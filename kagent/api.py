@@ -539,9 +539,10 @@ def _check_continuable(conn, t: "Tenant", conversation_id: str, episode_id: str)
     return episode_id
 
 
-def _own_conversation(conn, t: Tenant, conversation_id: str) -> dict:
-    c = db.row(conn.execute("SELECT * FROM conversation WHERE id=? AND tenant_id=? AND user_id=? AND archived_at IS NULL",
-                            (conversation_id, t.tenant_id, t.user_id)).fetchone())
+def _own_conversation(conn, t: Tenant, conversation_id: str, shared: bool = True) -> dict:
+    """Hội thoại của mình; shared=True thì cả hội thoại điều tra của sự cố (dùng chung trong tenant)."""
+    c = db.row(conn.execute("SELECT * FROM conversation WHERE id=? AND tenant_id=? AND archived_at IS NULL AND (user_id=? OR (? AND incident_id IS NOT NULL))",
+                            (conversation_id, t.tenant_id, t.user_id, int(shared))).fetchone())
     if c is None:
         raise HTTPException(404, "không tìm thấy hội thoại")
     return c
@@ -648,8 +649,10 @@ def _chat_message(conn, t: "Tenant", ep: dict) -> dict:
 
 @app.get("/api/conversations")
 def conversations(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
-    return db.rows(conn.execute("SELECT id, title, created_at, updated_at FROM conversation WHERE tenant_id=? AND user_id=? AND archived_at IS NULL "
-                                "ORDER BY updated_at DESC, rowid DESC LIMIT 200", (t.tenant_id, t.user_id)).fetchall())
+    # Hội thoại của sự cố hiện ở danh sách của người đã nhắn vào đó; người khác mở từ trang sự cố.
+    return db.rows(conn.execute("SELECT id, title, created_at, updated_at, incident_id FROM conversation c WHERE tenant_id=? AND archived_at IS NULL AND "
+                                "(user_id=? OR (incident_id IS NOT NULL AND EXISTS (SELECT 1 FROM episode e WHERE e.conversation_id=c.id AND e.user_id=?))) "
+                                "ORDER BY updated_at DESC, rowid DESC LIMIT 200", (t.tenant_id, t.user_id, t.user_id)).fetchall())
 
 
 @app.get("/api/conversations/{conversation_id}")
@@ -659,7 +662,8 @@ def conversation(conversation_id: str, t: Tenant = Depends(current_tenant), conn
     rs = conn.execute("SELECT * FROM episode WHERE conversation_id=? AND tenant_id=? ORDER BY started_at, rowid", (conversation_id, t.tenant_id)).fetchall()
     with _runs_lock:
         # Lượt vẫn chạy trên server sau khi người dùng tải lại trang; giao diện dùng cờ này để chờ câu trả lời.
-        running = any(r[0] == t.tenant_id and r[1] == t.user_id and r[3] == conversation_id for r in _runs.values())
+        running = any(r[0] == t.tenant_id and (r[1] == t.user_id or c.get("incident_id")) and r[3] == conversation_id for r in _runs.values())
+    running = running or bool(c.get("incident_id") and c["incident_id"] in incidents._running)
     return {**c, "running": running, "messages": [_chat_message(conn, t, db.row(r, "input", "trace", "ku_used", "human_edit")) for r in rs]}
 
 
@@ -669,7 +673,7 @@ class ConversationPatch(BaseModel):
 
 @app.patch("/api/conversations/{conversation_id}")
 def conversation_rename(conversation_id: str, body: ConversationPatch, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
-    _own_conversation(conn, t, conversation_id)
+    _own_conversation(conn, t, conversation_id, shared=False)
     conn.execute("UPDATE conversation SET title=? WHERE id=?", (body.title.strip() or "Hội thoại", conversation_id))
     return {"ok": True}
 
@@ -677,7 +681,7 @@ def conversation_rename(conversation_id: str, body: ConversationPatch, t: Tenant
 @app.delete("/api/conversations/{conversation_id}")
 def conversation_archive(conversation_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     """Chỉ ẩn hội thoại; episode là nhật ký bất biến nên được giữ lại."""
-    _own_conversation(conn, t, conversation_id)
+    _own_conversation(conn, t, conversation_id, shared=False)
     conn.execute("UPDATE conversation SET archived_at=? WHERE id=?", (db.iso(), conversation_id))
     return {"ok": True}
 
@@ -1187,9 +1191,11 @@ class ApprovalDecision(BaseModel):
 @app.post("/api/approvals/{approval_id}/decide")
 def approval_decide(approval_id: str, body: ApprovalDecision, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     try:
-        return gateway.decide(conn, t.tenant_id, approval_id, t.user_id, t.roles, t.principal.is_org_admin, body.action, body.reason)
+        out = gateway.decide(conn, t.tenant_id, approval_id, t.user_id, t.roles, t.principal.is_org_admin, body.action, body.reason)
     except gateway.ApprovalError as exc:
         raise HTTPException(exc.status, str(exc)) from exc
+    incidents.on_approval(conn, t.tenant_id, approval_id)
+    return out
 
 
 def _tool_view(conn, row) -> dict:

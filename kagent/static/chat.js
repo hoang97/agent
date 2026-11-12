@@ -497,6 +497,12 @@ function chatView(main) {
     if (state.conversationId) {
       try {
         const data = await api("GET", `/api/conversations/${state.conversationId}`);
+        if (data.incident_id) {
+          // Hội thoại điều tra của sự cố: dùng chung trong tenant, lượt đầu do kagent-alerts chạy.
+          thread.append(h("div", { class: "card incident-banner" }, h("strong", {}, data.title), " ",
+            h("span", { class: "small" }, "Hội thoại điều tra dùng chung của sự cố; hỏi thêm hoặc yêu cầu khắc phục ngay tại đây. "),
+            h("button", { type: "button", class: "ghost small-btn", onclick: () => go("incidents", undefined, data.incident_id) }, "Xem sự cố")));
+        }
         data.messages.forEach(addMessage);
         if (data.messages.some((m) => m.approvals.some((a) => a.status === "pending"))) pollApprovals();
         if (data.running) waitForRunningTurn(data.messages.length);

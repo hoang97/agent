@@ -200,7 +200,8 @@ REPORT_SYSTEM = """Bạn viết báo cáo sự cố từ các cảnh báo và k�
 - confidence: 0..1, mức chắc chắn rằng nguyên nhân đúng VÀ hành động đề xuất sẽ xử lý được; thiếu bằng chứng thì để thấp;
 - evidence: các bằng chứng cụ thể (giá trị metric, dòng log, trạng thái pod);
 - actions: tối đa 2 hành động khắc phục, mỗi hành động là một công cụ trong danh sách tools kèm args_json (JSON của tham số).
-  Chỉ đề xuất hành động nhỏ nhất, đảo ngược được (restart, scale, rollback); không xóa dữ liệu. Không có cách an toàn thì để rỗng."""
+  Chỉ đề xuất hành động nhỏ nhất, đảo ngược được (restart, scale, rollback); không xóa dữ liệu. Không có cách an toàn thì để rỗng.
+  Không thêm --dry-run: hệ thống tự chạy thử trước khi xin duyệt, lệnh được duyệt phải là lệnh thật."""
 REPORT_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["title", "root_cause", "confidence", "evidence", "actions"],
     "properties": {

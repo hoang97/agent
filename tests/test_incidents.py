@@ -91,7 +91,8 @@ def test_poll_dedups_groups_and_resolves(flow, users, infra):
     infra.am_alerts[:] = infra.am_alerts[:1]
     assert poll(users)["resolved"] == 2
     web = flow.get(f"/api/incidents/{by_title['HighCPU · web']['id']}").json()
-    assert web["status"] == "resolved" and any(e["kind"] == "resolved" for e in web["events"])
+    assert web["status"] == "resolved" and any(e["kind"] == "resolved" for e in web["timeline"])
+    assert {e["text"] for e in web["timeline"] if e["kind"].startswith("alert")} == {"HighCPU bắt đầu", "Down bắt đầu", "HighCPU hết", "Down hết"}
     assert [i["title"] for i in flow.get("/api/incidents").json()["items"]] == ["HighCPU · payments"]
 
     # bắn lại sau khi hết (startsAt mới) là lần bắn mới, mở sự cố mới vì sự cố cũ đã đóng
@@ -139,7 +140,7 @@ def test_merge_split_close_and_feedback(flow, users):
     items = {i["title"]: i["id"] for i in flow.get("/api/incidents").json()["items"]}
     web, pay = items["HighCPU · web"], items["HighCPU · payments"]
     merged = flow.post(f"/api/incidents/{pay}/merge", json={"into": web}).json()
-    assert len(merged["alerts"]) == 3 and any(e["kind"] == "merge" for e in merged["events"])
+    assert len(merged["alerts"]) == 3 and not any("gộp" in e["text"] for e in merged["timeline"])  # mốc nội bộ không vào dòng thời gian
     down = next(a for a in merged["alerts"] if a["alertname"] == "Down")
     new_id = flow.post(f"/api/incidents/{web}/split", json={"alert_id": down["id"]}).json()["id"]
     assert flow.get(f"/api/incidents/{new_id}").json()["alerts"][0]["alertname"] == "Down"
@@ -259,7 +260,7 @@ def test_no_safe_action_means_reported(flow, users):
     with db.session() as conn:
         incidents.investigate(conn, tenant(users), iid)  # heuristic: không đề xuất hành động
     inc = flow.get(f"/api/incidents/{iid}").json()
-    assert inc["stage"] == "reported" and any(e["kind"] == "no_action" for e in inc["events"])
+    assert inc["stage"] == "reported" and any(e["kind"] == "no_action" for e in inc["timeline"])
 
 
 def test_read_only_run_blocks_write_tools_even_if_model_calls_them(users):
@@ -312,3 +313,63 @@ def test_reading_logs_taints_and_blocks_auto(flow, users, monkeypatch):
     inc = flow.get(f"/api/incidents/{iid}").json()
     assert inc["steps"][0]["untrusted"] and inc["actions"][0]["status"] == "pending"
     assert gateway.UNTRUSTED_REASON in inc["actions"][0]["reasons"]
+
+
+
+def test_dry_run_flag_removed_from_proposed_command(flow, users):
+    iid = _web_incident(users)
+    cmd = {**RESTART, "args": {"command": "rollout undo deployment/web -n default --dry-run=server", "timeout_seconds": 60}}
+    llm.set_provider(Reporting(0.6, [cmd]))
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+    action = flow.get(f"/api/incidents/{iid}").json()["actions"][0]
+    assert action["args"] == {"command": "rollout undo deployment/web -n default", "timeout_seconds": 60}
+    assert incidents.strip_dry_run({"command": "get pods"}) == {"command": "get pods"}
+
+
+def test_approval_updates_incident_at_once_and_timeline_shows_fix(flow, users, infra):
+    flow.put("/api/alert-settings", json={"enabled": False, "sources": ["am"]})  # luồng tắt vẫn phải theo dõi lệnh đã xin duyệt
+    iid = _web_incident(users)
+    llm.set_provider(Reporting(0.6, [RESTART]))
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+    action = flow.get(f"/api/incidents/{iid}").json()["actions"][0]
+    flow.post(f"/api/approvals/{action['approval_id']}/decide", json={"action": "approve_once"})
+    inc = flow.get(f"/api/incidents/{iid}").json()
+    assert inc["stage"] == "verifying" and inc["actions"][0]["status"] == "ok" and "restarted" in inc["actions"][0]["result"]
+    texts = [e["text"] for e in inc["timeline"]]
+    assert "chạy kubectl_write rollout restart deployment/web -n default" in texts
+    assert any(t.startswith("nhận định: web CrashLoop") for t in texts) and not any("duyệt" in t or "bắt đầu điều tra" in t for t in texts)
+    infra.am_alerts[:] = infra.am_alerts[:1]
+    with db.session() as conn:
+        conn.execute("UPDATE incident SET verify_due=? WHERE id=?", (db.later(seconds=-1), iid))
+        incidents.tick(conn)  # luồng tắt: tick vẫn xác minh, tự poll để có số liệu mới
+    assert flow.get(f"/api/incidents/{iid}").json()["stage"] == "handled"
+
+
+def test_investigation_lives_in_shared_conversation(flow, users):
+    iid = _web_incident(users)
+    llm.set_provider(Reporting(0.6, [RESTART]))
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+        incidents.investigate(conn, tenant(users), iid)  # điều tra lại: lượt mới trong cùng hội thoại
+    inc = flow.get(f"/api/incidents/{iid}").json()
+    alice = users["alice"]
+    conv = alice.get(f"/api/conversations/{inc['conversation_id']}").json()
+    assert conv["incident_id"] == iid and len(conv["messages"]) == 2 and conv["title"].startswith("Sự cố: ")
+    assert conv["messages"][0]["approvals"][0]["tool"] == "k8s.kubectl_write"  # duyệt ngay trong chat
+    assert alice.patch(f"/api/conversations/{inc['conversation_id']}", json={"title": "x"}).status_code == 404  # chỉ chủ hội thoại đổi tên
+    assert all(c["id"] != inc["conversation_id"] for c in alice.get("/api/conversations").json())  # chưa nhắn thì không chen vào danh sách
+
+
+def test_member_can_continue_in_incident_conversation(flow, users):
+    from test_chat import chat
+    iid = _web_incident(users)
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+    cid = flow.get(f"/api/incidents/{iid}").json()["conversation_id"]
+    llm.set_provider(llm.HeuristicProvider())
+    done = next(e for e in chat(users["alice"], "xem pod trong namespace default", cid) if e["type"] == "done")
+    assert done["conversation_id"] == cid and done["message"]["steps"][0]["tool"] == "k8s.kubectl_read"
+    assert any(c["id"] == cid for c in users["alice"].get("/api/conversations").json())
+    assert len(users["bob"].get(f"/api/conversations/{cid}").json()["messages"]) == 2
