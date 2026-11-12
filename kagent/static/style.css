@@ -229,6 +229,9 @@ input.wide { flex: 1; min-width: 220px; }
 .bulk-bar button:disabled { opacity: .5; cursor: not-allowed; }
 .merge-card > input, .merge-card > textarea { display: block; width: 100%; box-sizing: border-box; margin: 6px 0; }
 .busy { display: inline-flex; align-items: center; gap: 8px; }
+.queued-card { padding: 10px 14px; border: 1px dashed var(--line); border-radius: 10px; animation: queued-pulse 2s ease-in-out infinite; }
+@keyframes queued-pulse { 50% { background: var(--hover); } }
+@media (prefers-reduced-motion: reduce) { .queued-card { animation: none; } }
 .spinner { flex: none; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent);
   animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

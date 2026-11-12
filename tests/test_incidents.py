@@ -278,6 +278,29 @@ def test_reinvestigate_creates_conversation_before_background_run(flow, users):
     assert cid and flow.get(f"/api/incidents/{iid}").json()["conversation_id"] == cid
 
 
+def test_queued_investigation_is_reported_until_a_slot_frees(flow, users):
+    import time
+    iid = _web_incident(users)
+    with db.session() as conn, db.tx(conn):
+        incidents.reinvestigate(conn, tenant(users), iid)
+    cid = flow.get(f"/api/incidents/{iid}").json()["conversation_id"]
+    for _ in range(2):
+        incidents._slots.acquire()
+    try:
+        assert incidents.start_investigation(tenant(users), iid)
+        assert flow.get(f"/api/incidents/{iid}").json()["queued"] == "slot"
+        conv = flow.get(f"/api/conversations/{cid}").json()
+        assert conv["queued"] == "slot" and not conv["running"]
+    finally:
+        for _ in range(2):
+            incidents._slots.release()
+    deadline = time.time() + 10
+    while incidents.queued(iid) and time.time() < deadline:
+        time.sleep(0.05)
+    conv = flow.get(f"/api/conversations/{cid}").json()
+    assert conv["queued"] is None and conv["messages"]
+
+
 def test_resolved_or_closed_incident_no_longer_waits_on_human(flow, users, infra):
     iid = _web_incident(users)
     with db.session() as conn:

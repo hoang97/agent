@@ -327,6 +327,7 @@ function chatView(main) {
   const blocks = new Map();
   let lastTask = null;
   let activeRun = null;
+  let queued = false;  // điều tra sự cố đã nhận nhưng chưa chạy: chưa cho gửi để lượt chat không chen vào trước
 
   // Thanh "đang chờ bạn" trên ô nhập khi thẻ duyệt hay câu hỏi đã trôi khỏi màn hình; bấm để tới đó.
   const pendingBar = h("button", { type: "button", class: "pending-bar hidden" });
@@ -372,11 +373,11 @@ function chatView(main) {
     sendBtn.replaceChildren(icon(activeRun ? "stop" : "send"));
     sendBtn.setAttribute("aria-label", activeRun ? "Dừng" : "Gửi");
     sendBtn.title = activeRun ? "Dừng" : "Gửi";
-    sendBtn.disabled = !activeRun && !input.value.trim();
+    sendBtn.disabled = !activeRun && (queued || !input.value.trim());
   };
   input.addEventListener("input", () => { resize(); syncSend(); });
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!activeRun) submit(); }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!activeRun && !queued) submit(); }
   });
   sendBtn.addEventListener("click", () => { if (activeRun) stop(); else submit(); });
 
@@ -704,6 +705,42 @@ function chatView(main) {
     scroll();
   }
 
+  // Điều tra sự cố chưa chạy (chờ lượt điều tra khác xong): thẻ chờ có đồng hồ, hỏi lại tới khi lượt bắt đầu rồi stream như thường.
+  async function waitQueued(kind) {
+    const conv = state.conversationId;
+    const since = Date.now();
+    const text = (k) => (k === "slot" ? "Đang chờ tới lượt điều tra: các cuộc điều tra khác đang chạy, agent sẽ tự bắt đầu khi có chỗ trống" : "Agent đang bắt đầu điều tra");
+    const status = h("div", { class: "small muted", role: "status" });
+    const card = h("div", { class: "msg assistant queued-card" }, status);
+    const paint = () => status.replaceChildren(busy(`${text(kind)}… ${Math.round((Date.now() - since) / 1000)}s`));
+    paint();
+    const ticker = setInterval(paint, 1000);
+    thread.append(card);
+    queued = true;
+    syncSend();
+    scroll();
+    let data = null;
+    try {
+      while (kind) {
+        await new Promise((r) => setTimeout(r, 2000));
+        if (!document.contains(thread) || state.conversationId !== conv) return;
+        data = await api("GET", `/api/conversations/${conv}`);
+        kind = data.queued;
+      }
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      clearInterval(ticker);
+      card.remove();
+      queued = false;
+      syncSend();
+    }
+    if (!data || state.conversationId !== conv) return;
+    for (const m of data.messages) if (!blocks.has(m.id)) addMessage(m);
+    if (data.running) await attachLive(data.messages.length);
+    else scroll();
+  }
+
   let polling = false;
   function pollApprovals() {
     if (polling) return;
@@ -751,6 +788,7 @@ function chatView(main) {
         data.messages.forEach(addMessage);
         if (data.messages.some((m) => m.approvals.some((a) => a.status === "pending"))) pollApprovals();
         if (data.running) attachLive(data.messages.length).catch((e) => toast(e.message, true));
+        else if (data.queued) waitQueued(data.queued);
         requestAnimationFrame(scroll);
       } catch (e) {
         state.conversationId = null;

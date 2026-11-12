@@ -313,7 +313,7 @@ async function incidentDetail(main, id) {
     const openChat = d.conversation_id && h("button", { type: "button", class: "ghost small-btn", onclick: () => go("chat", d.conversation_id) },
       busyNow ? "Xem agent đang điều tra" : "Mở cuộc điều tra trong chat");
     const cause = h("div", { class: "card" }, h("div", { class: "tool-head" }, h("h3", {}, "Nguyên nhân"), h("span", { class: "spacer" }), openChat),
-      busyNow ? busy("Agent đang điều tra bằng các lệnh chỉ đọc…")
+      busyNow ? busy(d.queued === "slot" ? "Đang chờ tới lượt điều tra: các cuộc điều tra khác đang chạy…" : "Agent đang điều tra bằng các lệnh chỉ đọc…")
         : d.episode_id ? [h("p", {}, d.root_cause || "Chưa rõ nguyên nhân."),
             h("div", { class: "small" }, `Độ tin: ${(d.confidence || 0).toFixed(2)} · ${d.steps.length} lệnh đọc, chi tiết từng lệnh, token và câu trả lời đầy đủ ở hội thoại điều tra`),
             d.evidence.length > 0 && h("ul", {}, d.evidence.map((e) => h("li", {}, e)))]

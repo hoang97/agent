@@ -137,6 +137,7 @@ def bot_user(conn, tenant_id: str) -> str:
 
 _state: dict[str, dict] = {}  # tenant → {"last_poll": giây, "sources": {tên: {"at", "count", "error"}}}
 _running: set[str] = set()
+_waiting: set[str] = set()  # trong _running nhưng chưa có chỗ trong _slots
 _lock = threading.Lock()
 _slots = threading.Semaphore(2)  # tối đa 2 lượt điều tra cùng lúc trong cả tiến trình
 
@@ -408,11 +409,15 @@ def start_investigation(tenant_id: str, incident_id: str) -> bool:
         if incident_id in _running:
             return False
         _running.add(incident_id)
+        _waiting.add(incident_id)
 
     def work():
         try:
-            with _slots, db.session() as conn:
-                investigate(conn, tenant_id, incident_id)
+            with _slots:
+                with _lock:
+                    _waiting.discard(incident_id)
+                with db.session() as conn:
+                    investigate(conn, tenant_id, incident_id)
         except Exception:
             log.exception("điều tra sự cố %s lỗi", incident_id)
             with db.session() as conn, db.tx(conn):
@@ -421,9 +426,18 @@ def start_investigation(tenant_id: str, incident_id: str) -> bool:
         finally:
             with _lock:
                 _running.discard(incident_id)
+                _waiting.discard(incident_id)
 
     threading.Thread(target=work, name=f"incident-{incident_id[:8]}", daemon=True).start()
     return True
+
+
+def queued(incident_id: str) -> str | None:
+    """Điều tra đã nhận nhưng chưa phát sự kiện: "slot" khi đang chờ lượt khác xong, "starting" khi sắp bắt đầu."""
+    with _lock:
+        if incident_id not in _running:
+            return None
+        return "slot" if incident_id in _waiting else "starting"
 
 
 def investigate(conn, tenant_id: str, incident_id: str) -> dict:
@@ -716,6 +730,7 @@ def get(conn, tenant_id: str, incident_id: str) -> dict:
     d["stage"] = _shown_stage(d)
     d["stage_label"] = STAGE_LABEL.get(d["stage"], d["stage"])
     d["investigating"] = incident_id in _running
+    d["queued"] = queued(incident_id)
     d["alerts"] = [{**db.row(a, "labels"), "join_label": _method_label(a["join_method"] or "")} for a in conn.execute(
         "SELECT * FROM alert_event WHERE incident_id=? ORDER BY starts_at", (incident_id,)).fetchall()]
     d["timeline"] = timeline(conn, d, d["alerts"])

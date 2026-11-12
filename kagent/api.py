@@ -711,7 +711,9 @@ def conversation(conversation_id: str, t: Tenant = Depends(current_tenant), conn
         # Lượt vẫn chạy trên server sau khi người dùng tải lại trang; giao diện dùng cờ này để chờ câu trả lời.
         running = any(r[0] == t.tenant_id and (r[1] == t.user_id or c.get("incident_id")) and r[3] == conversation_id for r in _runs.values())
     running = running or live.current(conversation_id) is not None
-    return {**c, "running": running, "messages": [_chat_message(conn, t, db.row(r, "input", "trace", "ku_used", "human_edit")) for r in rs]}
+    # Điều tra đã bấm nhưng chưa chạy (chờ chỗ trong giới hạn điều tra song song): giao diện hiện thẻ chờ và hỏi lại.
+    queued = incidents.queued(c["incident_id"]) if c.get("incident_id") and not running else None
+    return {**c, "running": running, "queued": queued, "messages": [_chat_message(conn, t, db.row(r, "input", "trace", "ku_used", "human_edit")) for r in rs]}
 
 
 @app.get("/api/conversations/{conversation_id}/live")
