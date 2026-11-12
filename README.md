@@ -14,7 +14,7 @@ Cần Python 3.10 trở lên.
 ```bash
 python -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/pytest -q
+.venv/bin/pytest -q -n auto                      # cả bộ, song song; khi sửa thì chỉ chạy file test liên quan
 KAGENT_ADMIN_PASSWORD=<mật-khẩu> KAGENT_DEMO_PASSWORD=<mật-khẩu> .venv/bin/uvicorn kagent.api:app --port 8000
 ```
 
