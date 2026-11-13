@@ -624,8 +624,21 @@ def follow_up(conn, tenant_id: str) -> None:
                    f"sau {cfg['verify_minutes']} phút vẫn còn {left} cảnh báo; chuyển cho người xử lý")
 
 
+def _recover_orphans(conn) -> None:
+    """Điều tra mà luồng chạy nó đã mất (máy chủ khởi động lại giữa chừng) thì không ai đổi stage nữa: trả về cho người xử lý."""
+    rows = conn.execute("SELECT id, tenant_id FROM incident WHERE stage='investigating'").fetchall()
+    with _lock:
+        orphans = [r for r in rows if r["id"] not in _running]
+    for r in orphans:
+        with db.tx(conn):
+            # stage kiểm tra lại: luồng điều tra có thể vừa xong giữa lúc đọc và lúc ghi
+            if conn.execute("UPDATE incident SET stage='error', updated_at=? WHERE id=? AND stage='investigating'", (db.iso(), r["id"])).rowcount:
+                _event(conn, r["tenant_id"], r["id"], "error", "điều tra bị ngắt giữa chừng (máy chủ khởi động lại); bấm Điều tra lại để chạy lại")
+
+
 def tick(conn) -> None:
     """Gọi từ vòng nền: poll khi tới hạn, theo dõi duyệt/xác minh, khởi động điều tra tới hạn."""
+    _recover_orphans(conn)
     for t in conn.execute("SELECT id FROM tenant").fetchall():
         cfg = settings(conn, t["id"])
         if not cfg["enabled"]:

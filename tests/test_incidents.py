@@ -446,3 +446,30 @@ def test_conversation_shows_incident_actions_on_investigation_turn(flow, users):
     msgs = flow.get(f"/api/conversations/{inc['conversation_id']}").json()["messages"]
     ran = msgs[-1]["incident_actions"][0]
     assert ran["status"] == "ok" and ran["auto"] and "restarted" in json.dumps(ran["result"]) and msgs[0]["incident_actions"] == []
+
+
+def test_investigation_lost_on_restart_is_released(flow, users):
+    iid = _web_incident(users)
+    with db.session() as conn:
+        conn.execute("UPDATE incident SET stage='investigating' WHERE id=?", (iid,))  # luồng điều tra đã mất cùng tiến trình cũ
+        incidents._running.add("other")  # điều tra còn sống của sự cố khác không bị đụng tới
+        try:
+            incidents.tick(conn)
+        finally:
+            incidents._running.discard("other")
+    inc = flow.get(f"/api/incidents/{iid}").json()
+    assert inc["stage"] == "error" and not inc["investigating"]
+    with db.session() as conn:
+        incidents.reinvestigate(conn, tenant(users), iid)  # trước đây bị từ chối vì stage vẫn là investigating
+
+
+def test_running_investigation_is_not_released(flow, users):
+    iid = _web_incident(users)
+    with db.session() as conn:
+        conn.execute("UPDATE incident SET stage='investigating' WHERE id=?", (iid,))
+        incidents._running.add(iid)
+        try:
+            incidents.tick(conn)
+        finally:
+            incidents._running.discard(iid)
+        assert conn.execute("SELECT stage FROM incident WHERE id=?", (iid,)).fetchone()["stage"] == "investigating"
