@@ -546,7 +546,7 @@ def act(conn, tenant_id: str, incident_id: str, report: dict, user: str, episode
     for a in report["actions"]:
         a = {**a, "args": strip_dry_run(a["args"])}
         step = gateway.invoke(conn, ctx, a["tool"], a["args"])  # như agent: không bọc giao dịch quanh lệnh gọi mạng
-        entry = {"tool": a["tool"], "args": a["args"], "why": a["why"], "at": db.iso(), "status": step["status"], "decision": step.get("decision"),
+        entry = {"tool": a["tool"], "args": a["args"], "why": a["why"], "at": db.iso(), "episode_id": episode_id, "status": step["status"], "decision": step.get("decision"),
                  "risk_tier": step.get("risk_tier"), "reasons": step.get("reasons") or [], "approval_id": step.get("approval_id"),
                  "dry_run": step.get("dry_run"), "auto": step["status"] == "ok",
                  "result": json.dumps(step.get("result"), ensure_ascii=False)[:2000] if step.get("result") is not None else None}
@@ -710,6 +710,36 @@ def timeline(conn, inc: dict, alerts: list[dict]) -> list[dict]:
                 if r["id"] not in seen and result.get("status") == "ok":
                     out.append({"at": r["decided_at"], "kind": "fix", "text": f"chạy {_cmd({'tool': r['tool'], 'args': json.loads(r['args'])})}"})
     return sorted(out, key=lambda e: e["at"] or "")
+
+
+def actions_by_episode(conn, incident_id: str, episodes: list[dict]) -> dict[str, list[dict]]:
+    """Hành động khắc phục của sự cố theo lượt chat đã đề xuất ra chúng, để hội thoại điều tra hiện như trang sự cố.
+
+    Hành động lưu trước khi có episode_id: theo lượt của lệnh chờ duyệt, không có thì lượt cuối bắt đầu trước lúc đề xuất.
+    """
+    inc = conn.execute("SELECT tenant_id, actions FROM incident WHERE id=?", (incident_id,)).fetchone()
+    if inc is None or not episodes:
+        return {}
+    ids = {e["id"] for e in episodes}
+    out: dict[str, list[dict]] = {}
+    for a in json.loads(inc["actions"] or "[]"):
+        ep = a.get("episode_id")
+        if ep is None and a.get("approval_id"):
+            req = conn.execute("SELECT episode_id FROM approval_request WHERE id=?", (a["approval_id"],)).fetchone()
+            ep = req["episode_id"] if req else None
+        if ep not in ids:
+            ep = next((e["id"] for e in reversed(episodes) if (e["started_at"] or "") <= (a.get("at") or "")), None)
+        if ep is None:
+            continue
+        try:
+            result = json.loads(a["result"]) if a.get("result") else None
+        except ValueError:
+            result = a["result"]  # bị cắt 2000 ký tự nên không còn là JSON
+        out.setdefault(ep, []).append({"tool": a["tool"], "args": a.get("args"), "why": a.get("why"), "status": a["status"], "auto": bool(a.get("auto")),
+                                       "risk_tier": a.get("risk_tier"), "reasons": a.get("reasons") or [], "approval_id": a.get("approval_id"),
+                                       "verified": a.get("verified"), "result": result,
+                                       "action_class": "write" if _is_write(conn, inc["tenant_id"], a["tool"]) else "read"})
+    return out
 
 
 def _cmd(step: dict) -> str:

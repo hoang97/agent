@@ -426,3 +426,23 @@ def test_member_can_continue_in_incident_conversation(flow, users):
     assert done["conversation_id"] == cid and done["message"]["steps"][0]["tool"] == "k8s.kubectl_read"
     assert any(c["id"] == cid for c in users["alice"].get("/api/conversations").json())
     assert len(users["bob"].get(f"/api/conversations/{cid}").json()["messages"]) == 2
+
+
+def test_conversation_shows_incident_actions_on_investigation_turn(flow, users):
+    iid = _web_incident(users)
+    llm.set_provider(Reporting(0.6, [RESTART], verdict=False))
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+    inc = flow.get(f"/api/incidents/{iid}").json()
+    msg = flow.get(f"/api/conversations/{inc['conversation_id']}").json()["messages"][0]
+    fix = msg["incident_actions"][0]
+    assert msg["id"] == inc["episode_id"] and fix["status"] == "pending" and fix["approval_id"] == inc["actions"][0]["approval_id"]
+    assert fix["approval_id"] in [a["id"] for a in msg["approvals"]] and fix["action_class"] == "write"
+
+    llm.set_provider(Reporting(0.99, [RESTART]))
+    with db.session() as conn:
+        conn.execute("UPDATE incident SET actions='[]' WHERE id=?", (iid,))
+        incidents.investigate(conn, tenant(users), iid)
+    msgs = flow.get(f"/api/conversations/{inc['conversation_id']}").json()["messages"]
+    ran = msgs[-1]["incident_actions"][0]
+    assert ran["status"] == "ok" and ran["auto"] and "restarted" in json.dumps(ran["result"]) and msgs[0]["incident_actions"] == []

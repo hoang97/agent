@@ -441,9 +441,21 @@ function chatView(main) {
       const st = m.steps[item.step];
       if (!st) continue;
       if (st.tool === "ask_user" && st.status === "asked" && st.questions) flow.append(questionCard(st, latest, (answer) => send(answer)));
-      else if (st.approval_id && byId.has(st.approval_id)) flow.append(approvalCard(byId.get(st.approval_id), decide));
+      else if (st.approval_id && byId.has(st.approval_id)) { flow.append(approvalCard(byId.get(st.approval_id), decide)); byId.delete(st.approval_id); }
       else flow.append(toolRow(st));
     }
+    // Hành động sự cố đề xuất sau khi điều tra xong đi thẳng qua gateway, không nằm trong trace của lượt.
+    const fixes = m.incident_actions || [];
+    if (fixes.length) {
+      flow.append(h("div", { class: "small muted incident-fix-head" }, "Hành động khắc phục của sự cố"));
+      for (const a of fixes) {
+        if (a.approval_id && byId.has(a.approval_id)) { flow.append(approvalCard(byId.get(a.approval_id), decide)); byId.delete(a.approval_id); continue; }
+        flow.append(h("div", { class: "incident-fix" }, a.why && h("div", { class: "small" }, a.why), toolRow({ ...a, env: m.env }),
+          a.status === "ok" && h("div", { class: "small muted" }, (a.auto ? "Tự chạy" : "Đã chạy")
+            + (a.verified === true ? " · đã hết cảnh báo" : a.verified === false ? " · cảnh báo vẫn còn" : ""))));
+      }
+    }
+    for (const a of byId.values()) flow.append(approvalCard(a, decide));
     if (m.error) flow.append(h("div", { class: "msg-error" }, m.output));
     const open = m.approvals.filter((a) => a.status === "pending" && a.can_decide);
     const bulk = open.length > 1 && h("div", { class: "row approval-bulk" }, h("span", { class: "small" }, `${open.length} lệnh đang chờ duyệt`),

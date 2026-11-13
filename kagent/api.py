@@ -713,7 +713,12 @@ def conversation(conversation_id: str, t: Tenant = Depends(current_tenant), conn
     running = running or live.current(conversation_id) is not None
     # Điều tra đã bấm nhưng chưa chạy (chờ chỗ trong giới hạn điều tra song song): giao diện hiện thẻ chờ và hỏi lại.
     queued = incidents.queued(c["incident_id"]) if c.get("incident_id") and not running else None
-    return {**c, "running": running, "queued": queued, "messages": [_chat_message(conn, t, db.row(r, "input", "trace", "ku_used", "human_edit")) for r in rs]}
+    messages = [_chat_message(conn, t, db.row(r, "input", "trace", "ku_used", "human_edit")) for r in rs]
+    if c.get("incident_id"):
+        fixes = incidents.actions_by_episode(conn, c["incident_id"], [{"id": r["id"], "started_at": r["started_at"]} for r in rs])
+        for m in messages:
+            m["incident_actions"] = fixes.get(m["id"], [])
+    return {**c, "running": running, "queued": queued, "messages": messages}
 
 
 @app.get("/api/conversations/{conversation_id}/live")
