@@ -65,7 +65,7 @@ def test_agent_loop_runs_tools_through_callback_and_marks_untrusted():
 
     tools = [{"tool": "logs.search_logs", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
     out = p.run_agent("tìm log", "ctx", tools, call_tool)
-    assert calls == [("logs.search_logs", {"query": "x"})] and out == {"answer": "xong", "tokens": 10}
+    assert calls == [("logs.search_logs", {"query": "x"})] and (out["answer"], out["tokens"]) == ("xong", 10)
     assert seen[0]["body"]["tools"][0]["function"]["name"] == "logs__search_logs"
     assistant, result = seen[1]["body"]["messages"][2:4]
     assert assistant["tool_calls"][0]["id"] == "call_1"

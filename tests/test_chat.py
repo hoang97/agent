@@ -55,7 +55,7 @@ def test_history_passed_to_provider_on_next_turn(users):
     seen = []
 
     class Recorder(llm.HeuristicProvider):
-        def run_agent(self, task, context, tools, call_tool, history=None, on_text=None, cancelled=None):
+        def run_agent(self, task, context, tools, call_tool, history=None, on_text=None, cancelled=None, **kw):
             seen.append(history)
             on_text("trả lời " + task)
             return {"answer": "trả lời " + task, "tokens": 0}
@@ -73,7 +73,7 @@ def test_history_limited_by_budget(users):
     settings.budget_history = 50
 
     class Long(llm.HeuristicProvider):
-        def run_agent(self, task, context, tools, call_tool, history=None, on_text=None, cancelled=None):
+        def run_agent(self, task, context, tools, call_tool, history=None, on_text=None, cancelled=None, **kw):
             return {"answer": "x" * 150, "tokens": 0}
 
     llm.set_provider(Long())
@@ -190,7 +190,7 @@ def test_cancel_records_partial_answer(users):
     cancelled = threading.Event()
 
     class Stops(llm.HeuristicProvider):
-        def run_agent(self, task, context, tools, call_tool, history=None, on_text=None, cancelled=None):
+        def run_agent(self, task, context, tools, call_tool, history=None, on_text=None, cancelled=None, **kw):
             on_text("phần đầu")
             cancelled.set()
             llm.check_cancelled(cancelled)
@@ -433,3 +433,63 @@ def test_conversation_list_counts_pending_approvals(users):
     assert alice.get("/api/approvals?status=pending").json()[0]["conversation_id"] == cid
     alice.post(f"/api/approvals/{approval['id']}/decide", json={"action": "deny"})
     assert next(c for c in alice.get("/api/conversations").json() if c["id"] == cid)["pending"] == 0
+
+
+def _strip_cache(x):
+    if isinstance(x, dict):
+        return {k: _strip_cache(v) for k, v in x.items() if k != "cache_control"}
+    if isinstance(x, list):
+        return [_strip_cache(v) for v in x]
+    return x
+
+
+def test_next_turn_replays_previous_turn_verbatim_so_prompt_cache_holds(users):
+    from test_llm import msg, text, use
+
+    agent_replies = [msg([text("để tôi xem"), use("k8s__kubectl_read", {"command": "get pods -n default"})], "tool_use"),
+                     msg([text("xong lượt một")]), msg([text("xong lượt hai")])]
+    agent_calls = []
+
+    class Fake:
+        def create(self, **kw):
+            if "tools" not in kw:  # route và các lệnh gọi phụ
+                return msg([text(json.dumps({"task_type": "k8s_ops", "entities": [], "block": False}))])
+            agent_calls.append(json.loads(json.dumps(kw["messages"], default=vars)))
+            return agent_replies.pop(0)
+
+        def stream(self, **kw):
+            return FakeStream([], self.create(**kw))
+
+    fake = Fake()
+    llm.set_provider(llm.AnthropicProvider(NS(messages=fake, beta=NS(messages=fake))))
+    alice = users["alice"]
+    cid = chat(alice, "xem pod")[0]["conversation_id"]
+    chat(alice, "còn pod nào lỗi không", cid)
+    turn1_last, turn2_first = _strip_cache(agent_calls[1]), _strip_cache(agent_calls[2])
+    # Lượt sau bắt đầu đúng bằng request cuối của lượt trước cộng câu trả lời cuối: chỉ nối thêm, kể cả lệnh công cụ.
+    assert turn2_first[:len(turn1_last)] == turn1_last
+    assert turn2_first[len(turn1_last)] == {"role": "assistant", "content": [{"type": "text", "text": "xong lượt một"}]}
+    assert any(b.get("type") == "tool_use" for m in turn2_first for b in (m["content"] if isinstance(m["content"], list) else []))
+    with db.session() as conn:
+        # Đổi sang provider khác định dạng thì dùng bản tóm lược.
+        assert agent.load_history(conn, alice.tenant, cid, "openai")["messages"][0] == {"role": "user", "content": "xem pod"}
+
+
+def test_history_cut_point_moves_rarely(users):
+    from kagent.config import settings
+
+    class Long(llm.HeuristicProvider):
+        def run_agent(self, task, context, tools, call_tool, **kw):
+            return {"answer": "x" * 150, "tokens": 0}
+
+    llm.set_provider(Long())
+    alice = users["alice"]
+    size = len(json.dumps([{"role": "user", "content": "t1"}, {"role": "assistant", "content": "x" * 150}], ensure_ascii=False))
+    settings.budget_history = int(size * 3.5) // 4  # vừa 3 lượt
+    cid, firsts = None, []
+    for i in range(1, 9):
+        cid = chat(alice, f"t{i}", cid)[0]["conversation_id"]
+        with db.session() as conn:
+            firsts.append(agent.load_history(conn, alice.tenant, cid)["messages"][0]["content"])
+    # Cửa sổ trượt sẽ dời đầu lịch sử ở mọi lượt từ lượt 4; ở đây chỉ dời khi tràn, mỗi lần bỏ cả mạch lượt cũ.
+    assert firsts == ["t1", "t1", "t1", "t4", "t4", "t4", "t7", "t7"]

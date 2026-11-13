@@ -1759,8 +1759,12 @@ def token_metrics(conn, tid: str, days: int = 7) -> dict:
     by_purpose = db.rows(conn.execute(
         "SELECT purpose, count(*) calls, sum(input_tokens) input, sum(output_tokens) output, sum(cache_read) cache_read, sum(cache_write) cache_write "
         "FROM llm_call WHERE tenant_id=? AND at>=? GROUP BY purpose ORDER BY sum(input_tokens+cache_read+cache_write+output_tokens) DESC", (tid, since)).fetchall())
-    total_in = sum(r["input"] + r["cache_read"] + r["cache_write"] for r in by_purpose)
-    cached = sum(r["cache_read"] for r in by_purpose)
+    # Tỷ lệ cache chỉ tính trên lời gọi có báo token cache; phần không báo tách riêng thay vì kéo tỷ lệ về 0.
+    known = conn.execute("SELECT coalesce(sum(CASE WHEN cache_known=1 THEN input_tokens+cache_read+cache_write END),0) total_in, "
+                         "coalesce(sum(CASE WHEN cache_known=1 THEN cache_read END),0) cached, "
+                         "coalesce(sum(CASE WHEN cache_known=0 THEN input_tokens END),0) unmeasured FROM llm_call WHERE tenant_id=? AND at>=?",
+                         (tid, since)).fetchone()
+    total_in, cached = known["total_in"], known["cached"]
     tools: dict[str, dict] = {}
     for r in conn.execute("SELECT trace FROM episode WHERE tenant_id=? AND started_at>=?", (tid, since)).fetchall():
         for step in json.loads(r["trace"]):
@@ -1777,6 +1781,7 @@ def token_metrics(conn, tid: str, days: int = 7) -> dict:
         "WHERE e.tenant_id=? AND e.started_at>=? GROUP BY e.id ORDER BY sum(c.input_tokens+c.cache_read+c.cache_write+c.output_tokens) DESC LIMIT 10",
         (tid, since)).fetchall())
     return {"days": days, "by_purpose": by_purpose, "cache_hit_pct": round(100 * cached / total_in, 1) if total_in else None,
+            "cache_unmeasured": known["unmeasured"],
             "tools": sorted(tools.values(), key=lambda t: -t["result_chars"])[:15], "top_turns": top_turns, **llm_usage(conn, tid)}
 
 
@@ -1787,7 +1792,7 @@ def llm_usage(conn, tid: str, days: int = 14) -> dict:
     total = "input_tokens+cache_read+cache_write+output_tokens"
     by_llm = db.rows(conn.execute(
         f"SELECT {label} label, count(*) calls, sum(input_tokens) input, sum(cache_read) cache_read, sum(cache_write) cache_write, "
-        f"sum(output_tokens) output, sum({total}) total, min(at) first_at FROM llm_call WHERE tenant_id=? AND substr(at,1,10)>=? "
+        f"sum(output_tokens) output, sum({total}) total, min(at) first_at, min(cache_known) cache_known FROM llm_call WHERE tenant_id=? AND substr(at,1,10)>=? "
         f"GROUP BY label ORDER BY total DESC", (tid, since)).fetchall())
     daily = db.rows(conn.execute(
         f"SELECT substr(at,1,10) day, {label} label, sum({total}) total, count(*) calls FROM llm_call WHERE tenant_id=? AND substr(at,1,10)>=? "

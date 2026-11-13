@@ -293,6 +293,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
     if "conversation_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(episode)")}:
         conn.execute("ALTER TABLE episode ADD COLUMN conversation_id TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_episode_conversation ON episode(conversation_id, started_at)")
+    if "transcript" not in {r["name"] for r in conn.execute("PRAGMA table_info(episode)")}:
+        conn.execute("ALTER TABLE episode ADD COLUMN transcript TEXT")  # tin nhắn đã gửi model ở lượt này, phát lại nguyên văn ở lượt sau (agent.load_history)
     if "self_approve" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
         # Mặc định người yêu cầu tự duyệt lệnh của mình; admin có thể tắt cho tenant cần duyệt chặt.
         conn.execute("ALTER TABLE tenant ADD COLUMN self_approve INTEGER NOT NULL DEFAULT 1")
@@ -306,6 +308,10 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE session ADD COLUMN created_at TEXT")  # mốc để giới hạn tuổi tối đa của phiên trượt
     if "llm" not in {r["name"] for r in conn.execute("PRAGMA table_info(llm_call)")}:
         conn.execute("ALTER TABLE llm_call ADD COLUMN llm TEXT")  # tên cấu hình LLM đã dùng
+    if "cache_known" not in {r["name"] for r in conn.execute("PRAGMA table_info(llm_call)")}:
+        # 0: dịch vụ không báo token cache (vd. vLLM tắt prompt_tokens_details). Dữ liệu cũ: chỉ Claude và lời gọi có số cache là chắc có báo.
+        conn.execute("ALTER TABLE llm_call ADD COLUMN cache_known INTEGER NOT NULL DEFAULT 1")
+        conn.execute("UPDATE llm_call SET cache_known=0 WHERE cache_read=0 AND cache_write=0 AND coalesce(model,'') NOT LIKE 'claude%'")
     if "grant_policy" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
         conn.execute("ALTER TABLE tenant ADD COLUMN grant_policy TEXT NOT NULL DEFAULT '{}'")
     approval_cols = {r["name"] for r in conn.execute("PRAGMA table_info(approval_request)")}

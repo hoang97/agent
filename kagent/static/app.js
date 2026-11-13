@@ -1367,14 +1367,21 @@ function tokenSection(t) {
   return h("div", {},
     h("h2", { class: "row" }, `Token ${t.days} ngày qua`),
     h("div", { class: "grid" }, h("div", { class: "tile" }, h("b", {}, num(all)), h("span", { class: "small" }, "Tổng token xử lý")),
-      h("div", { class: "tile" }, h("b", {}, t.cache_hit_pct === null ? "—" : t.cache_hit_pct + "%"), h("span", { class: "small" }, "Input đọc từ cache"))),
+      h("div", { class: "tile" }, h("b", {}, t.cache_hit_pct === null ? "—" : t.cache_hit_pct + "%"), h("span", { class: "small" }, "Input đọc từ cache"),
+        t.cache_unmeasured ? h("span", { class: "small muted", title: "Dịch vụ LLM không trả số token cache (vd. vLLM chưa bật --enable-prompt-tokens-details), nên không tính vào tỷ lệ" },
+          `chưa tính ${num(t.cache_unmeasured)} token input từ LLM không báo cache`) : null)),
     table(["Mục đích", "Lần gọi", "Input", "Cache đọc", "Cache ghi", "Output"], t.by_purpose.map((r) =>
       h("tr", {}, h("td", {}, PURPOSE[r.purpose] || r.purpose), h("td", {}, num(r.calls)), h("td", {}, num(r.input)), h("td", {}, num(r.cache_read)), h("td", {}, num(r.cache_write)), h("td", {}, num(r.output))))),
     h("h2", { class: "row" }, "Token theo LLM, 14 ngày qua"),
     h("p", { class: "small" }, "Tổng token xử lý mỗi ngày (input, cache đọc/ghi, output), chia theo cấu hình LLM và model. Rê chuột lên cột để xem chi tiết."),
     llmUsageChart(t),
-    table(["LLM", "Lần gọi", "Input", "Cache đọc", "Cache ghi", "Output", "Tổng"], (t.by_llm || []).map((r) =>
-      h("tr", {}, h("td", {}, r.label), h("td", {}, num(r.calls)), h("td", {}, num(r.input)), h("td", {}, num(r.cache_read)), h("td", {}, num(r.cache_write)), h("td", {}, num(r.output)), h("td", {}, num(r.total))))),
+    table(["LLM", "Lần gọi", "Input", "Cache đọc", "Cache ghi", "Cache hit", "Output", "Tổng"], (t.by_llm || []).map((r) => {
+      const inp = r.input + r.cache_read + r.cache_write;
+      const hit = r.cache_known === 0 ? h("span", { class: "muted", title: "Dịch vụ không trả số token cache" }, "không đo được")
+        : inp ? Math.round(1000 * r.cache_read / inp) / 10 + "%" : "—";
+      return h("tr", {}, h("td", {}, r.label), h("td", {}, num(r.calls)), h("td", {}, num(r.input)), h("td", {}, num(r.cache_read)), h("td", {}, num(r.cache_write)),
+        h("td", {}, hit), h("td", {}, num(r.output)), h("td", {}, num(r.total)));
+    })),
     h("h2", { class: "row" }, "Công cụ trả kết quả lớn nhất"),
     h("p", { class: "small" }, "Kết quả công cụ đi thẳng vào context của agent; công cụ trả nhiều ký tự là chỗ nên lọc trước."),
     table(["Công cụ", "Lần gọi", "Tổng ký tự", "Lớn nhất"], t.tools.map((r) => h("tr", {}, h("td", {}, h("code", {}, r.tool)), h("td", {}, num(r.calls)), h("td", {}, num(r.result_chars)), h("td", {}, num(r.max_chars))))),

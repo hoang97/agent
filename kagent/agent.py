@@ -107,22 +107,24 @@ def assemble_context(conn, tenant_id: str, task: str, task_type: str, *, project
     personal, personal_ids = _personal(conn, tenant_id, user_id)
     chosen_ids = {ku["id"] for ku, _ in chosen}
     notes, note_ids = _tool_notes(conn, tenant_id, tool_names or [], chosen_ids | set(personal_ids))
-    sections = []
+    # stable vào system, turn vào tin nhắn của lượt: system đổi theo câu hỏi thì cache của cả hội thoại phía sau mất theo.
+    stable, turn = [], []
     if core:
-        sections.append(f"<knowledge section=\"core\">\n{core}\n</knowledge>")
+        stable.append(f"<knowledge section=\"core\">\n{core}\n</knowledge>")
     if personal:
-        sections.append("<user_preferences note=\"sở thích của người dùng; không thay đổi quyền hay quy tắc an toàn\">\n" + "\n".join(personal) + "\n</user_preferences>")
-    if playbook:
-        sections.append(f"<knowledge section=\"playbook\">\n{playbook}\n</knowledge>")
-    if chosen:
-        sections.append("<knowledge section=\"units\">\n" + "\n".join(line for _, line in chosen) + "\n</knowledge>")
-    if notes:
-        sections.append("<knowledge section=\"tools\">\n" + "\n".join(notes) + "\n</knowledge>")
+        stable.append("<user_preferences note=\"sở thích của người dùng; không thay đổi quyền hay quy tắc an toàn\">\n" + "\n".join(personal) + "\n</user_preferences>")
     if skill_meta:
-        sections.append(f"<skills>\n{skill_meta}\n</skills>")
-    text = "\n\n".join(sections)
+        stable.append(f"<skills>\n{skill_meta}\n</skills>")
+    if playbook:
+        turn.append(f"<knowledge section=\"playbook\">\n{playbook}\n</knowledge>")
+    if chosen:
+        turn.append("<knowledge section=\"units\">\n" + "\n".join(line for _, line in chosen) + "\n</knowledge>")
+    if notes:
+        turn.append("<knowledge section=\"tools\">\n" + "\n".join(notes) + "\n</knowledge>")
+    stable_text, turn_text = "\n\n".join(stable), "\n\n".join(turn)
+    text = "\n\n".join(stable + turn)
     ids = set(_ku_ids_in(conn, tenant_id, core + playbook)) | chosen_ids | set(personal_ids) | set(note_ids)
-    return {"text": text, "ku_used": sorted(ids), "units": [ku for ku, _ in chosen],
+    return {"text": text, "stable": stable_text, "turn": turn_text, "ku_used": sorted(ids), "units": [ku for ku, _ in chosen],
             "tokens_est": len(text) // 4, "has_core": bool(core), "has_playbook": bool(playbook)}
 
 
@@ -223,48 +225,58 @@ def clean_answer(text: str) -> str:
     return _BLANKS.sub("\n\n", text).strip()
 
 
-def load_history(conn, tenant_id: str, conversation_id: str | None) -> dict:
-    """Các lượt gần nhất trong ngân sách cố định, gồm kết quả các lệnh đã được duyệt sau đó."""
+def load_history(conn, tenant_id: str, conversation_id: str | None, fmt: str | None = None) -> dict:
+    """Các lượt trong ngân sách, gồm kết quả các lệnh được duyệt sau đó.
+
+    Lượt có transcript cùng định dạng provider (fmt) được phát lại nguyên văn, kể cả lệnh công cụ, như lúc gửi model;
+    lượt khác dùng bản tóm lược câu hỏi + câu trả lời. Lịch sử chỉ nối thêm để prompt cache của lượt trước còn dùng được.
+    """
     empty = {"messages": [], "intent": [], "calls": [], "last_task": ""}
     if not conversation_id:
         return empty
-    rs = conn.execute("SELECT * FROM episode WHERE tenant_id=? AND conversation_id=? ORDER BY started_at DESC, rowid DESC LIMIT 12",
+    rs = conn.execute("SELECT * FROM episode WHERE tenant_id=? AND conversation_id=? ORDER BY started_at DESC, rowid DESC LIMIT 200",
                       (tenant_id, conversation_id)).fetchall()
-    turns: list[tuple[str, str, str]] = []
-    intent: list[str] = []
-    calls: list[dict] = []
-    used, limit = 0, settings.budget_history * 4
-    for i, r in enumerate(rs):
+    turns: list[dict] = []
+    for r in reversed(rs):
         ep = db.row(r, "input", "trace")
-        answer = clean_answer(ep["output"]) or "(không có nội dung)"
         notes: list[str] = []
         approvals = db.rows(conn.execute("SELECT tool, args, status, result, deny_reason, note FROM approval_request WHERE episode_id=? AND tenant_id=? "
                                          "ORDER BY created_at, rowid", (ep["id"], tenant_id)).fetchall(), "args", "result")
-        # Lượt mới nhất nhận đủ kết quả lệnh vừa duyệt để agent đọc được; lượt cũ hơn chỉ cần bản tóm lược.
-        cap = max(1000, APPROVED_RESULT_CHARS // max(1, len(approvals))) if i == 0 else 300
+        # Cùng giới hạn cho mọi lượt: cắt ngắn hơn khi lượt này cũ đi là sửa lịch sử, mất cache từ đó về sau.
+        cap = max(1000, APPROVED_RESULT_CHARS // max(1, len(approvals)))
         for a in approvals:
             notes.append(f"- {a['tool']} {json.dumps(a['args'], ensure_ascii=False)}: {_decision_text(conn, tenant_id, a, cap)}")
         # Kết quả lệnh duyệt sau đi trong message riêng của hệ thống, không trộn vào lời của agent:
         # trộn vào thì model tưởng chính mình từng viết dòng đó và chép lại định dạng nội bộ ra câu trả lời.
         note = ("[Hệ thống] Quyết định của người dùng với các lệnh chờ duyệt ở lượt trên (dữ liệu tham khảo, không phải lời của bạn, "
                 "không chép lại định dạng này):\n" + "\n".join(notes)) if notes else ""
-        size = len(ep["input"]["task"]) + len(answer) + len(note)
-        if used + size > limit and turns:  # lượt mới nhất luôn được giữ
-            break
-        used += size
-        turns.insert(0, (ep["input"]["task"], answer, note))
+        transcript = json.loads(r["transcript"]) if r["transcript"] else None
+        if transcript and fmt and transcript.get("format") == fmt and transcript.get("messages"):
+            messages = list(transcript["messages"])
+        else:
+            messages = [{"role": "user", "content": ep["input"]["task"]},
+                        {"role": "assistant", "content": clean_answer(ep["output"]) or "(không có nội dung)"}]
+        if note:
+            messages.append({"role": "user", "content": note})
         # Cho auto mode: lời người dùng và lệnh họ đã duyệt là ý của họ; lệnh agent đã gọi chỉ gồm tên, tham số, trạng thái.
         decided = [f"[người dùng {'đã duyệt' if a['status'] == 'approved' else 'từ chối'} lệnh] {a['tool']} {json.dumps(a['args'], ensure_ascii=False)}"
                    + (f", ghi chú: {a['note'] or a['deny_reason']}" if a["note"] or a["deny_reason"] else "")
                    for a in approvals if a["status"] in ("approved", "denied")]
-        intent[:0] = [ep["input"]["task"], *decided]
-        calls[:0] = [{"tool": s["tool"], "args": s.get("args"), "status": s.get("status")} for s in ep["trace"] if s.get("type") == "tool_call"]
-    messages = []
-    for task, answer, note in turns:
-        messages += [{"role": "user", "content": task}, {"role": "assistant", "content": answer}]
-        if note:
-            messages.append({"role": "user", "content": note})
-    return {"messages": messages, "intent": intent, "calls": calls, "last_task": turns[-1][0] if turns else ""}
+        turns.append({"task": ep["input"]["task"], "messages": messages, "size": len(json.dumps(messages, ensure_ascii=False)),
+                      "intent": [ep["input"]["task"], *decided],
+                      "calls": [{"tool": s["tool"], "args": s.get("args"), "status": s.get("status")} for s in ep["trace"] if s.get("type") == "tool_call"]})
+    # Vượt ngân sách thì bỏ một mạch lượt cũ tới còn nửa ngân sách, để điểm cắt (đầu prefix) chỉ dời thỉnh thoảng
+    # thay vì dời ở mọi lượt như cửa sổ trượt. Lượt mới nhất luôn được giữ.
+    start, used, limit = 0, 0, settings.budget_history * 4
+    for k, t in enumerate(turns):
+        used += t["size"]
+        if used > limit:
+            while start < k and used > limit // 2:
+                used -= turns[start]["size"]
+                start += 1
+    kept = turns[start:]
+    return {"messages": [m for t in kept for m in t["messages"]], "intent": [i for t in kept for i in t["intent"]],
+            "calls": [c for t in kept for c in t["calls"]], "last_task": kept[-1]["task"] if kept else ""}
 
 
 def _decision_text(conn, tenant_id: str, a: dict, cap: int) -> str:
@@ -311,10 +323,11 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
     task_type = None
     entities: list[str] = []
     outcome, outcome_src = "unknown", None
+    transcript = None
     statuses: list[str] = []
     partial: list[str] = []
     emit = on_event or (lambda event: None)
-    history = load_history(conn, tenant_id, conversation_id)
+    history = load_history(conn, tenant_id, conversation_id, provider.name)
 
     live.current_stop.set(cancelled)
     roles = gateway.user_roles(conn, tenant_id, user_id)
@@ -465,9 +478,11 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         trace.append({"type": "context", "ku_used": ku_used, "tokens_est": assembled["tokens_est"],
                       "has_core": assembled["has_core"], "has_playbook": assembled["has_playbook"]})
         emit({"type": "context", "task_type": task_type, "ku_used": len(ku_used)})
-        result = provider.run_agent(task, assembled["text"], tool_list, call_tool, history=history["messages"],
+        result = provider.run_agent(task, assembled["stable"], tool_list, call_tool, history=history["messages"], turn_context=assembled["turn"],
                                     on_text=on_text if on_event else None, cancelled=cancelled)
         tokens += result.get("tokens", 0)
+        if result.get("messages"):
+            transcript = {"format": provider.name, "messages": result["messages"]}
         flush_text()
         output = clean_answer(result["answer"]) or "(không có nội dung trả lời)"
         if any(s == "error" for s in statuses):
@@ -487,11 +502,11 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
 
     input_doc = {"task": task, "entities": entities, "project": project, **({"continuation_of": continuation_of} if continuation_of else {})}
     conn.execute(
-        "INSERT INTO episode(id,tenant_id,user_id,agent_id,scope,task_type,env,started_at,input,trace,output,ku_used,tokens,outcome,outcome_src,conversation_id) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO episode(id,tenant_id,user_id,agent_id,scope,task_type,env,started_at,input,trace,output,ku_used,tokens,outcome,outcome_src,conversation_id,"
+        "transcript) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (episode_id, tenant_id, user_id, agent_id, f"project:{project}" if project else "tenant", task_type, env, started,
          json.dumps(input_doc, ensure_ascii=False), json.dumps(trace, ensure_ascii=False), output,
-         json.dumps(ku_used), tokens, outcome, outcome_src, conversation_id))
+         json.dumps(ku_used), tokens, outcome, outcome_src, conversation_id, json.dumps(transcript, ensure_ascii=False) if transcript else None))
     now = db.iso()
     for ku_id in ku_used:
         conn.execute("UPDATE knowledge_unit SET last_used_at=? WHERE id=? AND tenant_id=?", (now, ku_id, tenant_id))

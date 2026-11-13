@@ -17,7 +17,7 @@ def test_agent_loop_marks_cache_breakpoints_and_records_usage():
     with llm.collect_usage() as got:
         p.run_agent("xem pod", "ctx", tools, lambda name, args: {"status": "ok", "result": {"pods": []}})
     first, second = fake.calls
-    assert first["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert first["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
     assert first["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
     # Vòng sau: breakpoint dời xuống tool_result mới; bản gốc của message cũ không bị gắn thêm.
     assert second["messages"][-1]["content"][-1]["type"] == "tool_result" and "cache_control" in second["messages"][-1]["content"][-1]
@@ -58,7 +58,8 @@ def test_openai_cached_tokens_are_split_out():
     with llm.collect_usage() as got:
         assert p._tokens(resp) == 1050
         assert p._tokens(NS(usage=resp.usage)) == 1050  # phản hồi stream không có tên model: lấy model đã gọi
-    assert got[0] == {"purpose": "other", "model": "gpt-x", "input_tokens": 200, "output_tokens": 50, "cache_read": 800, "cache_write": 0, "llm": "LLM nội bộ"}
+    assert got[0] == {"purpose": "other", "model": "gpt-x", "input_tokens": 200, "output_tokens": 50, "cache_read": 800, "cache_write": 0, "llm": "LLM nội bộ",
+                      "cache_known": True}
     assert got[1]["model"] == "gpt-x"
 
 
@@ -126,3 +127,70 @@ def test_metrics_split_usage_by_llm_and_day(users):
     assert {r["label"]: r["total"] for r in t["by_llm"]} == {"relay · claude-opus-5": 115, "relay · claude-sonnet-5": 4, "LLM nội bộ · qwen": 70}
     assert len(t["llm_days"]) == 14 and t["llm_days"][-1] == db.iso().split("T")[0]
     assert sum(r["total"] for r in t["llm_daily"]) == 189 and {r["day"] for r in t["llm_daily"]} == {t["llm_days"][-1]}
+
+
+def test_turn_context_goes_into_the_task_message_not_the_system():
+    p, fake = provider([msg([text("a")]), msg([text("b")])])
+    p.run_agent("xem pod", "<knowledge section=\"core\">luật</knowledge>", [], lambda n, a: {}, turn_context="<knowledge section=\"units\">ku A</knowledge>")
+    p.run_agent("xem log", "<knowledge section=\"core\">luật</knowledge>", [], lambda n, a: {}, turn_context="<knowledge section=\"units\">ku B</knowledge>")
+    first, second = fake.calls
+    assert first["system"] == second["system"] and "ku A" not in first["system"][0]["text"]
+    blocks = second["messages"][-1]["content"]
+    assert "ku B" in blocks[0]["text"] and blocks[-1]["text"] == "xem log"
+
+
+def test_openai_turn_context_is_prepended_to_the_task():
+    seen = []
+    resp = NS(choices=[NS(message=NS(content="ok", tool_calls=None), finish_reason="stop")], usage=None, model="m")
+    client = NS(chat=NS(completions=NS(create=lambda **kw: seen.append(json.loads(json.dumps(kw))) or resp)))
+    p = llm.OpenAIProvider(client=client, credential=vault.Credential("k", provider="openai", model_strong="m"))
+    p.run_agent("xem pod", "luật", [], lambda n, a: {}, turn_context="ku A")
+    system, task = seen[0]["messages"][0], seen[0]["messages"][-1]
+    assert "ku A" not in system["content"] and task["content"].startswith("<context") and task["content"].endswith("xem pod")
+
+
+def test_relay_rejecting_ttl_keeps_default_cache(monkeypatch):
+    p, fake = provider([msg([text("ok")]), msg([text("lần hai")])])
+    real = p._create
+    calls = []
+
+    def create(tier, **params):
+        calls.append(params)
+        if "ttl" in json.dumps(params.get("system"), default=str):
+            raise llm.LLMError("yêu cầu không hợp lệ: system.0.cache_control.ttl: Extra inputs are not permitted")
+        return real(tier, **params)
+
+    monkeypatch.setattr(p, "_create", create)
+    assert p.run_agent("x", "", [], lambda n, a: {})["answer"] == "ok"
+    assert calls[-1]["system"][0]["cache_control"] == {"type": "ephemeral"} and p.cache_ok is True and p.ttl_ok is False
+    assert p.run_agent("y", "", [], lambda n, a: {})["answer"] == "lần hai"
+    assert len(calls) == 3
+
+
+def test_structured_calls_cache_system_and_classifier_shares_rules_prefix():
+    p, fake = provider([msg([text(json.dumps({"block": False}))]), msg([text(json.dumps({"block": False}))])])
+    rules = {"hard_deny": ["luật"]}
+    p.classify_action({"rules": rules, "user_intent": ["scale web"], "previous_calls": [], "action": {"tool": "a"}})
+    p.classify_action({"rules": rules, "user_intent": ["scale web"], "previous_calls": [{"tool": "a"}], "action": {"tool": "b"}})
+    first, second = fake.calls
+    assert first["system"][0]["cache_control"] == {"type": "ephemeral"}
+    head, tail = first["messages"][0]["content"]
+    assert head["cache_control"] == {"type": "ephemeral"} and "cache_control" not in tail
+    assert json.loads(head["text"]) == {"rules": rules, "user_intent": ["scale web"]} and json.loads(tail["text"])["action"] == {"tool": "a"}
+    # Lệnh sau trong cùng lượt: phần đầu giống hệt, chỉ phần cuối đổi.
+    assert second["messages"][0]["content"][0] == head and json.loads(second["messages"][0]["content"][1]["text"])["action"] == {"tool": "b"}
+
+
+def test_cache_hit_rate_ignores_llms_that_do_not_report_cache(users):
+    alice = users["alice"]
+    unreported = NS(usage=NS(prompt_tokens=1000, completion_tokens=5, prompt_tokens_details=None), model="qwen")
+    p = llm.OpenAIProvider(client=object(), credential=vault.Credential("k", provider="openai", model_strong="qwen", profile="AI Gateway"))
+    with llm.collect_usage() as got:
+        p._tokens(unreported)
+    assert got[0]["cache_known"] is False
+    with db.session() as conn:
+        llm.save_usage(conn, alice.tenant, None, [
+            *got, {"purpose": "agent", "model": "claude-opus-5", "llm": "relay", "input_tokens": 10, "output_tokens": 5, "cache_read": 90, "cache_write": 0}])
+    t = alice.get("/api/metrics").json()["tokens"]
+    assert t["cache_hit_pct"] == 90.0 and t["cache_unmeasured"] == 1000
+    assert {r["label"]: r["cache_known"] for r in t["by_llm"]} == {"AI Gateway · qwen": 0, "relay · claude-opus-5": 1}
