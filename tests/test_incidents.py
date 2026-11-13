@@ -473,3 +473,20 @@ def test_running_investigation_is_not_released(flow, users):
         finally:
             incidents._running.discard(iid)
         assert conn.execute("SELECT stage FROM incident WHERE id=?", (iid,)).fetchone()["stage"] == "investigating"
+
+
+def test_model_error_during_investigation_marks_error_without_report(flow, users):
+    class Dropped(Reporting):
+        def run_agent(self, *a, **kw):
+            raise llm.LLMError("mất kết nối tới API giữa chừng, thử lại sau")
+
+    iid = _web_incident(users)
+    provider = Dropped(0.99, [RESTART])
+    llm.set_provider(provider)
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+    inc = flow.get(f"/api/incidents/{iid}").json()
+    assert inc["stage"] == "error" and inc["actions"] == [] and provider.data is None  # không viết báo cáo từ câu "Lỗi khi gọi model"
+    assert any(e["kind"] == "error" and "mất kết nối" in e["text"] for e in inc["timeline"])
+    msg = flow.get(f"/api/conversations/{inc['conversation_id']}").json()["messages"][0]
+    assert "mất kết nối" in msg["error"]

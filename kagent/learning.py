@@ -6,7 +6,7 @@ import threading
 
 from . import db, entities, knowledge, learned, llm
 from .config import settings
-from .knowledge import scrub
+from .knowledge import scrub_data
 from .retrieval import near, tokenize
 
 _lock = threading.Lock()
@@ -40,7 +40,7 @@ def _episode_view(episode: dict) -> dict:
             if len(text) > STEP_RESULT_CHARS:
                 step["result"] = text[:STEP_RESULT_CHARS] + f"…(đã cắt {len(text) - STEP_RESULT_CHARS} ký tự)"
         view["trace"].append(step)
-    return json.loads(scrub(json.dumps(view, ensure_ascii=False)))
+    return scrub_data(view)
 
 
 def _judge(conn, tenant_id: str, provider, episode: dict) -> None:

@@ -477,6 +477,12 @@ def _investigate_run(conn, tenant_id: str, incident_id: str, inc, user: str, tas
             _event(conn, tenant_id, incident_id, "stopped", f"điều tra bị dừng bởi {who['username'] if who else 'người dùng'} sau {len(steps)} lệnh đọc",
                    {"by": run.stop.by, "episode_id": ep["id"]})
         return {}
+    failed = next((s["message"] for s in ep["trace"] if s["type"] == "error"), None)
+    if failed:
+        with db.tx(conn):
+            conn.execute("UPDATE incident SET stage='error', episode_id=?, updated_at=? WHERE id=?", (ep["id"], db.iso(), incident_id))
+            _event(conn, tenant_id, incident_id, "error", f"điều tra lỗi khi gọi model: {failed}; bấm Điều tra lại để chạy lại", {"episode_id": ep["id"]})
+        return {}
     roles = gateway.user_roles(conn, tenant_id, user)
     tools = _write_tools(conn, tenant_id, user, inc["env"], roles)
     data = {"alerts": alerts, "investigation": ep["output"], "tools": tools,
@@ -687,7 +693,7 @@ def list_incidents(conn, tenant_id: str, status: str = "open", limit: int = 100)
     return out
 
 
-SHOWN_EVENTS = ("investigated", "verified", "resolved", "closed", "no_action", "stopped")
+SHOWN_EVENTS = ("investigated", "verified", "resolved", "closed", "no_action", "stopped", "error")
 
 
 def timeline(conn, inc: dict, alerts: list[dict]) -> list[dict]:

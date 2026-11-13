@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 import pytest
@@ -177,3 +178,14 @@ def test_project_scope_does_not_leak(users):
 def test_bm25_handles_special_characters(users):
     with db.session() as conn:
         assert retrieval.retrieve(conn, users["alice"].tenant, 'a"b OR (c:* NEAR') == []
+
+
+def test_episode_view_keeps_numbers_and_scrubs_strings():
+    ep = {"id": "e", "input": {"task": "token: abc123 gửi a.b@c.vn"}, "trace": [
+        {"type": "tool_call", "tool": "prometheus.query_range", "args": {"password": "hunter2"},
+         "result": {"values": [[1762992000, "3"], [1762992045, "3"]], "min": 0.123456789012, "account": "0123456789012"}}]}
+    view = learning._episode_view(ep)  # trước đây: JSONDecodeError vì timestamp và số thực thành [NUMBER] trần
+    raw = json.dumps(view, ensure_ascii=False)
+    assert "1762992000" in raw and "0.123456789012" in raw
+    for leak in ("abc123", "a.b@c.vn", "hunter2", "0123456789012"):
+        assert leak not in raw

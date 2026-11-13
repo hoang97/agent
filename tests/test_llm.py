@@ -97,3 +97,25 @@ def test_model_error_recorded_as_failed_episode(users):
     ep = users["alice"].run("xem pod")
     assert ep["outcome"] == "failure" and "mất kết nối" in ep["output"]
     assert tool_steps(ep) == []
+
+
+def test_stream_dropped_midway_becomes_llm_error():
+    import httpx2
+
+    class Dropping:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def close(self):
+            pass
+
+        def __iter__(self):
+            raise httpx2.RemoteProtocolError("peer closed connection without sending complete message body (incomplete chunked read)")
+
+    fake = NS(stream=lambda **kw: Dropping(), create=None)
+    p = llm.AnthropicProvider(NS(messages=fake, beta=NS(messages=fake)))
+    with pytest.raises(llm.LLMError, match="mất kết nối"):
+        p._create("strong", on_text=lambda t: None, max_tokens=10, messages=[])

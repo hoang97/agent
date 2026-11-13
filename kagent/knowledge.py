@@ -32,6 +32,24 @@ def scrub(text: str | None) -> str:
     return text
 
 
+_SECRET_KEY = re.compile(r"(?i)^(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|authorization)$")
+
+
+def scrub_data(value):
+    """scrub cho dữ liệu đã parse: chỉ lọc chuỗi nên số và cấu trúc JSON giữ nguyên.
+
+    Lọc trên chuỗi JSON thì mẫu số dài ăn cả timestamp/số thực thành [NUMBER] trần, JSON hỏng.
+    """
+    if isinstance(value, str):
+        return scrub(value)
+    if isinstance(value, list):
+        return [scrub_data(v) for v in value]
+    if isinstance(value, dict):
+        return {k: "[REDACTED]" if isinstance(k, str) and _SECRET_KEY.match(k) and isinstance(v, (str, int, float)) and v != "" else scrub_data(v)
+                for k, v in value.items()}
+    return value
+
+
 def _snapshot(ku: dict | None) -> str | None:
     if ku is None:
         return None

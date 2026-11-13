@@ -13,6 +13,7 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 import anthropic
+import httpx2  # thư viện HTTP của cả hai SDK: lỗi mạng giữa lúc đang stream không được SDK bọc thành APIConnectionError
 import openai
 
 from . import vault
@@ -776,6 +777,8 @@ class AnthropicProvider(_StructuredProvider):
             raise LLMError(f"lỗi API {exc.status_code}") from exc
         except anthropic.APIConnectionError as exc:
             raise LLMError("không kết nối được API") from exc
+        except httpx2.TransportError as exc:
+            raise LLMError("mất kết nối tới API giữa chừng, thử lại sau") from exc
         if response.stop_reason == "refusal":
             raise LLMError("model từ chối xử lý yêu cầu")
         if response.stop_reason == "max_tokens":
@@ -953,6 +956,8 @@ class OpenAIProvider(_StructuredProvider):
             raise LLMError("không kết nối được API") from exc
         except openai.OpenAIError as exc:
             raise LLMError("API trả về dữ liệu không hợp lệ") from exc
+        except httpx2.TransportError as exc:
+            raise LLMError("mất kết nối tới API giữa chừng, thử lại sau") from exc
         if not response.choices:
             raise LLMError("API không trả về kết quả")
         reason = response.choices[0].finish_reason
