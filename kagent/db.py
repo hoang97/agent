@@ -269,6 +269,15 @@ CREATE INDEX IF NOT EXISTS ix_incident_action ON incident_action(incident_id, pr
 CREATE INDEX IF NOT EXISTS ix_incident_action_approval ON incident_action(approval_id);
 CREATE INDEX IF NOT EXISTS ix_incident_action_pending ON incident_action(tenant_id, status);
 
+-- Ảnh chụp mỗi lượt điều tra của sự cố (rounds.py): kết luận, entity liên quan, tín hiệu và topology con tại lúc điều tra.
+-- Không sửa sau khi ghi; panel sự cố đọc từ đây để nhận định luôn gắn với lượt đã sinh ra nó.
+CREATE TABLE IF NOT EXISTS incident_round (
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, incident_id TEXT NOT NULL, round INTEGER NOT NULL,
+  episode_id TEXT, created_at TEXT NOT NULL, steps INTEGER NOT NULL DEFAULT 0,
+  report TEXT NOT NULL, entities TEXT NOT NULL DEFAULT '[]', signals TEXT NOT NULL DEFAULT '[]', graph TEXT NOT NULL DEFAULT '{}',
+  UNIQUE(incident_id, round)
+);
+
 -- Việc cần người làm ngoài khả năng của kagent (vd. đẩy lại image lên registry). source: summary (bản tóm tắt nêu) | user.
 -- removed_at: bản tóm tắt sau không còn nêu việc chưa xong; việc đã xong thì giữ.
 CREATE TABLE IF NOT EXISTS incident_task (

@@ -17,6 +17,8 @@ const ICONS = {
   down_arrow: "M12 5v14M5 12l7 7 7-7",
   save: "M6 4h12v16l-6-4-6 4z",
   book: "M5 4h11a3 3 0 013 3v13H8a3 3 0 01-3-3zM5 17a3 3 0 013-3h11",
+  close: "M6 6l12 12M18 6L6 18",
+  panel: "M4 4h16v16H4zM15 4v16",
 };
 
 function icon(name) {
@@ -411,7 +413,8 @@ function questionCard(step, answerable, onAnswer) {
 
 function chatView(main) {
   const thread = h("div", { class: "thread" });
-  let recap = null;  // thẻ tóm tắt sự cố, luôn ở cuối hội thoại
+  let recap = null;  // thẻ tóm tắt sự cố: trong panel sự cố nếu có, không thì ở cuối hội thoại
+  let panelCtl = null;  // panel sự cố ở cột phải (panel.js), chỉ có ở hội thoại điều tra của sự cố
   const scroller = h("div", { class: "scroller" }, thread);
   const toBottom = iconButton("down_arrow", "Xuống cuối", () => { scroller.scrollTop = scroller.scrollHeight; }, "to-bottom hidden");
   let stick = true;
@@ -702,7 +705,7 @@ function chatView(main) {
     const status = h("div", { class: "live-status small muted", role: "status" });
     const liveEl = h("div", { class: "msg assistant live" }, flow, status);
     addKids(thread, liveEl);
-    if (recap) { recap.markStale(); addKids(thread, recap); }
+    if (recap) { recap.markStale(); if (!panelCtl) addKids(thread, recap); }
     stick = true;
     scroll();
 
@@ -762,6 +765,7 @@ function chatView(main) {
         blocks.set(ev.message.id, liveEl);
         replaceBlock(ev.message);
         if (continueEpisode) refreshBlocks().catch(() => {});  // lượt gốc giờ đã "continued": bỏ nút Tiếp tục
+        if (panelCtl) panelCtl.reload();
         scroll();
         refreshConversations();
         updatePending();
@@ -836,6 +840,7 @@ function chatView(main) {
     syncSend();
     if (state.conversationId !== conv) return;
     if (turn) turn.stopPaint();
+    if (panelCtl) panelCtl.reload();
     const data = await api("GET", `/api/conversations/${conv}`);
     for (const m of data.messages.slice(known)) {
       if (turn && m.id === episodeId) { blocks.set(m.id, turn.liveEl); replaceBlock(m); }
@@ -913,7 +918,28 @@ function chatView(main) {
     pendingBar,
     h("div", { class: "composer" }, input, h("div", { class: "composer-bar" }, env, focusBtn, h("span", { class: "spacer" }), sendBtn)),
     h("div", { class: "hint" }, notice + "Agent dùng công cụ thật qua các kết nối bạn được phép. Enter để gửi, Shift+Enter xuống dòng."));
-  addKids(main, scroller, toBottom, composer);
+  addKids(main, h("div", { class: "chat-col" }, scroller, toBottom, composer));
+
+  // Hội thoại điều tra của sự cố: panel sự cố ở cột phải, tóm tắt sự cố nằm trong panel.
+  const mountIncidentPanel = (incidentId) => {
+    const aside = h("aside", { "aria-label": "Panel sự cố" });
+    main.classList.add("with-panel");
+    if (store.get("panel:collapsed", false)) main.classList.add("panel-collapsed");
+    const toggle = iconButton("panel", "Ẩn/hiện panel sự cố", () => {
+      store.set("panel:collapsed", main.classList.toggle("panel-collapsed") || null);
+    }, "panel-toggle");
+    addKids(main, toggle, aside);
+    panelCtl = incidentPanel(aside, incidentId, {
+      mode: "compact",
+      summary: recap,
+      modalHost: main,  // đồ thị đầy đủ mở đè lên khung chat, không bị bó trong cột panel
+      onAsk: (text) => { input.value = text; resize(); syncSend(); input.focus(); input.setSelectionRange(text.length, text.length); },
+      onShowApproval: () => {
+        const el = thread.querySelector(".approval.waiting");
+        if (el) el.scrollIntoView({ behavior: "smooth", block: "center" }); else toast("Không thấy thẻ duyệt trong hội thoại này; mở trang sự cố để xem.");
+      },
+    });
+  };
 
   return (async () => {
     if (state.conversationId) {
@@ -929,7 +955,7 @@ function chatView(main) {
         data.messages.forEach(addMessage);
         if (data.incident_id) {
           recap = summaryCard(data.incident_summary, data.incident_id);
-          addKids(thread, recap);
+          if (typeof incidentPanel === "function") mountIncidentPanel(data.incident_id); else addKids(thread, recap);
           // Như Claude Code: người quay lại trang thấy ngay bản mới máy chủ đã viết trong lúc vắng.
           const onVisible = () => {
             if (!recap.isConnected) { document.removeEventListener("visibilitychange", onVisible); return; }

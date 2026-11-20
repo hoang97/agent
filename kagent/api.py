@@ -1672,6 +1672,12 @@ def incident_get(incident_id: str, t: Tenant = Depends(current_tenant), conn=Dep
     return _incident_call(lambda: incidents.get(conn, t.tenant_id, incident_id))
 
 
+@app.get("/api/incidents/{incident_id}/panel")
+def incident_panel(incident_id: str, round: int | None = None, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    """Panel sự cố trong hội thoại điều tra và trang sự cố: dữ liệu sự cố kèm ảnh chụp theo lượt điều tra."""
+    return _incident_call(lambda: incidents.panel(conn, t.tenant_id, incident_id, round))
+
+
 class IncidentMerge(BaseModel):
     into: str
 
