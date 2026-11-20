@@ -1775,7 +1775,7 @@ def alert_settings_get(t: Tenant = Depends(current_tenant), conn=Depends(get_con
         "SELECT name, template, envs FROM connection WHERE tenant_id=? AND status='active' AND scope='tenant' AND template IN (%s) ORDER BY name"
         % ",".join("?" * len(incidents.SOURCE_TEMPLATES)), (t.tenant_id, *incidents.SOURCE_TEMPLATES)).fetchall()]
     return {"settings": incidents.settings(conn, t.tenant_id), "defaults": incidents.DEFAULTS, "available_sources": available,
-            "can_manage": t.is_admin, **incidents.source_status(t.tenant_id)}
+            "can_manage": t.is_admin, "topology": incidents.topology.status(conn, t.tenant_id), **incidents.source_status(t.tenant_id)}
 
 
 @app.put("/api/alert-settings")
@@ -1795,6 +1795,13 @@ def alert_poll_now(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     result = incidents.poll(conn, t.tenant_id)
     incidents.follow_up(conn, t.tenant_id)
     return result
+
+
+@app.post("/api/alert-settings/topology")
+def alert_topology_now(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    """Đọc lại topology k8s ngay (ở luồng nền); trang cài đặt hỏi lại trạng thái sau vài giây."""
+    t.require_admin()
+    return {"started": incidents.topology.start_refresh(t.tenant_id), **incidents.topology.status(conn, t.tenant_id)}
 
 
 def _learned_view(conn, t: Tenant, row: dict) -> dict:
@@ -2042,7 +2049,8 @@ def metrics(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
                                   "FROM episode WHERE tenant_id=? GROUP BY week ORDER BY week DESC LIMIT 8", (tid,)).fetchall())
     decided = status.get("active", 0) + status.get("rejected", 0)
     n = e["n"] or 1
-    return {**_base_metrics(e, n, status, decided, decisions, weekly), "tokens": token_metrics(conn, tid)}
+    return {**_base_metrics(e, n, status, decided, decisions, weekly), "tokens": token_metrics(conn, tid),
+            "grouping": incidents.quality.grouping(conn, tid)}
 
 
 def token_metrics(conn, tid: str, days: int = 7) -> dict:

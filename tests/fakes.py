@@ -53,6 +53,9 @@ class Infra:
         self.k8s_rv: dict[tuple, int] = {}
         self.k8s_unready: dict[tuple, int] = {}  # (ns, tên) → số pod sẵn sàng, giả lập rollout không lên
         self.k8s_forbid_grant = False  # giả lập tài khoản quản trị thiếu quyền nên không cấp được Role
+        # Topology cho gom cảnh báo: namespace → [(Kind, tên, selector, nhãn pod, backend ingress, giá trị biến môi trường)]
+        self.k8s_topology: dict[str, list[tuple]] = {}
+        self.topology_reads: list[str] = []
         self.os_tokens: set[str] = set()
         self.os_logins: list[dict] = []
         self.os_calls: list[tuple[str, str, object]] = []
@@ -72,6 +75,15 @@ class Infra:
                 "metadata": {"name": name, "namespace": ns, "resourceVersion": str(rv), "generation": rv, "uid": f"uid-{ns}-{name}"},
                 "spec": {"replicas": n, "template": {"spec": {"containers": [{"name": name, "image": f"{name}:1"}]}}},
                 "status": {"replicas": n, "updatedReplicas": n, "availableReplicas": self.k8s_unready.get((ns, name), n), "observedGeneration": rv}}
+
+    def topology_text(self, ns: str) -> str:
+        """Như kubectl get svc,deploy,... -o jsonpath=<incidents.topology.JSONPATH>: một dòng mỗi đối tượng, map in dạng JSON."""
+        self.topology_reads.append(ns)
+        lines = []
+        for kind, name, selector, labels, backends, env in self.k8s_topology.get(ns, []):
+            lines.append("\t".join([kind, ns, name, json.dumps(selector) if selector else "", json.dumps(labels) if labels else "",
+                                    " " + " ".join(backends), " ".join(env)]))
+        return "\n".join(lines) + ("\n" if lines else "")
 
     def set_deployment(self, ns: str, name: str, replicas: int) -> None:
         self.deployments.setdefault(ns, {})[name] = replicas
@@ -523,6 +535,8 @@ def kubectl_runner(infra: "Infra"):
         as_json = cmd[-2:] == ["-o", "json"]
         if as_json:
             cmd = cmd[:-2]
+        if cmd[-2:-1] == ["-o"] and cmd[-1].startswith("jsonpath={range .items[*]}{.kind}"):
+            return 0, infra.topology_text(ns), "", False
         as_name = cmd[-2:] == ["-o", "name"]
         if as_name:
             cmd = cmd[:-2]

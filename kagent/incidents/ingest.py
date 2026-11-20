@@ -4,12 +4,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from datetime import timedelta
 
 from .. import db
 from ..tools import ENVS
 from .common import SOURCE_TEMPLATES, _event, _state
 from .config import settings
-from .grouping import _maybe_resolved, assign
+from .grouping import _maybe_resolved, group_new
 
 log = logging.getLogger("kagent.incidents")
 
@@ -88,26 +89,45 @@ def poll(conn, tenant_id: str) -> dict:
                     conn.execute("UPDATE alert_event SET last_seen=?, summary=?, status='firing', resolved_at=NULL WHERE id=?", (now, a["summary"], r["id"]))
                     seen.append(r["id"])
                     continue
-                aid = db.new_id()
-                conn.execute("INSERT INTO alert_event(id,tenant_id,source,fingerprint,starts_at,alertname,severity,labels,summary,env,first_seen,last_seen) "
-                             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                             (aid, tenant_id, name, a["fingerprint"], a["starts_at"], a["alertname"], a["severity"],
-                              json.dumps(a["labels"], ensure_ascii=False), a["summary"], a["env"], now, now))
+                aid = insert(conn, tenant_id, name, a, now, cfg)
                 seen.append(aid)
                 new.append(aid)
             marks = ",".join("?" * len(seen)) or "''"
             gone = conn.execute(f"SELECT id, incident_id, alertname FROM alert_event WHERE tenant_id=? AND source=? AND status='firing' AND id NOT IN ({marks})",
                                 (tenant_id, name, *seen)).fetchall()
             for g in gone:
-                conn.execute("UPDATE alert_event SET status='resolved', resolved_at=? WHERE id=?", (now, g["id"]))
+                resolve(conn, tenant_id, g, now)
                 resolved += 1
-                if g["incident_id"]:
-                    _event(conn, tenant_id, g["incident_id"], "alert_resolved", f"cảnh báo {g['alertname']} đã hết")
-                    _maybe_resolved(conn, tenant_id, g["incident_id"])
-    # Gom sau khi đã ghi xong: assign có thể gọi LLM, không được giữ giao dịch trong lúc đó.
-    for aid in sorted(new, key=lambda i: conn.execute("SELECT starts_at FROM alert_event WHERE id=?", (i,)).fetchone()["starts_at"]):
-        assign(conn, tenant_id, aid, cfg)
+    # Gom sau khi đã ghi xong: gom có thể gọi LLM, không được giữ giao dịch trong lúc đó.
+    group_new(conn, tenant_id, new, cfg)
     return {"new": len(new), "resolved": resolved, "sources": state["sources"]}
+
+
+FLAP_WINDOW = timedelta(hours=1)
+
+
+def resolve(conn, tenant_id: str, g, now: str) -> None:
+    """Cảnh báo không còn trong nguồn: đánh dấu hết, sự cố hết cảnh báo đang bắn thì thành đã hết."""
+    conn.execute("UPDATE alert_event SET status='resolved', resolved_at=? WHERE id=?", (now, g["id"]))
+    if g["incident_id"]:
+        _event(conn, tenant_id, g["incident_id"], "alert_resolved", f"cảnh báo {g['alertname']} đã hết")
+        _maybe_resolved(conn, tenant_id, g["incident_id"])
+
+
+def insert(conn, tenant_id: str, source: str, a: dict, now: str, cfg: dict, alert_id: str | None = None) -> str:
+    """Ghi một lần bắn mới. Cùng fingerprint đã bắn từ flap_count lần trong 1 giờ (tính cả lần này) thì đánh dấu chập chờn."""
+    flapping = 0
+    limit = cfg["grouping"]["flap_count"]
+    if limit:
+        before = conn.execute("SELECT count(*) n FROM alert_event WHERE tenant_id=? AND source=? AND fingerprint=? AND first_seen>=?",
+                              (tenant_id, source, a["fingerprint"], db.iso(db.now() - FLAP_WINDOW))).fetchone()["n"]
+        flapping = int(before + 1 >= limit)
+    aid = alert_id or db.new_id()
+    conn.execute("INSERT INTO alert_event(id,tenant_id,source,fingerprint,starts_at,alertname,severity,labels,summary,env,first_seen,last_seen,flapping) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (aid, tenant_id, source, a["fingerprint"], a["starts_at"], a["alertname"], a["severity"],
+                  json.dumps(a["labels"], ensure_ascii=False), a["summary"], a["env"], now, now, flapping))
+    return aid
 
 
 def source_status(tenant_id: str) -> dict:

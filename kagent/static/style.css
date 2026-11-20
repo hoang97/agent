@@ -143,6 +143,9 @@ header.top { display: flex; align-items: center; gap: 8px; padding: 8px 16px; mi
 .card h3 { margin: 0 0 8px; font-size: 15px; }
 h2 { font-size: 18px; margin: 0 0 12px; }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+/* Ô đánh dấu có nhãn dài: chữ xuống dòng bên cạnh ô, không rơi xuống dưới ô. */
+.check-row { flex-wrap: nowrap; align-items: flex-start; }
+.check-row input { flex: none; margin-top: 2px; }
 .spread { justify-content: space-between; }
 label.field { display: flex; flex-direction: column; gap: 3px; font-size: 13px; color: var(--muted); }
 .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: var(--code); color: var(--text); white-space: nowrap; }

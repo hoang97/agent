@@ -31,7 +31,19 @@ DEFAULTS = {
     "auto_merge": True,
     # Như session recap của Claude Code: viết lại tóm tắt khi đã yên idle_minutes sau hoạt động mới.
     "summary": {"enabled": True, "idle_minutes": 5},
+    # Gom nâng cao (docs/GROUPING-PLAN.md). Mặc định tắt hết: bật từng phần sau khi chạy lại trên dữ liệu cũ thấy tốt hơn.
+    "grouping": {
+        "batch": False,  # gom các cảnh báo mới của cùng một vòng poll thành cụm trước, rồi mới khớp với sự cố
+        "scoring": False,  # chấm điểm bằng chứng thay cho luật nhãn group_labels; LLM chỉ quyết phần lưng chừng
+        "partition_labels": ["cluster"],  # khi chấm điểm: khác nhau ở các nhãn này thì không bao giờ chung sự cố
+        "join_threshold": 0.7, "suggest_threshold": 0.4, "burst_seconds": 120,
+        "ai_max_calls": 5,  # số lần hỏi LLM tối đa mỗi vòng poll
+        "topology_minutes": 0,  # đọc topology k8s mỗi N phút (0 = tắt)
+        "flap_count": 0,  # bắn lại từ N lần trong 1 giờ là chập chờn: không điều tra lại mỗi lần (0 = tắt)
+        "open_min_severity": "",  # dưới mức này thì không tự mở sự cố mới ("" = mức nào cũng mở)
+    },
 }
+OPEN_SEVERITIES = ("", "info", "warning", "error", "critical")
 
 
 def check_settings(data) -> dict:
@@ -94,6 +106,45 @@ def check_settings(data) -> dict:
     if not 1 <= idle <= 120:
         raise IncidentError("summary.idle_minutes phải nằm trong 1-120")
     out["summary"] = {"enabled": bool(summary.get("enabled", out["summary"]["enabled"])), "idle_minutes": idle}
+    out["grouping"] = _check_grouping(data.get("grouping", {}))
+    return out
+
+
+def _check_grouping(data) -> dict:
+    out = copy.deepcopy(DEFAULTS["grouping"])
+    if not isinstance(data, dict) or set(data) - set(out):
+        raise IncidentError(f"grouping chỉ gồm {', '.join(out)}")
+
+    def num(key, low, high, kind=int):
+        try:
+            value = kind(data.get(key, out[key]))
+        except (TypeError, ValueError) as exc:
+            raise IncidentError(f"grouping.{key} phải là số") from exc
+        if not low <= value <= high:
+            raise IncidentError(f"grouping.{key} phải nằm trong {low}-{high}")
+        return value
+
+    out["batch"] = bool(data.get("batch", out["batch"]))
+    out["scoring"] = bool(data.get("scoring", out["scoring"]))
+    labels = data.get("partition_labels", out["partition_labels"])
+    if not isinstance(labels, list) or not all(isinstance(x, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", x) for x in labels):
+        raise IncidentError("grouping.partition_labels là danh sách tên nhãn")
+    out["partition_labels"] = list(dict.fromkeys(labels))[:10]
+    out["join_threshold"] = num("join_threshold", 0.5, 1.0, float)
+    out["suggest_threshold"] = num("suggest_threshold", 0.1, 1.0, float)
+    if out["suggest_threshold"] > out["join_threshold"]:
+        raise IncidentError("grouping.suggest_threshold không được lớn hơn join_threshold")
+    out["burst_seconds"] = num("burst_seconds", 0, 1800)
+    out["ai_max_calls"] = num("ai_max_calls", 0, 50)
+    out["topology_minutes"] = num("topology_minutes", 0, 1440)
+    if 0 < out["topology_minutes"] < 5:
+        raise IncidentError("grouping.topology_minutes: 0 (tắt) hoặc từ 5 phút")
+    out["flap_count"] = num("flap_count", 0, 20)
+    if out["flap_count"] == 1:
+        raise IncidentError("grouping.flap_count: 0 (tắt) hoặc từ 2")
+    if data.get("open_min_severity", out["open_min_severity"]) not in OPEN_SEVERITIES:
+        raise IncidentError(f"grouping.open_min_severity là một trong {', '.join(repr(x) for x in OPEN_SEVERITIES)}")
+    out["open_min_severity"] = data.get("open_min_severity", out["open_min_severity"])
     return out
 
 

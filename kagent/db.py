@@ -239,6 +239,13 @@ CREATE TABLE IF NOT EXISTS alert_event (
 CREATE INDEX IF NOT EXISTS ix_alert_incident ON alert_event(incident_id);
 CREATE INDEX IF NOT EXISTS ix_alert_firing ON alert_event(tenant_id, source, status);
 
+-- Topology k8s để gom cảnh báo (incidents/topology.py), thay toàn bộ mỗi lần đọc lại. Đối tượng dạng "namespace/loại/tên".
+-- kind: selects (Service → workload) | routes (ingress → Service) | calls (workload → Service, suy từ biến môi trường).
+CREATE TABLE IF NOT EXISTS topology_edge (
+  tenant_id TEXT NOT NULL, env TEXT NOT NULL, src TEXT NOT NULL, dst TEXT NOT NULL, kind TEXT NOT NULL, seen_at TEXT NOT NULL,
+  PRIMARY KEY (tenant_id, env, src, dst, kind)
+);
+
 CREATE TABLE IF NOT EXISTS incident (
   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, env TEXT NOT NULL, title TEXT NOT NULL, severity TEXT,
   status TEXT NOT NULL DEFAULT 'open',
@@ -424,6 +431,11 @@ def init_schema(conn: sqlite3.Connection) -> None:
         from .incidents import actions, grouping
         actions.rebuild_events(conn)  # sự kiện của lệnh viết lại theo dạng "lệnh → kết quả", người làm tính lúc đọc
         grouping.reset_long_titles(conn)
+    alert_cols = {r["name"] for r in conn.execute("PRAGMA table_info(alert_event)")}
+    # role: root | symptom theo topology (incidents/scoring.roles); flapping: lần bắn này thuộc chuỗi bắn rồi hết liên tục.
+    for column, ddl in (("role", "TEXT"), ("role_reason", "TEXT"), ("flapping", "INTEGER NOT NULL DEFAULT 0")):
+        if column not in alert_cols:
+            conn.execute(f"ALTER TABLE alert_event ADD COLUMN {column} {ddl}")
     if "alert_settings" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
         conn.execute("ALTER TABLE tenant ADD COLUMN alert_settings TEXT NOT NULL DEFAULT '{}'")  # luồng tự xử lý cảnh báo (incidents.py)
     if "undo_settings" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
