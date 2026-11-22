@@ -340,3 +340,17 @@ Trang thực thể không do LLM viết lại, nên trùng lặp phải gộp �
   kèm `superseded_by`.
 - **Chạy:** sau lần kiểm tra hằng ngày, trong luồng nền; nút "Tìm KU trùng ngay". Tối đa 60 cụm mỗi lần.
   Dữ liệu thật: 134 cụm, khoảng 700 token input mỗi cụm; thử 4 cụm ra 2 đề xuất đúng, golden giữ 0,9.
+
+## Đợt 39 — 2026-11-22: cân nhắc Code Mode, gọi song song nhiều hơn mỗi bước
+
+Xét đề xuất "Code Mode" (Cloudflare, Anthropic: model viết script gọi nhiều công cụ, kết quả trung gian không vào context).
+
+- **Đo trên `tool_call_audit`** (196 lượt, 2.344 lệnh, 11–22/11): trung vị 8,5 lệnh mỗi lượt, p90 26; 47 lượt gọi một công cụ từ 10 lần.
+  Nhưng lệnh lặp là điều tra: mỗi câu PromQL hay lệnh kubectl khác nhau, chọn theo kết quả bước trước, không phải vòng lặp trên danh sách biết trước.
+- **Quyết định: chưa áp dụng.** Script không cắt được bước suy luận nào; lịch sử đã cache, kết quả lớn đã có `_filter`/`data.query`.
+  Sandbox chạy script là hạ tầng mới và biến nhiều lệnh thành một hộp đen, phá duyệt từng lệnh và hoàn tác của gateway.
+- **Xét lại khi:** có nhiều việc dạng "N mục cùng tiêu chí" (làm `agent.batch {tool, items, filter}` trước, mỗi mục vẫn qua gateway);
+  một tenant vượt khoảng 150 công cụ (tool search); relay hỗ trợ programmatic tool calling của Anthropic (lệnh gọi từ script vẫn về client, giữ được gateway).
+- **Chỗ hở thật:** chỉ khoảng 1,4 lệnh mỗi bước model (lệnh cùng giây coi là một bước), mỗi bước 15–20 giây; các truy vấn độc lập bị tách nhiều bước.
+  `AGENT_SYSTEM` và `SUBAGENT_SYSTEM` nay yêu cầu liệt kê dữ liệu cần cho các giả thuyết rồi gọi hết lệnh không phụ thuộc nhau trong cùng một lượt,
+  chỉ tách bước khi tham số phụ thuộc kết quả trước. Đo lại cùng chỉ số sau triển khai; mục tiêu 2,5–3 lệnh mỗi bước.
