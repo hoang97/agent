@@ -56,8 +56,8 @@ def test_openai_cached_tokens_are_split_out():
     resp = NS(usage=NS(prompt_tokens=1000, completion_tokens=50, prompt_tokens_details=NS(cached_tokens=800)), model="gpt-x")
     p = llm.OpenAIProvider(client=object(), credential=vault.Credential("k", provider="openai", model_strong="gpt-x", profile="LLM nội bộ"))
     with llm.collect_usage() as got:
-        assert p._tokens(resp) == 1050
-        assert p._tokens(NS(usage=resp.usage)) == 1050  # phản hồi stream không có tên model: lấy model đã gọi
+        assert p._tokens(resp) == 530
+        assert p._tokens(NS(usage=resp.usage)) == 530  # phản hồi stream không có tên model: lấy model đã gọi
     assert got[0] == {"purpose": "other", "model": "gpt-x", "input_tokens": 200, "output_tokens": 50, "cache_read": 800, "cache_write": 0, "llm": "LLM nội bộ",
                       "cache_known": True, "cache_write_1h": 0}
     assert got[1]["model"] == "gpt-x"
@@ -239,3 +239,64 @@ def test_one_hour_cache_writes_are_recorded_and_reported(users):
     t = alice.get("/api/metrics").json()["tokens"]
     assert [(r["cache_write"], r["cache_write_1h"]) for r in t["by_purpose"]] == [(900, 700)]
     assert t["by_llm"][0]["cache_write_1h"] == 700
+
+
+def test_record_returns_cost_weighted_tokens():
+    # input 1×, cache đọc 0,1×, ghi 5 phút 1,25×, ghi 1 giờ 2×, output 5×
+    assert llm.weighted(100, 20, cache_read=1000, cache_write=400, cache_write_1h=100) == 100 + 100 + 375 + 200 + 100
+    assert llm._record("m", 100, 20, 1000, 400, cache_write_1h=100) == 875
+
+
+def test_reflector_view_drops_transcript():
+    from kagent import learning
+    ep = {"id": "e", "input": {"task": "x"}, "trace": [], "transcript": json.dumps([{"role": "user", "content": "y" * 5000}])}
+    assert "transcript" not in learning._episode_view(ep) and "transcript" in ep
+
+
+def test_learning_calls_add_to_episode_tokens(users):
+    from kagent import learning
+    alice = users["alice"]
+    ep = alice.run("xem pod trong namespace default")
+
+    class Reflecting(llm.HeuristicProvider):
+        def reflect(self, episode):
+            with llm.purpose("reflect"):
+                llm._record("m", 1000, 10)
+            return []
+
+    with db.session() as conn:
+        before = conn.execute("SELECT tokens FROM episode WHERE id=?", (ep["id"],)).fetchone()["tokens"]
+        llm.set_provider(Reflecting())
+        learning.run_learning(conn, alice.tenant)
+        after = conn.execute("SELECT tokens FROM episode WHERE id=?", (ep["id"],)).fetchone()["tokens"]
+    assert after - before == 1050
+
+
+def test_metrics_report_weighted_cost_and_learning_share(users):
+    alice = users["alice"]
+    ep = alice.run("xem pod trong namespace default")
+    with db.session() as conn:
+        conn.execute("DELETE FROM llm_call")
+        llm.save_usage(conn, alice.tenant, ep["id"], [
+            {"purpose": "agent", "model": "m", "input_tokens": 0, "output_tokens": 100, "cache_read": 10000, "cache_write": 800},
+            {"purpose": "reflect", "model": "m", "input_tokens": 2000, "output_tokens": 0, "cache_read": 0, "cache_write": 0}])
+    t = alice.get("/api/metrics").json()["tokens"]
+    assert {r["purpose"]: r["cost"] for r in t["by_purpose"]} == {"agent": 500 + 1000 + 1000, "reflect": 2000}
+    top = t["top_turns"][0]
+    assert (top["id"], top["llm_calls"], top["cache_read"], top["cost"], top["learn_cost"]) == (ep["id"], 1, 10000, 4500, 2000)
+    assert t["by_llm"][0]["cost"] == 4500
+
+
+def test_schema_migration_recomputes_episode_tokens_once(users):
+    alice = users["alice"]
+    ep = alice.run("xem pod")
+    with db.session() as conn:
+        conn.execute("DELETE FROM llm_call")
+        llm.save_usage(conn, alice.tenant, ep["id"], [{"purpose": "agent", "model": "m", "input_tokens": 0, "output_tokens": 10, "cache_read": 5000, "cache_write": 0}])
+        conn.execute("UPDATE episode SET tokens=5010 WHERE id=?", (ep["id"],))
+        conn.execute("DELETE FROM app_setting WHERE key='episode_tokens_weighted'")
+        db.init_schema(conn)
+        assert conn.execute("SELECT tokens FROM episode WHERE id=?", (ep["id"],)).fetchone()["tokens"] == 550
+        conn.execute("UPDATE episode SET tokens=7 WHERE id=?", (ep["id"],))
+        db.init_schema(conn)
+        assert conn.execute("SELECT tokens FROM episode WHERE id=?", (ep["id"],)).fetchone()["tokens"] == 7

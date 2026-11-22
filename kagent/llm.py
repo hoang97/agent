@@ -52,6 +52,21 @@ def purpose(name: str):
         _purpose.reset(token)
 
 
+# Token quy đổi = chi phí tính bằng token input chưa cache, theo hệ số giá của Claude.
+# Dùng cho episode.tokens, quota ngày và trang đo lường; cộng thô 4 loại thì cache đọc (0,1×) lấn át con số.
+def weighted_sql(t: str = "") -> str:
+    """t: tiền tố bảng trong câu JOIN, vd. "c." """
+    return f"({t}input_tokens + 0.1*{t}cache_read + 1.25*({t}cache_write-{t}cache_write_1h) + 2*{t}cache_write_1h + 5*{t}output_tokens)"
+
+
+def weighted(input_tokens: int, output_tokens: int, cache_read: int = 0, cache_write: int = 0, cache_write_1h: int = 0) -> int:
+    return round(input_tokens + 0.1 * cache_read + 1.25 * (cache_write - cache_write_1h) + 2 * cache_write_1h + 5 * output_tokens)
+
+
+def weighted_of(items: list[dict]) -> int:
+    return sum(weighted(u["input_tokens"], u["output_tokens"], u["cache_read"], u["cache_write"], u.get("cache_write_1h", 0)) for u in items)
+
+
 def _record(model: str, input_tokens: int, output_tokens: int, cache_read: int = 0, cache_write: int = 0, llm: str | None = None,
             cache_known: bool = True, cache_write_1h: int = 0) -> int:
     """cache_known=False: dịch vụ không báo số token cache, nên cache_read=0 không có nghĩa là trượt cache."""
@@ -60,7 +75,7 @@ def _record(model: str, input_tokens: int, output_tokens: int, cache_read: int =
         sink.append({"purpose": _purpose.get(), "model": model, "input_tokens": input_tokens, "output_tokens": output_tokens,
                      "cache_read": cache_read, "cache_write": cache_write, "llm": llm, "cache_known": cache_known,
                      "cache_write_1h": cache_write_1h})
-    return input_tokens + output_tokens + cache_read + cache_write
+    return weighted(input_tokens, output_tokens, cache_read, cache_write, cache_write_1h)
 
 
 def _for(name: str):

@@ -75,7 +75,7 @@ def test_agent_loop_routes_tools_through_gateway_and_marks_untrusted():
 
     out = p.run_agent("tìm log", "ctx", [{"tool": "logs.search_logs", "description": "d", "input_schema": {"type": "object", "properties": {}}}], call_tool)
     assert seen == [("logs.search_logs", {"query": "x"})]
-    assert out["answer"] == "xong" and out["tokens"] == 30
+    assert out["answer"] == "xong" and out["tokens"] == 70
     result = fake.calls[1]["messages"][2]["content"][0]
     assert result["content"].startswith("<untrusted>") and result["is_error"] is False
 

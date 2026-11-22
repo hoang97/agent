@@ -436,6 +436,13 @@ def init_schema(conn: sqlite3.Connection) -> None:
                         ("template", "TEXT"), ("owner_user", "TEXT"), ("canonical", "TEXT")):
         if column not in registry:
             conn.execute(f"ALTER TABLE tool_registry ADD COLUMN {column} {ddl}")
+    if not conn.execute("SELECT 1 FROM app_setting WHERE key='episode_tokens_weighted'").fetchone():
+        # episode.tokens cũ cộng thô 4 loại token: tính lại theo token quy đổi, gồm cả lời gọi học (reflect, judge) của lượt.
+        # Lượt từ trước khi có llm_call giữ số cũ.
+        from .llm import weighted_sql
+        conn.execute(f"UPDATE episode SET tokens=(SELECT CAST(round(sum({weighted_sql()})) AS INTEGER) FROM llm_call c WHERE c.episode_id=episode.id) "
+                     "WHERE id IN (SELECT episode_id FROM llm_call WHERE episode_id IS NOT NULL)")
+        conn.execute("INSERT INTO app_setting(key,value) VALUES ('episode_tokens_weighted','1')")
 
 
 def row(r: sqlite3.Row | None, *json_fields: str) -> dict | None:

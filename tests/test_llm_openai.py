@@ -41,7 +41,7 @@ def provider(*replies):
 def test_json_uses_strict_schema_and_chosen_tier():
     p, seen = provider(completion(json.dumps({"task_type": "docs", "entities": ["a"]})))
     out = p.route("viết tài liệu")
-    assert out == {"task_type": "docs", "entities": ["a"], "tokens": 5}
+    assert out == {"task_type": "docs", "entities": ["a"], "tokens": 13}
     body = seen[0]["body"]
     assert body["model"] == "model-b" and body["response_format"]["type"] == "json_schema" and body["response_format"]["json_schema"]["strict"] is True
     assert seen[0]["auth"] == f"Bearer {KEY}" and seen[0]["path"].endswith("/chat/completions")
@@ -65,7 +65,7 @@ def test_agent_loop_runs_tools_through_callback_and_marks_untrusted():
 
     tools = [{"tool": "logs.search_logs", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
     out = p.run_agent("tìm log", "ctx", tools, call_tool)
-    assert calls == [("logs.search_logs", {"query": "x"})] and (out["answer"], out["tokens"]) == ("xong", 10)
+    assert calls == [("logs.search_logs", {"query": "x"})] and (out["answer"], out["tokens"]) == ("xong", 26)
     assert seen[0]["body"]["tools"][0]["function"]["name"] == "logs__search_logs"
     assistant, result = seen[1]["body"]["messages"][2:4]
     assert assistant["tool_calls"][0]["id"] == "call_1"

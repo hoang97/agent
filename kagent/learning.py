@@ -32,6 +32,7 @@ STEP_RESULT_CHARS = 1500  # Reflector cần biết bước nào làm gì và ra 
 def _episode_view(episode: dict) -> dict:
     """Bản gửi cho Reflector/judge: lọc bí mật và chỉ giữ phần đầu kết quả của từng bước để không tốn token vô ích."""
     view = dict(episode)
+    view.pop("transcript", None)  # bản message gửi model: trùng trace và giữ nguyên kết quả công cụ chưa cắt
     view["trace"] = []
     for step in episode.get("trace") or []:
         if step.get("type") == "tool_call":
@@ -222,6 +223,7 @@ def run_learning(conn, tenant_id: str, limit: int = 50) -> dict:
                 finally:
                     if usage:
                         llm.save_usage(conn, tenant_id, episode["id"], usage)
+                        conn.execute("UPDATE episode SET tokens=tokens+? WHERE id=? AND tenant_id=?", (llm.weighted_of(usage), episode["id"], tenant_id))
         denials = learn_from_denials(conn, tenant_id)
         gated = gate(conn, tenant_id)
         proposed = learned.propose(conn, tenant_id)

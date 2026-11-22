@@ -338,7 +338,7 @@ def test_openai_stream_assembles_tool_call_fragments():
 
     result = p.run_agent("x", "c", [], call_tool, on_text=out.append)
     assert called == [("k8s.kubectl_read", {"namespace": "default"})]
-    assert "".join(out) == "Đã xong" == result["answer"] and result["tokens"] == 14
+    assert "".join(out) == "Đã xong" == result["answer"] and result["tokens"] == 46
     assert seen[0]["stream"] is True and seen[0]["stream_options"] == {"include_usage": True}
     assert seen[1]["messages"][-2]["tool_calls"][0]["function"]["arguments"] == '{"namespace": "default"}'
 

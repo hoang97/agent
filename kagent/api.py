@@ -2074,8 +2074,8 @@ def token_metrics(conn, tid: str, days: int = 7) -> dict:
     since = db.iso(db.now() - timedelta(days=days))
     by_purpose = db.rows(conn.execute(
         "SELECT purpose, count(*) calls, sum(input_tokens) input, sum(output_tokens) output, sum(cache_read) cache_read, sum(cache_write) cache_write, "
-        "sum(cache_write_1h) cache_write_1h "
-        "FROM llm_call WHERE tenant_id=? AND at>=? GROUP BY purpose ORDER BY sum(input_tokens+cache_read+cache_write+output_tokens) DESC", (tid, since)).fetchall())
+        f"sum(cache_write_1h) cache_write_1h, CAST(round(sum({llm.weighted_sql()})) AS INTEGER) cost "
+        "FROM llm_call WHERE tenant_id=? AND at>=? GROUP BY purpose ORDER BY cost DESC", (tid, since)).fetchall())
     # Tỷ lệ cache chỉ tính trên lời gọi có báo token cache; phần không báo tách riêng thay vì kéo tỷ lệ về 0.
     known = conn.execute("SELECT coalesce(sum(CASE WHEN cache_known=1 THEN input_tokens+cache_read+cache_write END),0) total_in, "
                          "coalesce(sum(CASE WHEN cache_known=1 THEN cache_read END),0) cached, "
@@ -2094,11 +2094,15 @@ def token_metrics(conn, tid: str, days: int = 7) -> dict:
                 t["calls"] += 1
                 t["result_chars"] += size
                 t["max_chars"] = max(t["max_chars"], size)
+    learn = "c.purpose IN ('reflect','curate','judge')"
+    cost = llm.weighted_sql("c.")
+    # Chi phí của lượt gồm cả lời gọi học chạy sau đó (reflect, curate, judge); các cột token thô chỉ tính lúc chạy.
     top_turns = db.rows(conn.execute(
-        "SELECT e.id, e.started_at, substr(json_extract(e.input, '$.task'), 1, 80) task, count(c.id) llm_calls, sum(c.input_tokens) input, "
-        "sum(c.cache_read) cache_read, sum(c.cache_write) cache_write, sum(c.output_tokens) output "
-        "FROM episode e JOIN llm_call c ON c.episode_id=e.id AND c.purpose!='reflect' AND c.purpose!='curate' AND c.purpose!='judge' "
-        "WHERE e.tenant_id=? AND e.started_at>=? GROUP BY e.id ORDER BY sum(c.input_tokens+c.cache_read+c.cache_write+c.output_tokens) DESC LIMIT 10",
+        f"SELECT e.id, e.started_at, substr(json_extract(e.input, '$.task'), 1, 80) task, sum(NOT {learn}) llm_calls, "
+        f"sum(CASE WHEN {learn} THEN 0 ELSE c.input_tokens END) input, sum(CASE WHEN {learn} THEN 0 ELSE c.cache_read END) cache_read, "
+        f"sum(CASE WHEN {learn} THEN 0 ELSE c.cache_write END) cache_write, sum(CASE WHEN {learn} THEN 0 ELSE c.output_tokens END) output, "
+        f"CAST(round(sum({cost})) AS INTEGER) cost, CAST(round(sum(CASE WHEN {learn} THEN {cost} ELSE 0 END)) AS INTEGER) learn_cost "
+        "FROM episode e JOIN llm_call c ON c.episode_id=e.id WHERE e.tenant_id=? AND e.started_at>=? GROUP BY e.id ORDER BY cost DESC LIMIT 10",
         (tid, since)).fetchall())
     for t in top_turns:
         step = ctx_of.get(t["id"], {})
@@ -2129,7 +2133,7 @@ def llm_usage(conn, tid: str, days: int = 14) -> dict:
     total = "input_tokens+cache_read+cache_write+output_tokens"
     by_llm = db.rows(conn.execute(
         f"SELECT {label} label, count(*) calls, sum(input_tokens) input, sum(cache_read) cache_read, sum(cache_write) cache_write, sum(cache_write_1h) cache_write_1h, "
-        f"sum(output_tokens) output, sum({total}) total, min(at) first_at, min(cache_known) cache_known FROM llm_call WHERE tenant_id=? AND substr(at,1,10)>=? "
+        f"sum(output_tokens) output, sum({total}) total, CAST(round(sum({llm.weighted_sql()})) AS INTEGER) cost, min(at) first_at, min(cache_known) cache_known FROM llm_call WHERE tenant_id=? AND substr(at,1,10)>=? "
         f"GROUP BY label ORDER BY total DESC", (tid, since)).fetchall())
     daily = db.rows(conn.execute(
         f"SELECT substr(at,1,10) day, {label} label, sum({total}) total, count(*) calls FROM llm_call WHERE tenant_id=? AND substr(at,1,10)>=? "

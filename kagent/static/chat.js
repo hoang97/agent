@@ -555,7 +555,7 @@ function chatView(main) {
     if (remember) addKids(row, remember);
     if (saveTool) addKids(row, saveTool);
     if (m.task === lastTask) addKids(row, iconButton("retry", "Gửi lại", () => send(m.task)));
-    addKids(row, h("span", { class: "meta" }, `${m.env} · ${m.ku_used} KU${m.tokens ? ` · ${m.tokens} token` : ""}`));
+    addKids(row, h("span", { class: "meta" }, `${m.env} · ${m.ku_used} KU${m.tokens ? ` · ${m.tokens} token quy đổi` : ""}`));
     return row;
   }
 
