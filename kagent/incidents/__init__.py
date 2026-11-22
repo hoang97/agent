@@ -1,6 +1,7 @@
 """Luồng tự xử lý cảnh báo của một tenant.
 
-poll Alertmanager/Prometheus → khử trùng lặp theo fingerprint → gom thành sự cố (luật nhãn, quan hệ k8s, rồi mới tới LLM)
+poll Alertmanager/Prometheus → khử trùng lặp theo fingerprint → gom thành sự cố (luật nhãn, quan hệ k8s, rồi mới tới LLM;
+hoặc chấm điểm bằng chứng với topology k8s khi bật grouping.scoring, xem docs/GROUPING-PLAN.md)
 → điều tra bằng agent chỉ đọc → báo cáo nguyên nhân + đề xuất hành động → hành động đi qua gateway như mọi lệnh khác
 (độ tin dưới ngưỡng cài đặt của môi trường thì bị ép hỏi) → chờ vài phút rồi xác minh cảnh báo đã hết chưa.
 
@@ -13,9 +14,10 @@ from .actions import act, dismiss, follow_up, has_pending, migrate, rebuild_even
 from .common import (BOT, first_sentence, who, SEVERITY, SOURCE_TEMPLATES, STAGE_LABEL, STAGES, WAITING_ON_HUMAN, IncidentError, MANIFEST_VERBS, describe, _cmd, _event, _is_write, _later,
                      _lock, _method_label, _running, _shown_stage, _slots, _state, _summarizing, _summary_failed, _waiting, _worse)
 from .config import DEFAULTS, bot_user, check_settings, save_settings, settings
-from .grouping import (RELATED_DAYS, related, suggestions, EXPORTER_JOBS, EXPORTER_LABELS, _attach, _brief, _feedback, _maybe_resolved, _owner, _rule_match, assign, auto_merge,
-                       close, match, merge, merged_from, split, target_labels)
+from .grouping import (RELATED_DAYS, related, suggestions, EXPORTER_JOBS, EXPORTER_LABELS, Matcher, _attach, _brief, _feedback, _maybe_resolved, _owner, _rule_match,
+                       apply_roles, assign, auto_merge, close, group_new, match, merge, merged_from, pair_stats, reapply_roles, split, target_labels)
 from .ingest import _env_of, _fingerprint, fetch, poll, source_status
+from . import quality, scoring, topology
 from .investigate import (INVESTIGATE_TASK, _investigate_run, _recover_orphans, _write_tools, ensure_conversation, investigate, queued,
                           reinvestigate, start_investigation)
 from .summary import ACTION_STATUS, MAX_SUMMARIES_PER_DAY, _summary_input, due_summaries, last_activity, start_summary, summarize, summary_view
@@ -39,6 +41,8 @@ def tick(conn) -> None:
         state = _state.get(t["id"]) or {}
         if db.now().timestamp() - state.get("last_poll", 0) >= cfg["poll_seconds"] - 1:
             poll(conn, t["id"])
+        if topology.due(t["id"], cfg["grouping"]["topology_minutes"]):
+            topology.start_refresh(t["id"])
         if cfg["auto_merge"]:
             auto_merge(conn, t["id"], cfg)
         follow_up(conn, t["id"])

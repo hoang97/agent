@@ -32,7 +32,7 @@ _summary_failed: dict[str, str] = {}  # sự cố → mốc hoạt động đã 
 
 
 def _method_label(method: str) -> str:
-    return {"rule": "luật nhãn", "topology": "quan hệ k8s", "ai": "AI", "manual": "người gộp", "root": "gốc"}.get(method, method)
+    return {"rule": "luật nhãn", "topology": "quan hệ k8s", "ai": "AI", "manual": "người gộp", "root": "gốc", "score": "điểm bằng chứng"}.get(method, method)
 
 
 def _worse(a: str | None, b: str | None) -> str | None:

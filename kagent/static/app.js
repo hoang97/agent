@@ -302,7 +302,7 @@ async function incidentList(main) {
     };
     const suggest = data.suggestions.length > 0 && h("section", { class: "card ix-suggest", "aria-label": "Gợi ý gộp" },
       h("strong", {}, `${data.suggestions.length} sự cố đang mở trùng nhóm với sự cố mở trước đó`),
-      h("p", { class: "small" }, "kagent không tự gộp vì sự cố đang có việc dở (điều tra, chờ duyệt, xác minh) hoặc tự gộp đang tắt. Gộp để xử lý một lần."),
+      h("p", { class: "small" }, "kagent không tự gộp vì sự cố đang có việc dở (điều tra, chờ duyệt, xác minh), tự gộp đang tắt, hoặc khi chấm điểm bằng chứng thì điểm chưa tới ngưỡng gom. Xem lý do từng cặp rồi gộp để xử lý một lần."),
       data.suggestions.map((g) => h("div", { class: "ix-rel-open" },
         h("div", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("incidents", undefined, g.from.id); } }, g.from.title), " → ",
           h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("incidents", undefined, g.into.id); } }, g.into.title),
@@ -489,11 +489,16 @@ async function incidentDetail(main, id) {
         h("dt", {}, "Thời gian phát hiện"), h("dd", {}, detect > 0 ? h("span", { class: "pill " + (detect > 15 * 60000 ? "warn" : "") }, span(detect)) : "ngay"),
         h("dt", {}, "Phục hồi"), h("dd", {}, m.resolved ? hmd(m.resolved) : "chưa"),
         h("dt", {}, m.resolved ? "Kéo dài" : "Đã kéo dài"), h("dd", {}, span((m.resolved ? new Date(m.resolved) : Date.now()) - new Date(started)))));
-    const alertRows = d.alerts.map((a) => {
-      const keys = ["namespace", "service", "pod", "node", "job", "instance"].filter((k) => a.labels[k]).map((k) => `${k}=${a.labels[k]}`).join(" ");
-      return h("tr", {}, h("td", {}, h("strong", {}, a.alertname || "?"), h("div", { class: "small" }, keys), h("div", { class: "small" }, a.summary || "")),
+    // Vai trò theo topology k8s (incidents/scoring.roles): gợi ý xem trước, không phải kết luận.
+    const ROLE = { root: ["nghi gốc", "warn"], symptom: ["triệu chứng", ""] };
+    const alertRows = [...d.alerts].sort((x, y) => (y.role === "root") - (x.role === "root")).map((a) => {
+      const keys = ["namespace", "deployment", "service", "pod", "node", "job", "instance"].filter((k) => a.labels[k]).map((k) => `${k}=${a.labels[k]}`).join(" ");
+      const role = ROLE[a.role];
+      return h("tr", {}, h("td", {}, h("strong", {}, a.alertname || "?"), role && h("span", { class: "badge " + role[1], title: a.role_reason || "" }, role[0]),
+          a.flapping ? h("span", { class: "badge warn", title: "Bắn rồi hết nhiều lần trong 1 giờ: không làm điều tra chạy lại" }, "chập chờn") : null,
+          h("div", { class: "small" }, keys), a.role_reason && h("div", { class: "small muted" }, a.role_reason), h("div", { class: "small" }, a.summary || "")),
         h("td", { class: "small" }, `${a.status === "firing" ? "đang bắn" : "đã hết"} · từ ${hmd(a.starts_at || a.first_seen)}`,
-          h("div", {}, a.join_method === "root" ? "gốc" : `${a.join_label}: ${a.join_reason || ""}`)),
+          h("div", {}, a.join_method === "root" ? "cảnh báo mở sự cố" : `${a.join_label}: ${a.join_reason || ""}`)),
         h("td", {}, d.alerts.length > 1 && a.join_method !== "root" && h("button", { type: "button", class: "ghost small-btn", onclick: act(() => api("POST", `/api/incidents/${id}/split`, { alert_id: a.id }), "Đã tách thành sự cố riêng") }, "Tách")));
     });
     const alerts = h("section", { class: "card", "aria-labelledby": "ix-a-h" },
@@ -534,7 +539,7 @@ async function alertSettingsView(main) {
   const dis = !info.can_manage;
   const num = (key, label, step) => h("label", { class: "field" }, label, h("input", { type: "number", step: step || "1", value: cfg[key], disabled: dis,
     oninput: (e) => { cfg[key] = Number(e.target.value); } }));
-  const check = (obj, key, label) => h("label", { class: "row small" }, h("input", { type: "checkbox", checked: obj[key], disabled: dis, onchange: (e) => { obj[key] = e.target.checked; } }), label);
+  const check = (obj, key, label) => h("label", { class: "row small check-row" }, h("input", { type: "checkbox", checked: obj[key], disabled: dis, onchange: (e) => { obj[key] = e.target.checked; } }), h("span", {}, label));
   const sources = info.available_sources.length ? info.available_sources.map((src) => h("label", { class: "row small" },
     h("input", { type: "checkbox", checked: cfg.sources.includes(src.name), disabled: dis, onchange: (e) => { cfg.sources = e.target.checked ? [...cfg.sources, src.name] : cfg.sources.filter((x) => x !== src.name); } }),
     `${src.name} (${src.template}, môi trường ${src.envs.join(", ")})`, info.sources && info.sources[src.name] ? h("span", { class: "badge " + (info.sources[src.name].error ? "bad" : "ok") },
@@ -547,14 +552,40 @@ async function alertSettingsView(main) {
     oninput: (e) => { cfg.auto_rules = e.target.value.split("\n").map((x) => x.trim()).filter(Boolean); } });
   const save = guard(async () => { await api("PUT", "/api/alert-settings", cfg); toast("Đã lưu cài đặt cảnh báo"); renderShell(); });
   const pollNow = guard(async () => { const r = await api("POST", "/api/alert-settings/poll"); toast(`Đã lấy: ${r.new} cảnh báo mới, ${r.resolved} đã hết`); renderShell(); });
+  // Gom nâng cao (docs/GROUPING-PLAN.md): mặc định tắt, bật từng phần sau khi chạy lại trên dữ liệu cũ thấy tốt hơn.
+  const g = cfg.grouping;
+  const gnum = (key, label, step) => h("label", { class: "field" }, label, h("input", { type: "number", step: step || "1", value: g[key], disabled: dis,
+    oninput: (e) => { g[key] = Number(e.target.value); } }));
+  const partition = h("input", { class: "wide", value: g.partition_labels.join(", "), disabled: dis, "aria-label": "Nhãn phân vùng", oninput: (e) => { g.partition_labels = csv(e.target.value); } });
+  const floor = h("select", { disabled: dis, "aria-label": "Mức tối thiểu để mở sự cố mới", onchange: (e) => { g.open_min_severity = e.target.value; } },
+    [["", "mức nào cũng mở"], ["info", "info"], ["warning", "warning"], ["error", "error"], ["critical", "critical"]].map(([v, t]) => h("option", { value: v, selected: g.open_min_severity === v }, t)));
+  const topoEnvs = Object.entries(info.topology.envs).map(([env, st]) => h("div", { class: "small" },
+    [`${env}: ${st.edges} cạnh`, st.at ? `đọc lúc ${fmtTime(st.at)}` : null, st.namespaces && st.namespaces.length ? `${st.namespaces.length} namespace` : null,
+      st.truncated && st.truncated.length ? `kết quả bị cắt ở ${st.truncated.join(", ")}` : null].filter(Boolean).join(" · "),
+    (st.errors || []).map((e) => h("div", {}, h("span", { class: "badge bad" }, "lỗi"), " ", e))));
+  const topoNow = guard(async () => {
+    await api("POST", "/api/alert-settings/topology");
+    toast("Đang đọc topology; trang tự cập nhật sau vài giây");
+    setTimeout(() => { if (location.hash.includes("alert")) renderShell(); }, 5000);
+  });
   addKids(main, h("div", { class: "card" }, h("h3", {}, "Tự xử lý cảnh báo"),
     h("p", { class: "small" }, "kagent định kỳ lấy cảnh báo đang bắn, gom các cảnh báo liên quan thành sự cố (luật nhãn → quan hệ k8s → AI), điều tra bằng lệnh chỉ đọc rồi đề xuất hành động. Hành động chỉ tự chạy khi tự xử lý bật ở môi trường đó và gateway cho tự chạy: ma trận rủi ro, rồi auto mode xét hành động theo luật tự xử lý bên dưới. Auto mode chỉ đọc luật và nhãn cảnh báo, không đọc báo cáo hay log điều tra. Không đạt thì thành yêu cầu duyệt. Lệnh chạy bằng tài khoản kagent-alerts (vai trò member), có audit như mọi lệnh khác."),
     check(cfg, "enabled", "Bật luồng tự xử lý cảnh báo"),
     h("h3", {}, "Nguồn cảnh báo"), sources,
     h("h3", {}, "Gom nhóm"),
     h("div", { class: "row" }, num("poll_seconds", "Chu kỳ lấy cảnh báo (giây)"), num("window_minutes", "Khung thời gian gom (phút)"), num("debounce_seconds", "Chờ trước khi điều tra (giây)")),
-    h("label", { class: "field" }, "Nhãn dùng để gom (trùng các nhãn này thì chung sự cố)", labels),
+    h("label", { class: "field" }, "Nhãn dùng để gom (trùng các nhãn này thì chung sự cố; không dùng khi bật chấm điểm bằng chứng)", labels),
     check(cfg, "ai_grouping", "Dùng AI gom khi luật không quyết được"), num("ai_min_score", "Điểm tối thiểu để AI gộp (0.5–1)", "0.05"),
+    h("h3", {}, "Gom nâng cao (thử nghiệm)"),
+    h("p", { class: "small" }, "Mặc định tắt. Trước khi bật, chạy scripts/grouping_replay.py trên bản sao dữ liệu để so với cách gom hiện tại; kết quả sau khi bật xem ở Đo lường → Gom cảnh báo."),
+    check(g, "batch", "Gom theo lô: cảnh báo mới của cùng một vòng lấy được gom thành cụm trước, nên kết quả không phụ thuộc cảnh báo nào đến trước; mỗi cụm hỏi AI tối đa một lần"),
+    check(g, "scoring", "Chấm điểm bằng chứng thay cho nhãn dùng để gom: cùng workload 0.9, phụ thuộc trực tiếp 0.8, cùng node 0.7, chỉ cùng namespace 0.4; bắn cùng đợt và lịch sử gộp/tách cộng thêm. AI chỉ được hỏi khi điểm lưng chừng. Cặp cảnh báo người vừa tách không bị gom lại trong 7 ngày"),
+    h("label", { class: "field" }, "Nhãn phân vùng khi chấm điểm (khác nhau ở nhãn này thì không bao giờ chung sự cố)", partition),
+    h("div", { class: "row" }, gnum("join_threshold", "Ngưỡng gom (0.5–1)", "0.05"), gnum("suggest_threshold", "Ngưỡng hỏi AI và gợi ý gộp", "0.05"),
+      gnum("burst_seconds", "Cùng đợt nếu bắn cách nhau (giây)"), gnum("ai_max_calls", "Số lần hỏi AI tối đa mỗi vòng")),
+    gnum("topology_minutes", "Đọc topology k8s mỗi (phút, 0 = tắt): Service chọn workload nào, ingress trỏ tới Service nào, workload gọi Service nào (suy từ biến môi trường). Chỉ đọc các namespace có cảnh báo trong 7 ngày"),
+    topoEnvs, info.can_manage && h("div", { class: "row" }, h("button", { type: "button", class: "ghost small-btn", onclick: topoNow, disabled: info.topology.running }, info.topology.running ? "Đang đọc topology…" : "Đọc topology ngay")),
+    h("div", { class: "row" }, gnum("flap_count", "Chập chờn khi bắn lại từ (lần trong 1 giờ, 0 = tắt)"), h("label", { class: "field" }, "Mức tối thiểu để mở sự cố mới", floor)),
     h("h3", {}, "Điều tra và tự xử lý"),
     check(cfg, "investigate", "Tự điều tra sự cố mới (agent chỉ dùng công cụ đọc)"),
     h("table", { class: "incident-table" }, h("thead", {}, h("tr", {}, h("th", {}, "Môi trường"), h("th", {}, "Tự xử lý"))), h("tbody", {}, envRows)),
@@ -1818,12 +1849,35 @@ function knowledgeSection(k) {
       tile(k.input_pct === null ? "—" : k.input_pct + "%", "Tri thức trên input agent", "Ước lượng: ký tự/4 × số lần gọi agent của lượt, chia tổng input (gồm cache) của agent")));
 }
 
+// Chất lượng gom cảnh báo (incidents/quality.py): người phải tách là gom thừa, phải gộp tay là gom thiếu.
+const JOIN_LABEL = { root: "mở sự cố", rule: "luật nhãn", topology: "quan hệ k8s", score: "điểm bằng chứng", ai: "AI", manual: "người gộp", none: "chưa vào sự cố" };
+function groupingSection(g) {
+  if (!g || !g.alerts) return null;
+  const tile = (value, label, hint) => h("div", { class: "tile", title: hint || "" }, h("b", {}, value === null || value === undefined ? "—" : value), h("span", { class: "small" }, label));
+  const pct = (v) => (v === null || v === undefined ? "—" : v + "%");
+  const wait = g.open_delay_median_s === null ? "—" : g.open_delay_median_s < 120 ? `${g.open_delay_median_s} giây` : `${Math.round(g.open_delay_median_s / 60)} phút`;
+  return h("div", {},
+    h("h2", { class: "row" }, `Gom cảnh báo ${g.days} ngày qua`),
+    h("div", { class: "grid" },
+      tile(`${num(g.alerts)} → ${num(g.incidents)}`, "Cảnh báo → sự cố", "Sự cố còn lại sau khi gộp; không tính sự cố đã gộp vào sự cố khác"),
+      tile(g.compression === null ? "—" : `${g.compression}:1`, "Tỉ lệ nén"),
+      tile(pct(g.split_pct), "Người phải tách (gom thừa)", `${g.splits} lần tách trên ${g.incidents_opened} sự cố đã mở`),
+      tile(pct(g.merge_pct), "Người phải gộp tay (gom thiếu)", `${g.manual_merges} lần gộp tay; kagent tự gộp ${g.auto_merges} lần`),
+      tile(g.llm_per_alert === null ? "—" : g.llm_per_alert, "Lần hỏi LLM mỗi cảnh báo", `${g.llm_calls} lần hỏi LLM để gom`),
+      tile(wait, "Từ lúc bắn tới lúc mở sự cố", "Trung vị, tính từ cảnh báo đầu tiên của sự cố")),
+    h("div", { class: "card small" },
+      Object.entries(g.methods).map(([k, v]) => h("span", { class: "badge" }, `${JOIN_LABEL[k] || k}: ${v}`)),
+      g.flapping ? h("span", { class: "badge warn" }, `chập chờn: ${g.flapping}`) : null,
+      g.unattached ? h("div", { class: "muted" }, `${g.unattached} cảnh báo chưa vào sự cố nào (mức dưới ngưỡng mở sự cố).`) : null));
+}
+
 VIEWS.metrics = async (main) => {
   const m = await api("GET", "/api/metrics");
   const tile = (label, value) => h("div", { class: "tile" }, h("b", {}, value === null || value === undefined ? "—" : value), h("span", { class: "small" }, label));
   addKids(main, h("h2", {}, "Đo lường"), h("div", { class: "grid" }, tile("Episode", m.episodes), tile("Có kết quả (%)", m.labeled_pct), tile("Người phải sửa (%)", m.edited_pct), tile("Thất bại (%)", m.failed_pct), tile("Token mỗi nhiệm vụ", m.avg_tokens), tile("Tỷ lệ chấp nhận KU (%)", m.ku_accept_pct)),
     h("h2", { class: "row" }, "Trạng thái KU và quyết định công cụ"), h("div", { class: "card" }, h("div", {}, Object.entries(m.ku_status).map(([k, v]) => h("span", { class: "badge " + (CLASS[k] || "") }, `${LABEL[k] || k}: ${v}`))), h("div", { class: "row" }, Object.entries(m.tool_decisions).map(([k, v]) => h("span", { class: "badge " + (CLASS[k] || "") }, `${LABEL[k] || k}: ${v}`)))),
     tokenSection(m.tokens),
+    groupingSection(m.grouping),
     h("h2", { class: "row" }, "Theo tuần"), h("div", { class: "card scroll" }, h("table", {}, h("thead", {}, h("tr", {}, ["Tuần", "Nhiệm vụ", "Người sửa", "Thất bại", "Token TB"].map((x) => h("th", {}, x)))), h("tbody", {}, m.weekly.map((w) => h("tr", {}, h("td", {}, w.week), h("td", {}, w.tasks), h("td", {}, w.edited), h("td", {}, w.failed), h("td", {}, Math.round(w.tokens))))))));
 };
 
