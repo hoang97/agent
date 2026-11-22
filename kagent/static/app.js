@@ -1776,10 +1776,11 @@ function tokenSection(t) {
   if (!t) return null;
   // Lời gọi trước khi có cột cache_write_1h có 1h = 0 nên cả phần ghi rơi vào cột 5 phút.
   const w5 = (r) => num(r.cache_write - (r.cache_write_1h || 0)), w1 = (r) => num(r.cache_write_1h || 0);
-  const wHead = [h("th", { title: "Ghi cache TTL 5 phút: giá 1,25× input" }, "Cache ghi 5p"), h("th", { title: "Ghi cache TTL 1 giờ: giá 2× input. Dữ liệu trước 19/11 không tách được, nằm ở cột 5p" }, "Cache ghi 1h")];
+  // Hàm, không phải phần tử: một node DOM gắn vào bảng sau sẽ bị rút khỏi bảng trước.
+  const wHead = () => [h("th", { title: "Ghi cache TTL 5 phút: giá 1,25× input" }, "Cache ghi 5p"), h("th", { title: "Ghi cache TTL 1 giờ: giá 2× input. Dữ liệu trước 19/11 không tách được, nằm ở cột 5p" }, "Cache ghi 1h")];
   const all = t.by_purpose.reduce((a, r) => a + r.input + r.cache_read + r.cache_write + r.output, 0);
   const cost = t.by_purpose.reduce((a, r) => a + (r.cost || 0), 0);
-  const costHead = h("th", { title: COST_NOTE }, "Quy đổi");
+  const costHead = () => h("th", { title: COST_NOTE }, "Quy đổi");
   const table = (head, rows) => h("div", { class: "card scroll" }, h("table", {}, h("thead", {}, h("tr", {}, head.map((x) => typeof x === "string" ? h("th", {}, x) : x))), h("tbody", {}, rows)));
   return h("div", {},
     h("h2", { class: "row" }, `Token ${t.days} ngày qua`),
@@ -1789,14 +1790,14 @@ function tokenSection(t) {
         t.cache_unmeasured ? h("span", { class: "small muted", title: "Dịch vụ LLM không trả số token cache (vd. vLLM chưa bật --enable-prompt-tokens-details), nên không tính vào tỷ lệ" },
           `chưa tính ${num(t.cache_unmeasured)} token input từ LLM không báo cache`) : null)),
     h("p", { class: "small" }, COST_NOTE),
-    table(["Mục đích", "Lần gọi", "Input", "Cache đọc", ...wHead, "Output", costHead, "% chi phí"], t.by_purpose.map((r) =>
+    table(["Mục đích", "Lần gọi", "Input", "Cache đọc", ...wHead(), "Output", costHead(), "% chi phí"], t.by_purpose.map((r) =>
       h("tr", {}, h("td", {}, PURPOSE[r.purpose] || r.purpose), h("td", {}, num(r.calls)), h("td", {}, num(r.input)), h("td", {}, num(r.cache_read)), h("td", {}, w5(r)), h("td", {}, w1(r)), h("td", {}, num(r.output)),
         h("td", {}, num(r.cost)), h("td", {}, cost ? Math.round(1000 * r.cost / cost) / 10 + "%" : "—")))),
     knowledgeSection(t.knowledge),
     h("h2", { class: "row" }, "Token theo LLM, 14 ngày qua"),
     h("p", { class: "small" }, "Tổng token xử lý mỗi ngày (input, cache đọc/ghi, output), chia theo cấu hình LLM và model. Rê chuột lên cột để xem chi tiết."),
     llmUsageChart(t),
-    table(["LLM", "Lần gọi", "Input", "Cache đọc", ...wHead, "Cache hit", "Output", "Tổng (thô)", costHead], (t.by_llm || []).map((r) => {
+    table(["LLM", "Lần gọi", "Input", "Cache đọc", ...wHead(), "Cache hit", "Output", "Tổng (thô)", costHead()], (t.by_llm || []).map((r) => {
       const inp = r.input + r.cache_read + r.cache_write;
       const hit = r.cache_known === 0 ? h("span", { class: "muted", title: "Dịch vụ không trả số token cache" }, "không đo được")
         : inp ? Math.round(1000 * r.cache_read / inp) / 10 + "%" : "—";
@@ -1807,7 +1808,7 @@ function tokenSection(t) {
     h("p", { class: "small" }, "Kết quả công cụ đi thẳng vào context của agent; công cụ trả nhiều ký tự là chỗ nên lọc trước."),
     table(["Công cụ", "Lần gọi", "Tổng ký tự", "Lớn nhất"], t.tools.map((r) => h("tr", {}, h("td", {}, h("code", {}, r.tool)), h("td", {}, num(r.calls)), h("td", {}, num(r.result_chars)), h("td", {}, num(r.max_chars))))),
     h("h2", { class: "row" }, "Lượt tốn token nhất"),
-    table(["Thời gian", "Yêu cầu", "Lần gọi LLM", "Input", "Cache đọc", "Output", costHead, h("th", { title: "Phần quy đổi của các lời gọi học chạy sau lượt (rút bài học, chấm kết quả)" }, "Trong đó học"), "Tri thức mới", "Bỏ qua do trùng"], t.top_turns.map((r) =>
+    table(["Thời gian", "Yêu cầu", "Lần gọi LLM", "Input", "Cache đọc", "Output", costHead(), h("th", { title: "Phần quy đổi của các lời gọi học chạy sau lượt (rút bài học, chấm kết quả)" }, "Trong đó học"), "Tri thức mới", "Bỏ qua do trùng"], t.top_turns.map((r) =>
       h("tr", {}, h("td", {}, fmtTime(r.started_at)), h("td", {}, r.task), h("td", {}, num(r.llm_calls)), h("td", {}, num(r.input + r.cache_write)), h("td", {}, num(r.cache_read)), h("td", {}, num(r.output)),
         h("td", {}, num(r.cost)), h("td", {}, num(r.learn_cost)),
         h("td", {}, r.knowledge_chars == null ? "—" : num(r.knowledge_chars)), h("td", {}, r.skipped_chars == null ? "—" : num(r.skipped_chars))))));
