@@ -9,9 +9,11 @@ import fnmatch
 import hashlib
 import json
 import shlex
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
-from . import automode, datafilter, db, undo
+from . import automode, datafilter, db, live, undo
 from .config import settings
 from .retrieval import tokenize
 from . import net
@@ -32,7 +34,9 @@ BASELINE = {
         "R4": {"dev": "ask", "staging": "block", "prod": "block"},
     },
     "deny": [],
+    "max_parallel_tools": 8,  # số lệnh đọc chạy cùng lúc trong một lượt; overlay chỉ được hạ
 }
+PER_CONNECTION = 4  # lệnh chạy cùng lúc trên một kết nối, kể cả từ nhiều lượt, để không dồn tải vào API server
 
 DENIAL_STREAK, DENIAL_TOTAL = 3, 20  # auto mode chặn liên tiếp/tổng cộng trong một lượt đến mức này thì chuyển sang hỏi người
 
@@ -61,7 +65,7 @@ def rank(cell) -> float:
 def merge_policy(overlay: dict | None) -> dict:
     """Overlay của tenant chỉ được siết; nới lỏng thì báo lỗi."""
     overlay = overlay or {}
-    unknown = set(overlay) - {"environments", "matrix", "deny", "thresholds", "min_approvers"}
+    unknown = set(overlay) - {"environments", "matrix", "deny", "thresholds", "min_approvers", "max_parallel_tools"}
     if unknown:
         raise PolicyError(f"khóa không hợp lệ: {sorted(unknown)}")
     merged = copy.deepcopy(BASELINE)
@@ -101,7 +105,35 @@ def merge_policy(overlay: dict | None) -> dict:
         if not isinstance(rule, dict) or "tool" not in rule:
             raise PolicyError(f"luật deny không hợp lệ: {rule}")
         merged["deny"].append({"tool": rule["tool"], "env": rule.get("env", "*")})
+    if "max_parallel_tools" in overlay:
+        n = overlay["max_parallel_tools"]
+        if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+            raise PolicyError("max_parallel_tools phải là số nguyên từ 1")
+        if n > BASELINE["max_parallel_tools"]:
+            raise PolicyError(f"max_parallel_tools không được vượt baseline {BASELINE['max_parallel_tools']}")
+        merged["max_parallel_tools"] = n
     return merged
+
+
+_slots: dict[str, threading.BoundedSemaphore] = {}
+_slots_lock = threading.Lock()
+
+
+@contextmanager
+def connection_slot(connection_id: str | None):
+    """Chờ chỗ trên kết nối; bấm dừng lúc đang chờ thì bỏ luôn."""
+    if not connection_id:
+        yield
+        return
+    with _slots_lock:
+        slot = _slots.setdefault(connection_id, threading.BoundedSemaphore(PER_CONNECTION))
+    while not slot.acquire(timeout=0.2):
+        if live.stopping():
+            raise ConnectorError("đã dừng trước khi lệnh được chạy")
+    try:
+        yield
+    finally:
+        slot.release()
 
 
 def _legacy(cell):
@@ -234,12 +266,13 @@ def _run(conn, tenant_id: str, tool_name: str, args: dict, check: bool = False, 
     _filter (nếu có) không gửi xuống connector mà được áp lên kết quả ở đây, trước khi kết quả vào context của agent.
     """
     from . import connections
-    _, _, spec, params = connections.resolve(conn, tenant_id, tool_name)
+    _, row, spec, params = connections.resolve(conn, tenant_id, tool_name)
     fn = spec.check if check else spec.run
     if fn is None:
         return None
     params = {**params, "_tenant_id": tenant_id, "_user_id": user_id}
-    result = fn(params, {k: v for k, v in args.items() if k != "_filter"})
+    with connection_slot(row["id"] if row else None):
+        result = fn(params, {k: v for k, v in args.items() if k != "_filter"})
     if args.get("_filter") and not check and result is not None:
         raw = result
         try:

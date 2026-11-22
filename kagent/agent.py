@@ -19,9 +19,6 @@ class QuotaExceeded(Exception):
     pass
 
 
-MAX_PARALLEL = 4
-
-
 def tokens_today(conn, tenant_id: str) -> int:
     start = db.now().date().isoformat()
     return conn.execute("SELECT coalesce(sum(tokens),0) t FROM episode WHERE tenant_id=? AND started_at>=?", (tenant_id, start)).fetchone()["t"]
@@ -158,6 +155,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
     roles = gateway.user_roles(conn, tenant_id, user_id)
     conv = conn.execute("SELECT incident_id FROM conversation WHERE id=?", (conversation_id,)).fetchone() if conversation_id else None
     incident_id = conv["incident_id"] if conv else None
+    max_parallel = gateway.get_policy(conn, tenant_id)["max_parallel_tools"]
     ctx = gateway.CallContext(tenant_id, user_id, env, task, episode_id, intent=[*history["intent"], task], calls=list(history["calls"]), roles=roles,
                               incident_id=None if read_only else incident_id)
 
@@ -295,7 +293,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
                     return step
                 return run_isolated(name, a)
 
-            pool = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, len(calls)), thread_name_prefix="subtool")
+            pool = ThreadPoolExecutor(max_workers=min(max_parallel, len(calls)), thread_name_prefix="subtool")
             try:
                 futures = [pool.submit(contextvars.copy_context().run, run_sub, *call) for call in calls]
                 steps = wait_or_stop(futures, calls, reads_only=True)
@@ -347,10 +345,25 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
             wait(futures, timeout=0.2, return_when=FIRST_COMPLETED)
 
     def batch(calls: list[tuple[str, dict]]) -> list[dict]:
-        """Các lệnh trong một lượt được lập kế hoạch cùng lúc nên chạy song song."""
+        """Các lệnh model gọi cùng lúc. Lệnh đọc liền nhau chạy song song; mỗi lệnh ghi chạy riêng theo đúng thứ tự,
+        để hai lệnh ghi không đè nhau và lệnh đọc không thấy trạng thái giữa chừng của một lệnh ghi."""
         llm.check_cancelled(cancelled)
         flush_text()
         calls = [(name, args if isinstance(args, dict) else {}) for name, args in calls]
+        groups: list[tuple[list[tuple[str, dict]], bool]] = []
+        for call in calls:
+            read = is_read(call[0])
+            if read and groups and groups[-1][1]:
+                groups[-1][0].append(call)
+            else:
+                groups.append(([call], read))
+        steps: list[dict] = []
+        for group, _ in groups:
+            steps += run_group(group)
+            llm.check_cancelled(cancelled)  # lệnh ghi đã chạy xong và được ghi lại; giờ mới dừng
+        return steps
+
+    def run_group(calls: list[tuple[str, dict]]) -> list[dict]:
         for name, args in calls:
             emit({"type": "tool_start", "tool": name, "args": args})
         if cancelled is None and len(calls) == 1:
@@ -361,7 +374,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
                     batches["n"] += 1
                     n = batches["n"]
             # Mỗi lệnh chạy ở luồng riêng để nút dừng có tác dụng ngay. Không dùng with: dừng thì không đợi luồng đã bỏ.
-            pool = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, len(calls)), thread_name_prefix="tool")
+            pool = ThreadPoolExecutor(max_workers=min(max_parallel, len(calls)), thread_name_prefix="tool")
             try:
                 # copy_context để lần gọi auto mode trong luồng con vẫn được đo vào lượt này.
                 futures = [pool.submit(contextvars.copy_context().run, run_isolated, *call) for call in calls]
@@ -372,7 +385,6 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
                 for step in steps:
                     step["parallel"] = n
         record(conn, steps)
-        llm.check_cancelled(cancelled)  # lệnh ghi đã chạy xong và được ghi lại; giờ mới dừng
         return steps
 
     def call_tool(name: str, args: dict) -> dict:

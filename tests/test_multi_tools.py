@@ -186,3 +186,69 @@ def test_anthropic_subagent_uses_fast_model_and_short_prompt():
     assert calls[0]["system"][0]["text"] == llm.SUBAGENT_SYSTEM and calls[0]["system"][0]["cache_control"] == {"type": "ephemeral"}
     assert [t["name"] for t in calls[0]["tools"]] == ["db__query"] and calls[0]["messages"][0]["content"][0]["text"] == "Môi trường: dev\n\nĐếm đơn"
     assert usage[0]["purpose"] == "subagent"
+
+
+def test_writes_run_alone_and_in_order_between_parallel_reads(users):
+    seen = {}
+
+    def main(call_tool):
+        seen["steps"] = call_tool.batch([("db.query", {"sql": "SELECT 1"}), ("db.query", {"sql": "SELECT 2"}),
+                                         ("k8s.kubectl_write", {"command": "rollout restart deployment/web -n default"}),
+                                         ("db.query", {"sql": "SELECT 3"})])
+        return "xong"
+
+    events = []
+    _run_delegating(users, Delegating(main, None), events)
+    r1, r2, w, r3 = seen["steps"]
+    assert r1["parallel"] == r2["parallel"] and "parallel" not in w and "parallel" not in r3
+    order = [(e["type"], e.get("tool") or e["step"]["tool"]) for e in events if e["type"] in ("tool_start", "tool_end")]
+    # Lệnh ghi chỉ bắt đầu khi hai lệnh đọc trước đã xong, lệnh đọc sau chỉ bắt đầu khi lệnh ghi đã xong.
+    assert order[4:] == [("tool_start", "k8s.kubectl_write"), ("tool_end", "k8s.kubectl_write"), ("tool_start", "db.query"), ("tool_end", "db.query")]
+
+
+def _peak_reads(users, monkeypatch, n):
+    real = gateway._run
+    active, peak, lock = [0], [0], threading.Lock()
+
+    def slow(conn, tenant_id, tool_name, args, check=False, user_id=None):
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        time.sleep(0.2)
+        with lock:
+            active[0] -= 1
+        return None
+
+    monkeypatch.setattr(gateway, "_run", slow)
+    users["alice"].run(" và ".join(f"`SELECT {i}`" for i in range(n)))
+    monkeypatch.setattr(gateway, "_run", real)
+    return peak[0]
+
+
+def test_tenant_can_only_lower_parallel_limit(users, monkeypatch):
+    admin = users["admin"]
+    assert _peak_reads(users, monkeypatch, 5) == 5
+    assert admin.put("/api/policy", json={"overlay": {"max_parallel_tools": 20}}).status_code == 400
+    assert admin.put("/api/policy", json={"overlay": {"max_parallel_tools": 2}}).status_code == 200
+    assert _peak_reads(users, monkeypatch, 4) == 2
+
+
+def test_one_connection_runs_at_most_per_connection_calls(users, monkeypatch):
+    monkeypatch.setattr(gateway, "PER_CONNECTION", 2)
+    gateway._slots.clear()
+    active, peak, lock = [0], [0], threading.Lock()
+
+    def work():
+        with gateway.connection_slot("c1"):
+            with lock:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            time.sleep(0.1)
+            with lock:
+                active[0] -= 1
+
+    threads = [threading.Thread(target=work) for _ in range(5)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    gateway._slots.clear()
+    assert peak[0] == 2

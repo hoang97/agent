@@ -293,7 +293,8 @@ Mức rủi ro tối thiểu được tính từ metadata; template khai `risk_t
 
 ## Chạy nhiều công cụ cùng lúc và công cụ học được
 
-- **Chạy song song:** các lệnh model gọi trong cùng một lượt chạy song song, tối đa 4 lệnh. Ở chế độ heuristic, lệnh đọc chạy trước, lệnh ghi chạy sau.
+- **Chạy song song:** khi model gọi nhiều lệnh trong cùng một lượt, các lệnh đọc liền nhau chạy song song. Mỗi lệnh ghi chạy riêng, theo đúng thứ tự model đưa ra, để hai lệnh ghi không đè nhau và lệnh đọc không thấy trạng thái giữa chừng của một lệnh ghi. Ở chế độ heuristic, lệnh đọc chạy trước, lệnh ghi chạy sau.
+- **Giới hạn song song:** mặc định 8 lệnh một lượt. Tenant hạ được bằng khóa `max_parallel_tools` trong overlay chính sách, nhưng không tăng được quá baseline. Mỗi kết nối chạy tối đa 4 lệnh cùng lúc (`gateway.PER_CONNECTION`), tính cả các lượt khác, để không dồn tải vào một API server.
 - **Agent con** (`agent.delegate {task, tools}`): agent chính giao một việc tra cứu đơn giản, gọi nhiều lần trong một lượt để các agent con chạy song song. Để rẻ:
   - Agent con chỉ nhận môi trường cùng bản giao việc. Không có lịch sử, KU hay lời nhắc hệ thống của agent chính, nên `task` phải tự đủ nghĩa.
   - Agent con chỉ thấy các công cụ đọc được giao trong `tools`, cộng `data.query` để lọc kết quả lớn. Gọi công cụ khác thì bị chặn, giao công cụ ghi thì lệnh giao việc báo `invalid`.
