@@ -45,6 +45,26 @@ class Run:
     events: list = field(default_factory=list)
     done: bool = False
     cond: threading.Condition = field(default_factory=threading.Condition)
+    inbox: list[str] | None = None  # tin nhắn gửi lúc lượt đang chạy; None: lượt này không nhận (vd. điều tra nền)
+
+    def put(self, text: str) -> bool:
+        """False nếu lượt không nhận tin hoặc đã đóng hộp tin (sắp kết thúc): người gửi phải gửi thành lượt mới."""
+        with self.cond:
+            if self.inbox is None or self.done:
+                return False
+            self.inbox.append(text)
+            return True
+
+    def take(self) -> list[str]:
+        with self.cond:
+            texts, self.inbox[:] = list(self.inbox or []), []
+            return texts
+
+    def close(self) -> list[str]:
+        """Đóng hộp tin; trả các tin agent chưa kịp đọc để gửi thành lượt kế tiếp."""
+        with self.cond:
+            texts, self.inbox = list(self.inbox or []), None
+            return texts
 
     def emit(self, event: dict) -> None:
         with self.cond:

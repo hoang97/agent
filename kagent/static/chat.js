@@ -424,6 +424,8 @@ function chatView(main) {
   const blocks = new Map();
   let lastTask = null;
   let activeRun = null;
+  // Tin gửi lúc agent đang chạy mà agent không còn đọc được (lượt vừa kết thúc): gửi thành lượt kế tiếp. {text, el}
+  const afterRun = [];
   let queued = false;  // điều tra sự cố đã nhận nhưng chưa chạy: chưa cho gửi để lượt chat không chen vào trước
 
   // Thanh "đang chờ bạn" trên ô nhập khi thẻ duyệt hay câu hỏi đã trôi khỏi màn hình; bấm để tới đó.
@@ -466,17 +468,20 @@ function chatView(main) {
   const sendBtn = h("button", { type: "button", class: "send", "aria-label": "Gửi", title: "Gửi", disabled: true }, icon("send"));
 
   const resize = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 200) + "px"; };
+  // Đang chạy: ô nhập trống thì nút là Dừng, có chữ thì là Gửi thêm (agent đọc ngay sau lệnh đang chạy, như Claude Code).
   const syncSend = () => {
-    setKids(sendBtn, icon(activeRun ? "stop" : "send"));
-    sendBtn.setAttribute("aria-label", activeRun ? "Dừng" : "Gửi");
-    sendBtn.title = activeRun ? "Dừng" : "Gửi";
+    const stopping = activeRun && !input.value.trim();
+    const label = stopping ? "Dừng" : activeRun ? "Gửi thêm: agent đọc ngay sau lệnh đang chạy" : "Gửi";
+    setKids(sendBtn, icon(stopping ? "stop" : "send"));
+    sendBtn.setAttribute("aria-label", label);
+    sendBtn.title = label;
     sendBtn.disabled = !activeRun && (queued || !input.value.trim());
   };
   input.addEventListener("input", () => { resize(); syncSend(); });
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!activeRun && !queued) submit(); }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!queued) submit(); }
   });
-  sendBtn.addEventListener("click", () => { if (activeRun) stop(); else submit(); });
+  sendBtn.addEventListener("click", () => { if (activeRun && !input.value.trim()) stop(); else submit(); });
 
   function userBubble(text) {
     return h("div", { class: "msg user" }, h("div", { class: "bubble" }, text));
@@ -561,6 +566,7 @@ function chatView(main) {
     const grouped = (s) => s.sub && delegated.has(s.sub) && !(s.approval_id && byId.has(s.approval_id));
     for (const item of timelineItems(m)) {
       if (item.text !== undefined) { addKids(flow, h("div", { class: "prose" }, renderMarkdown(item.text))); continue; }
+      if (item.user !== undefined) { addKids(flow, h("div", { class: "msg user queued" }, h("div", { class: "bubble" }, item.user))); continue; }
       const st = m.steps[item.step];
       if (!st || grouped(st)) continue;
       if (st.tool === "agent.delegate" && st.sub_id) { addKids(flow, toolRow(st), m.steps.filter((s) => s.sub === st.sub_id && grouped(s)).map(toolRow)); continue; }
@@ -679,7 +685,27 @@ function chatView(main) {
     input.value = "";
     store.set(draftKey(), null);
     resize();
+    syncSend();
+    if (activeRun) return queueMessage(text);
     await send(text);
+  }
+
+  async function queueMessage(text) {
+    const el = activeRun.turn ? activeRun.turn.queuedBubble(text) : null;
+    try {
+      if (!state.conversationId) throw new Error("chưa có hội thoại");
+      await api("POST", `/api/conversations/${state.conversationId}/queue`, { message: text });
+    } catch {
+      afterRun.push({ text, el });
+      if (el) setKids(el.querySelector(".queued-note"), "sẽ gửi khi agent trả lời xong");
+    }
+  }
+
+  function flushAfterRun() {
+    if (activeRun || !afterRun.length) return;
+    const items = afterRun.splice(0);
+    items.forEach((i) => i.el && i.el.remove());
+    send(items.map((i) => i.text).join("\n\n"));
   }
 
   // Dừng theo hội thoại: dùng được cả cho lượt đang xem tiếp sau khi tải lại, và lượt của người khác trong hội thoại sự cố.
@@ -711,6 +737,16 @@ function chatView(main) {
     scroll();
 
     let cur = null;  // đoạn chữ đang được viết
+    const waiting = [];  // bong bóng tin gửi thêm chưa được agent đọc
+    const queuedBubble = (text, read) => {
+      const el = h("div", { class: "msg user queued" }, h("div", { class: "bubble" }, text), !read && h("div", { class: "small muted queued-note" }, "chờ agent đọc…"));
+      if (!read) waiting.push({ text, el });
+      addKids(flow, el);
+      cur = null;
+      scroll();
+      return el;
+    };
+    const takeWaiting = (text) => { const i = waiting.findIndex((w) => w.text === text); return i === -1 ? null : waiting.splice(i, 1)[0].el; };
     const running = [];  // {tool, args, row, at}
     let lastEvent = Date.now();
     let frame = 0;
@@ -770,13 +806,20 @@ function chatView(main) {
         refreshConversations();
         updatePending();
         if (ev.message.approvals.some((a) => a.status === "pending")) pollApprovals();
+      } else if (ev.type === "user_message") {
+        // Agent vừa đọc tin gửi thêm: dời bong bóng xuống đúng chỗ trong luồng.
+        const el = takeWaiting(ev.text);
+        if (el) el.remove();
+        queuedBubble(ev.text, true);
+      } else if (ev.type === "leftover") {
+        for (const text of ev.texts) afterRun.push({ text, el: takeWaiting(text) });
       } else if (ev.type === "stopping") {
         // Lệnh ghi đã gửi đi thì ngắt giữa chừng không hoàn tác được: đợi nó xong rồi mới dừng.
         addKids(flow, h("div", { class: "small warn-text" }, `Đang đợi ${ev.waiting_for.join(", ")} chạy xong rồi dừng…`));
         scroll();
       } else if (ev.type === "error") fail(ev.message);
     };
-    return { handle, fail, liveEl, stopPaint: () => { if (frame) cancelAnimationFrame(frame); stopTicker(); } };
+    return { handle, fail, liveEl, queuedBubble, stopPaint: () => { if (frame) cancelAnimationFrame(frame); stopTicker(); } };
   }
 
   async function readSSE(res, handle) {
@@ -798,8 +841,9 @@ function chatView(main) {
 
   async function send(text, continueEpisode) {
     if (activeRun) return;
-    const { handle, fail, stopPaint } = beginTurn(text, continueEpisode);
-    activeRun = { id: null };
+    const turn = beginTurn(text, continueEpisode);
+    const { handle, fail, stopPaint } = turn;
+    activeRun = { id: null, turn };
     syncSend();
     try {
       const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json", "X-Tenant-Id": state.tenant.id }, credentials: "same-origin", body: JSON.stringify(continueEpisode ? { continue_episode: continueEpisode, conversation_id: state.conversationId, env: env.value }
@@ -816,6 +860,7 @@ function chatView(main) {
       syncSend();
       input.focus();
     }
+    flushAfterRun();
   }
 
   // Trang được tải lại khi agent đang trả lời: phát lại câu hỏi và phần đã sinh của lượt đó, rồi stream tiếp tới khi xong.
@@ -830,7 +875,7 @@ function chatView(main) {
       if (res.ok) {
         await readSSE(res, (ev) => {
           if (state.conversationId !== conv) return;
-          if (ev.type === "live_start") turn = beginTurn(ev.task, null, ev.continuation);
+          if (ev.type === "live_start") { turn = beginTurn(ev.task, null, ev.continuation); if (activeRun) activeRun.turn = turn; }
           else if (ev.type === "end") episodeId = ev.episode_id;
           else if (turn) turn.handle(ev);
         });
@@ -848,6 +893,7 @@ function chatView(main) {
     if (data.messages.some((m) => m.approvals.some((a) => a.status === "pending"))) pollApprovals();
     if (data.running) return attachLive(data.messages.length);  // lượt kế tiếp đã bắt đầu (vd. chạy tiếp sau khi duyệt)
     scroll();
+    flushAfterRun();
   }
 
   // Điều tra sự cố chưa chạy (chờ lượt điều tra khác xong): thẻ chờ có đồng hồ, hỏi lại tới khi lượt bắt đầu rồi stream như thường.

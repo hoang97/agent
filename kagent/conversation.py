@@ -394,7 +394,7 @@ def load_history(conn, tenant_id: str, conversation_id: str | None, fmt: str | N
                    for a in approvals if a["status"] in ("approved", "denied")]
         turns.append({"task": ep["input"]["task"], "continuation": bool(ep["input"].get("continuation_of")), "entities": ep["input"].get("entities") or [],
                       "messages": messages, "size": len(json.dumps(messages, ensure_ascii=False)),
-                      "intent": [ep["input"]["task"], *decided],
+                      "intent": [ep["input"]["task"], *(s["text"] for s in ep["trace"] if s.get("type") == "user_message"), *decided],
                       "calls": [{"tool": s["tool"], "args": s.get("args"), "status": s.get("status")} for s in ep["trace"] if s.get("type") == "tool_call"]})
     # Vượt ngân sách thì bỏ một mạch lượt cũ tới còn nửa ngân sách, để điểm cắt (đầu prefix) chỉ dời thỉnh thoảng
     # thay vì dời ở mọi lượt như cửa sổ trượt. Lượt mới nhất luôn được giữ.

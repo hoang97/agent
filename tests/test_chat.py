@@ -493,3 +493,80 @@ def test_history_cut_point_moves_rarely(users):
             firsts.append(conversation.load_history(conn, alice.tenant, cid)["messages"][0]["content"])
     # Cửa sổ trượt sẽ dời đầu lịch sử ở mọi lượt từ lượt 4; ở đây chỉ dời khi tràn, mỗi lần bỏ cả mạch lượt cũ.
     assert firsts == ["t1", "t1", "t1", "t4", "t4", "t4", "t7", "t7"]
+
+
+def test_message_sent_while_running_is_read_after_current_tool(users):
+    """Tin gửi thêm vào hộp tin của lượt, agent đọc sau lệnh đang chạy; tin đến sau lần đọc cuối thành leftover để gửi lượt mới."""
+    import threading
+    from kagent import live, llm
+    alice, bob = users["alice"], users["bob"]
+    started, posted, drained, posted2, seen = threading.Event(), threading.Event(), threading.Event(), threading.Event(), {}
+
+    class Scripted:
+        name = "scripted"
+
+        def route(self, task):
+            return {"task_type": "general", "entities": []}
+
+        def run_agent(self, task, context, tools, call_tool, **kw):
+            started.set()
+            posted.wait(5)
+            call_tool("db.query", {"sql": "SELECT 1"})
+            seen["drained"] = call_tool.drain()
+            drained.set()
+            posted2.wait(5)
+            return {"answer": "xong", "tokens": 0}
+
+    llm.set_provider(Scripted())
+    out = {}
+    worker = threading.Thread(target=lambda: out.update(evs=chat(alice, "kiểm tra web")))
+    worker.start()
+    try:
+        assert started.wait(5)
+        cid = next(iter(live._runs))
+        assert bob.post(f"/api/conversations/{cid}/queue", json={"message": "x"}).status_code == 404
+        assert alice.post(f"/api/conversations/{cid}/queue", json={"message": "đừng restart gì cả"}).json() == {"queued": True}
+        posted.set()
+        assert drained.wait(5)
+        assert alice.post(f"/api/conversations/{cid}/queue", json={"message": "xem thêm log"}).json() == {"queued": True}
+        posted2.set()
+        worker.join(10)
+    finally:
+        posted.set(), posted2.set()
+        llm.set_provider(None)
+    evs = out["evs"]
+    assert seen["drained"].startswith(agent.QUEUED_PREFIX) and seen["drained"].endswith("đừng restart gì cả")
+    assert [e["text"] for e in evs if e["type"] == "user_message"] == ["đừng restart gì cả"]
+    assert next(e for e in evs if e["type"] == "leftover")["texts"] == ["xem thêm log"]
+    message = done(evs)["message"]
+    assert {"user": "đừng restart gì cả"} in message["timeline"]
+    assert alice.post(f"/api/conversations/{cid}/queue", json={"message": "muộn"}).status_code == 409  # lượt đã xong
+    # Lượt sau: lời gửi thêm là ý của người dùng cho auto mode.
+    with db.session() as conn:
+        assert "đừng restart gì cả" in conversation.load_history(conn, alice.tenant, cid)["intent"]
+
+
+def test_anthropic_loop_puts_queued_text_after_tool_results_and_continues_on_it():
+    from types import SimpleNamespace as NS
+    from kagent import llm
+    calls = []
+    replies = [NS(content=[NS(type="tool_use", name="db__query", input={"sql": "SELECT 1"}, id="a")], stop_reason="tool_use"),
+               NS(content=[NS(type="text", text="đã xong")], stop_reason="end_turn"),
+               NS(content=[NS(type="text", text="ok, không restart")], stop_reason="end_turn")]
+
+    class Fake:
+        def create(self, **kw):
+            calls.append(kw["messages"])
+            r = replies.pop(0)
+            return NS(content=r.content, stop_reason=r.stop_reason, usage=NS(input_tokens=1, output_tokens=1))
+
+    fake = Fake()
+    p = llm.AnthropicProvider(NS(messages=fake, beta=NS(messages=fake)))
+    queue = ["[thêm] xem log", "[thêm] đừng restart"]
+    call_tool = lambda n, a: {"status": "ok", "result": 1}
+    call_tool.drain = lambda: queue.pop(0) if queue else None
+    out = p.run_agent("x", "c", [], call_tool)
+    after_tools = calls[1][-1]["content"]
+    assert after_tools[0]["type"] == "tool_result" and after_tools[-1]["text"] == "[thêm] xem log"
+    # Model đã kết thúc nhưng còn tin mới: đọc tin đó và chạy tiếp thay vì bỏ.
+    assert calls[2][-1]["content"][0]["text"] == "[thêm] đừng restart" and out["answer"].endswith("ok, không restart")

@@ -582,6 +582,7 @@ def chat(body: ChatBody, t: Tenant = Depends(current_tenant), conn=Depends(get_c
                      (conversation_id, t.tenant_id, t.user_id, title, now, now))
     run_id = db.new_id()
     run = live.start(conversation_id, run_id, message, continuation=bool(continuation_of), owner=t.user_id)
+    run.inbox = []
     if body.conversation_id and not continuation_of:
         gateway.skip_pending(conn, t.tenant_id, conversation_id)
     cancelled = run.stop
@@ -598,7 +599,10 @@ def chat(body: ChatBody, t: Tenant = Depends(current_tenant), conn=Depends(get_c
         try:
             with db.session() as worker_conn:
                 episode = agent_mod.run_task(worker_conn, t.tenant_id, t.user_id, message, body.env, body.project, conversation_id=conversation_id,
-                                             episode_id=run_id, on_event=emit, cancelled=cancelled, continuation_of=continuation_of)
+                                             episode_id=run_id, on_event=emit, cancelled=cancelled, continuation_of=continuation_of, inbox=run.take)
+                leftover = run.close()
+                if leftover:  # gửi sau lần cuối agent đọc hộp tin: giao diện gửi thành lượt kế tiếp
+                    emit({"type": "leftover", "texts": leftover})
                 events.put({"type": "done", "conversation_id": conversation_id, "message": _chat_message(worker_conn, t, episode)})
         except agent_mod.QuotaExceeded as exc:
             events.put({"type": "error", "message": str(exc)})
@@ -606,6 +610,7 @@ def chat(body: ChatBody, t: Tenant = Depends(current_tenant), conn=Depends(get_c
             log.exception("lỗi khi chạy lượt chat %s", run_id)
             events.put({"type": "error", "message": "lỗi máy chủ khi xử lý yêu cầu"})
         finally:
+            run.close()
             with _runs_lock:
                 _runs.pop(run_id, None)
             live.finish(run)
@@ -638,6 +643,23 @@ def chat_cancel(run_id: str, t: Tenant = Depends(current_tenant)):
     return {"ok": True}
 
 
+class QueueBody(BaseModel):
+    message: str = Field(min_length=1, max_length=8000)
+
+
+@app.post("/api/conversations/{conversation_id}/queue")
+def conversation_queue(conversation_id: str, body: QueueBody, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    """Nhắn thêm khi lượt đang chạy: agent đọc ngay sau lệnh đang chạy, không ngắt lượt. 409: không có lượt nhận tin, gửi thành lượt mới."""
+    t.require_writer()
+    c = _own_conversation(conn, t, conversation_id)
+    run = live.current(conversation_id)
+    if run is not None and run.owner != t.user_id and not c.get("incident_id"):
+        raise HTTPException(403, "chỉ người mở lượt này được nhắn thêm")
+    if run is None or not body.message.strip() or not run.put(body.message.strip()):
+        raise HTTPException(409, "không có lượt đang chạy nhận tin nhắn")
+    return {"queued": True}
+
+
 @app.post("/api/conversations/{conversation_id}/stop")
 def conversation_stop(conversation_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     """Dừng lượt đang chạy của hội thoại. Hội thoại riêng: chủ lượt; hội thoại của sự cố: mọi thành viên có quyền ghi."""
@@ -668,7 +690,7 @@ def _approval_views(conn, t: "Tenant", rows: list[dict]) -> list[dict]:
 
 def _timeline(trace: list[dict]) -> list[dict] | None:
     """Chữ và lệnh theo thứ tự đã xảy ra: {"text"} hoặc {"step": chỉ số trong steps}. Lượt cũ không lưu đoạn chữ thì None."""
-    if not any(s["type"] == "text" for s in trace):
+    if not any(s["type"] in ("text", "user_message") for s in trace):
         return None
     out, n = [], 0
     for s in trace:
@@ -679,6 +701,8 @@ def _timeline(trace: list[dict]) -> list[dict] | None:
         elif s["type"] == "tool_call":
             out.append({"step": n})
             n += 1
+        elif s["type"] == "user_message":
+            out.append({"user": s["text"]})
     return out
 
 

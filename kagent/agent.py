@@ -33,6 +33,7 @@ PENDING_NUDGE = ("[Hệ thống] Câu trả lời vừa rồi nói có lệnh đ
                  "nên người dùng không có gì để duyệt. Muốn chạy lệnh thì gọi công cụ ngay bây giờ, kể cả lệnh từng bị từ chối khi điều kiện "
                  "người dùng nêu đã thỏa; hệ thống sẽ tạo thẻ duyệt. Không định chạy thì viết một câu ngắn sửa lại, không nói có lệnh chờ duyệt.")
 WHY_SCHEMA = {"type": "string", "description": "Một câu ngắn nói lệnh này làm gì và vì sao, hiện trên thẻ duyệt cho người dùng đọc"}
+QUEUED_PREFIX = "[Người dùng nhắn thêm trong lúc bạn đang làm; xét ngay, có thể đổi hướng việc đang làm]\n"
 ASK_TOOL = "ask_user"
 ASK_SCHEMA = {
     "type": "object", "required": ["questions"],
@@ -108,20 +109,22 @@ def _questions(args) -> list[dict] | None:
 
 def run_task(conn, tenant_id: str, user_id: str, task: str, env: str = "dev", project: str | None = None, agent_id: str = "ops-agent",
              conversation_id: str | None = None, episode_id: str | None = None, on_event=None, cancelled=None,
-             continuation_of: str | None = None, read_only: bool = False) -> dict:
-    """Chạy một lượt và ghi số token của từng lần gọi LLM vào llm_call để đo chi phí. read_only: agent chỉ thấy công cụ đọc."""
+             continuation_of: str | None = None, read_only: bool = False, inbox=None) -> dict:
+    """Chạy một lượt và ghi số token của từng lần gọi LLM vào llm_call để đo chi phí. read_only: agent chỉ thấy công cụ đọc.
+    inbox: hàm trả các tin người dùng gửi thêm trong lúc lượt đang chạy."""
     episode_id = episode_id or db.new_id()
     with llm.collect_usage(tenant_id) as usage:
         try:
             return _run_task(conn, tenant_id, user_id, task, env, project, agent_id, conversation_id, episode_id, on_event, cancelled, continuation_of,
-                             read_only)
+                             read_only, inbox)
         finally:
             if usage:
                 llm.save_usage(conn, tenant_id, episode_id, usage)
 
 
 def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: str | None, agent_id: str,
-              conversation_id: str | None, episode_id: str, on_event, cancelled, continuation_of: str | None, read_only: bool = False) -> dict:
+              conversation_id: str | None, episode_id: str, on_event, cancelled, continuation_of: str | None, read_only: bool = False,
+              inbox=None) -> dict:
     """on_event nhận các sự kiện tiến trình để stream; cancelled là threading.Event do nút dừng đặt."""
     tenant = conn.execute("SELECT token_quota_daily FROM tenant WHERE id=?", (tenant_id,)).fetchone()
     if tokens_today(conn, tenant_id) >= tenant["token_quota_daily"]:
@@ -402,6 +405,19 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         return PENDING_NUDGE
 
     call_tool.review_answer = review_answer
+
+    def drain() -> str | None:
+        texts = [t for t in (inbox() if inbox else []) if t.strip()]
+        if not texts:
+            return None
+        flush_text()
+        for text in texts:
+            trace.append({"type": "user_message", "text": text})
+            ctx.intent.append(text)  # auto mode xét lệnh sau theo cả lời mới của người dùng
+            emit({"type": "user_message", "text": text})
+        return QUEUED_PREFIX + "\n\n".join(texts)
+
+    call_tool.drain = drain
 
     try:
         route = provider.route(task)

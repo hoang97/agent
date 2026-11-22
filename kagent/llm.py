@@ -389,6 +389,12 @@ def _review(call_tool, text: str) -> str | None:
     return review(text) if review is not None else None
 
 
+def _drain(call_tool) -> str | None:
+    """Tin người dùng gửi thêm trong lúc lượt đang chạy (call_tool.drain), chèn vào ngay sau kết quả lệnh như Claude Code."""
+    drain = getattr(call_tool, "drain", None)
+    return drain() if drain is not None else None
+
+
 def _run_calls(call_tool, calls: list[tuple[str, dict]]) -> list[dict]:
     """Chạy song song nếu runner hỗ trợ (call_tool.batch), ngược lại chạy lần lượt."""
     batch = getattr(call_tool, "batch", None)
@@ -1040,16 +1046,17 @@ class AnthropicProvider(_StructuredProvider):
                 continue
             calls = [b for b in response.content if b.type == "tool_use"]
             if not calls:
-                nudge = _review(call_tool, text)
+                nudge = _review(call_tool, text) or _drain(call_tool)
                 if nudge is None:
                     break
                 messages.append({"role": "user", "content": nudge})
                 continue
             steps_run = _run_calls(call_tool, [(block.name.replace("__", "."), block.input) for block in calls])
-            # Mọi tool_result của một lượt phải nằm trong cùng một message user.
+            # Mọi tool_result của một lượt phải nằm trong cùng một message user; tin người dùng gửi thêm đi sau chúng.
             results = [{"type": "tool_result", "tool_use_id": block.id, "content": _tool_payload(step),
                         "is_error": step["status"] in ("error", "blocked", "invalid")} for block, step in zip(calls, steps_run)]
-            messages.append({"role": "user", "content": results})
+            extra = _drain(call_tool)
+            messages.append({"role": "user", "content": results + ([{"type": "text", "text": extra}] if extra else [])})
         else:
             # Hết bước: buộc model tổng kết thay vì bỏ cả lượt, vì các lệnh đã chạy vẫn có kết quả dùng được.
             check_cancelled(cancelled)
@@ -1206,7 +1213,7 @@ class OpenAIProvider(_StructuredProvider):
             if message.content:
                 parts.append(message.content)
             if not message.tool_calls:
-                nudge = _review(call_tool, message.content or "")
+                nudge = _review(call_tool, message.content or "") or _drain(call_tool)
                 if nudge is None:
                     messages.append({"role": "assistant", "content": message.content or ""})
                     return {"answer": "\n\n".join(parts) or "(không có nội dung trả lời)", "tokens": total, "messages": messages[start:]}
@@ -1228,6 +1235,9 @@ class OpenAIProvider(_StructuredProvider):
                 else:
                     content = _tool_payload(next(outcome))
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
+            extra = _drain(call_tool)
+            if extra:
+                messages.append({"role": "user", "content": extra})
         check_cancelled(cancelled)
         messages.append({"role": "user", "content": wrap_up})
         response = self._complete(on_text=_turn_emitter(on_text, parts), cancelled=cancelled, model=self.models[tier], messages=messages,
