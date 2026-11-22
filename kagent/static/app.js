@@ -1702,7 +1702,7 @@ async function knowledgeSourcesView(main) {
 VIEWS.knowledge = (main) => subTabs(main, [["graph", "Đồ thị (L3)", knowledgeGraphView], ["units", "Tri thức (L1)", knowledgeUnitsView],
   ["compiled", "Runbook (L2)", compiledView], ["sources", "Nguồn", knowledgeSourcesView]]);
 
-const PURPOSE = { agent: "Agent trả lời", route: "Router", check_plan: "Kiểm tra độc lập", reflect: "Reflector", curate: "Curator", extract: "Đọc tài liệu", consolidate: "Tổng hợp KU", dedup: "Tìm KU trùng", judge: "Chấm kết quả", other: "Khác" };
+const PURPOSE = { agent: "Agent trả lời", subagent: "Agent con", route: "Router", check_plan: "Kiểm tra độc lập", reflect: "Reflector", curate: "Curator", extract: "Đọc tài liệu", consolidate: "Tổng hợp KU", dedup: "Tìm KU trùng", judge: "Chấm kết quả", other: "Khác" };
 const num = (v) => (v === null || v === undefined ? "—" : Number(v).toLocaleString("vi-VN"));
 
 const SVG_NS = "http://www.w3.org/2000/svg";

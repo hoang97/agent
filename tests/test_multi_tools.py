@@ -90,3 +90,99 @@ def test_cancel_before_parallel_batch(users):
         uid = conn.execute("SELECT id FROM app_user WHERE username='alice'").fetchone()["id"]
         ep = agent.run_task(conn, alice.tenant, uid, "chạy `SELECT 1` và `SELECT 2`", on_event=lambda e: None, cancelled=cancelled)
     assert ep["trace"][-1]["type"] == "cancelled" and not tool_steps(ep)
+
+
+class Delegating:
+    """Agent chính giao việc qua agent.delegate; agent con chạy kịch bản sub(brief, tools, call_tool)."""
+
+    name = "scripted"
+
+    def __init__(self, main, sub):
+        self.main, self.sub, self.briefs = main, sub, []
+
+    def route(self, task):
+        return {"task_type": "general", "entities": []}
+
+    def run_agent(self, task, context, tools, call_tool, **kw):
+        self.tools = {t["tool"] for t in tools}
+        return {"answer": self.main(call_tool), "tokens": 10}
+
+    def run_subagent(self, brief, tools, call_tool, cancelled=None):
+        self.briefs.append((brief, sorted(t["tool"] for t in tools)))
+        return {"answer": self.sub(brief, call_tool), "tokens": 5}
+
+
+def _run_delegating(users, provider, events=None):
+    llm.set_provider(provider)
+    try:
+        with db.session() as conn:
+            uid = conn.execute("SELECT id FROM app_user WHERE username='alice'").fetchone()["id"]
+            return agent.run_task(conn, users["alice"].tenant, uid, "đếm đơn hàng và khách hàng", on_event=events.append if events is not None else None)
+    finally:
+        llm.set_provider(None)
+
+
+def test_delegated_subagents_run_in_parallel_with_only_the_brief(users):
+    seen = {}
+
+    def main(call_tool):
+        seen["steps"] = call_tool.batch([(agent.DELEGATE_TOOL, {"task": "Đếm số đơn trong bảng orders", "tools": ["db.query"]}),
+                                         (agent.DELEGATE_TOOL, {"task": "Đếm số khách trong bảng customers", "tools": ["db.query"]})])
+        return "xong"
+
+    def sub(brief, call_tool):
+        table = "orders" if "orders" in brief else "customers"
+        rows = call_tool("db.query", {"sql": f"SELECT count(*) FROM {table}"})["result"]["rows"]
+        assert call_tool("k8s.kubectl_read", {"command": "kubectl get pods"})["status"] == "blocked"  # ngoài tools được giao
+        return f"{table}: {rows[0][0]}"
+
+    provider, events = Delegating(main, sub), []
+    ep = _run_delegating(users, provider, events)
+    assert agent.DELEGATE_TOOL in provider.tools
+    first, second = seen["steps"]
+    assert {first["result"]["text"], second["result"]["text"]} == {"orders: 6", "customers: 4"}
+    assert first["parallel"] == second["parallel"] and {first["sub_id"], second["sub_id"]} == {1, 2}
+    # Agent con chỉ nhận môi trường + bản giao việc, không có lịch sử hay tri thức; data.query được thêm để đọc tiếp kết quả lớn.
+    assert all(b.startswith("Môi trường: dev\n\n") and tools == ["data.query", "db.query"] for b, tools in provider.briefs)
+    subs = [s for s in tool_steps(ep) if s.get("sub")]
+    assert sorted((s["tool"], s["status"]) for s in subs) == [("db.query", "ok")] * 2 + [("k8s.kubectl_read", "blocked")] * 2
+    assert all(len(s["steps"]) == 2 for s in (first, second))
+    assert all(e.get("sub") for e in events if e["type"] == "tool_start" and e["tool"] != agent.DELEGATE_TOOL)
+    assert ep["tokens"] == 20
+
+
+def test_delegate_rejects_unknown_or_write_tools(users):
+    seen = {}
+
+    def main(call_tool):
+        seen["step"] = call_tool(agent.DELEGATE_TOOL, {"task": "restart web", "tools": ["k8s.kubectl_write"]})
+        return "xong"
+
+    provider = Delegating(main, lambda b, c: "không được gọi")
+    _run_delegating(users, provider)
+    assert seen["step"]["status"] == "invalid" and "k8s.kubectl_write" in seen["step"]["reasons"][0] and "db.query" in seen["step"]["reasons"][0]
+    assert provider.briefs == []
+
+
+def test_anthropic_subagent_uses_fast_model_and_short_prompt():
+    from types import SimpleNamespace as NS
+    calls = []
+
+    class Fake:
+        def create(self, **kw):
+            calls.append(kw)
+            return NS(content=[NS(type="text", text="6 đơn")], stop_reason="end_turn", model=kw["model"], usage=NS(input_tokens=1, output_tokens=1))
+
+        def stream(self, **kw):
+            raise AssertionError("dùng create trong test")
+
+    fake = Fake()
+    p = llm.AnthropicProvider(NS(messages=fake, beta=NS(messages=fake)))
+    p._create = lambda tier, on_text=None, cancelled=None, **kw: fake.create(model=p.models[tier], **kw)
+    tools = [{"tool": "db.query", "description": "SQL", "input_schema": {"type": "object"}}]
+    with llm.collect_usage() as usage:
+        out = p.run_subagent("Môi trường: dev\n\nĐếm đơn", tools, lambda n, a: {})
+    assert out["answer"] == "6 đơn" and calls[0]["model"] == p.models["fast"]
+    assert calls[0]["system"][0]["text"] == llm.SUBAGENT_SYSTEM and calls[0]["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert [t["name"] for t in calls[0]["tools"]] == ["db__query"] and calls[0]["messages"][0]["content"][0]["text"] == "Môi trường: dev\n\nĐếm đơn"
+    assert usage[0]["purpose"] == "subagent"

@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextvars
 import json
 import re
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import replace
@@ -53,6 +54,18 @@ ASK_DESCRIPTION = ("Hỏi người dùng khi cần họ quyết định mà khô
                    "và thêm \"(khuyên dùng)\" vào cuối nhãn. Giao diện tự thêm ô \"Khác\" để người dùng tự gõ, đừng tự liệt kê. "
                    "Không dùng để hỏi xin phép chạy lệnh: gọi thẳng công cụ, gateway sẽ hỏi duyệt khi cần. "
                    "Gọi xong thì kết thúc lượt bằng một câu ngắn; câu trả lời đến ở lượt sau.")
+
+DELEGATE_TOOL = "agent.delegate"
+DELEGATE_SCHEMA = {
+    "type": "object", "required": ["task", "tools"],
+    "properties": {
+        "task": {"type": "string", "description": "Việc cần làm, tự đủ nghĩa: đối tượng, namespace, môi trường, khoảng thời gian, câu cần trả lời, số liệu cần giữ"},
+        "tools": {"type": "array", "minItems": 1, "maxItems": 6, "items": {"type": "string"}, "description": "Tên các công cụ đọc agent con được dùng, chỉ những cái cần"}},
+}
+DELEGATE_DESCRIPTION = ("Giao một việc tra cứu đơn giản, chỉ đọc, cho agent con chạy bằng model rẻ; chỉ nhận lại bản tóm tắt nên context của bạn không phình vì kết quả thô. "
+                        "Dùng khi cần gom dữ liệu từ nhiều nguồn độc lập (pod, metric, log, ticket...): gọi nhiều lần trong cùng một lượt để các agent con chạy song song. "
+                        "Agent con không thấy hội thoại, tri thức hay kết quả trước đó, nên task phải tự đủ nghĩa. "
+                        "Không giao việc cần lệnh ghi, cần suy luận nhiều bước hay chỉ là một lệnh bạn tự gọi được.")
 
 SKILL_DESCRIPTION = ("Đọc toàn bộ quy trình của một skill trong danh sách <skills>. Gọi khi nhiệm vụ khớp mô tả của skill, "
                      "trước khi bắt tay làm, rồi làm theo các bước trong đó.")
@@ -129,7 +142,16 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
     transcript = None
     statuses: list[str] = []
     partial: list[str] = []
-    emit = on_event or (lambda event: None)
+    raw_emit = on_event or (lambda event: None)
+
+    def emit(event: dict) -> None:
+        """Lệnh do agent con chạy mang số của agent con, để giao diện xếp dưới dòng giao việc."""
+        sub = current_sub.get()
+        if sub is not None and event.get("type") == "tool_start":
+            event = {**event, "sub": sub}
+        elif sub is not None and event.get("type") == "tool_end":
+            event["step"]["sub"] = sub
+        raw_emit(event)
     history = load_history(conn, tenant_id, conversation_id, provider.name)
 
     live.current_stop.set(cancelled)
@@ -152,7 +174,10 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
             trace.append({"type": "text", "text": text[flushed["chars"]:]})
         flushed["chars"] = len(text)
 
-    batches = {"n": 0}
+    batches = {"n": 0, "subs": 0, "sub_tokens": 0}
+    counter = threading.Lock()  # agent con chạy ở nhiều luồng cùng tăng các bộ đếm trên
+    current_sub: contextvars.ContextVar[int | None] = contextvars.ContextVar("current_sub", default=None)
+    sub_tools: dict[str, dict] = {}  # công cụ đọc agent con được chọn
 
     allowed: set[str] = set()  # read_only: chỉ công cụ đã cho agent thấy, chặn cả tên model tự bịa ra
 
@@ -184,6 +209,8 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
                     "reasons": [] if path else [f"không có skill này; skill hiện có: {', '.join(sorted(skills)) or '(không có)'}"]}
             emit({"type": "tool_end", "step": step})
             return step
+        if name == DELEGATE_TOOL:
+            return delegate(args)
         if name == SEARCH_TOOL:
             result, found = search_tool(c, tenant_id, args, files, project=project, user_id=user_id)
             ku_used.extend(i for i in found if i not in ku_used)
@@ -215,13 +242,94 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         with db.session() as c:
             return run_one(c, name, args)
 
+    def delegate(args: dict) -> dict:
+        """Agent con chỉ nhận bản giao việc và các công cụ được chọn; lệnh của nó vẫn qua gateway với ý định gốc của người dùng (ctx)."""
+        task_text = str(args.get("task") or "").strip()
+        names = list(dict.fromkeys(n for n in args.get("tools") or [] if isinstance(n, str))) if isinstance(args.get("tools"), list) else []
+        unknown = [n for n in names if n not in sub_tools]
+        if not task_text or not names or unknown:
+            why = f"không dùng được cho agent con: {', '.join(unknown)}; " if unknown else "cần task và tools; "
+            step = {"type": "tool_call", "tool": DELEGATE_TOOL, "args": args, "env": env, "decision": "allowed", "status": "invalid",
+                    "reasons": [why + f"công cụ đọc có thể giao: {', '.join(sorted(sub_tools))}"]}
+            emit({"type": "tool_end", "step": step})
+            return step
+        if "data.query" in sub_tools and "data.query" not in names:
+            names.append("data.query")  # kết quả lớn chỉ trả result_id; không có data.query thì agent con không đọc tiếp được
+        with counter:
+            batches["subs"] += 1
+            sub_id = batches["subs"]
+        allowed_sub = set(names)
+
+        def sub_call(name: str, a: dict) -> dict:
+            return sub_batch(sub_id, allowed_sub, [(name, a)])[0]
+
+        sub_call.batch = lambda calls: sub_batch(sub_id, allowed_sub, calls)
+        started = time.monotonic()
+        step = {"type": "tool_call", "tool": DELEGATE_TOOL, "args": args, "env": env, "decision": "allowed", "sub_id": sub_id}
+        try:
+            out = provider.run_subagent(f"Môi trường: {env}\n\n{task_text}", [sub_tools[n] for n in names], sub_call, cancelled=cancelled)
+            with counter:
+                batches["sub_tokens"] += out.get("tokens", 0)
+            step |= {"status": "ok", "result": {"text": out["answer"]}}
+        except llm.LLMError as exc:
+            step |= {"status": "error", "result": {"error": str(exc)}, "reasons": [f"agent con lỗi: {exc}"]}
+        step["ms"] = int((time.monotonic() - started) * 1000)
+        step["steps"] = [{"tool": s["tool"], "status": s["status"]} for s in list(trace) if s.get("sub") == sub_id]
+        emit({"type": "tool_end", "step": step})
+        return step
+
+    def sub_batch(sub_id: int, allowed_sub: set[str], calls: list[tuple[str, dict]]) -> list[dict]:
+        """Lệnh của agent con: luôn ở luồng riêng với kết nối riêng, vì luồng đang chạy agent con không được dùng conn của lượt."""
+        llm.check_cancelled(cancelled)
+        token = current_sub.set(sub_id)
+        try:
+            calls = [(name, a if isinstance(a, dict) else {}) for name, a in calls]
+            for name, a in calls:
+                emit({"type": "tool_start", "tool": name, "args": a})
+
+            def run_sub(name: str, a: dict) -> dict:
+                if name not in allowed_sub:
+                    step = {"type": "tool_call", "tool": name, "args": a, "env": env, "decision": "blocked", "status": "blocked",
+                            "reasons": [f"agent con chỉ được dùng: {', '.join(sorted(allowed_sub))}"]}
+                    emit({"type": "tool_end", "step": step})
+                    return step
+                return run_isolated(name, a)
+
+            pool = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, len(calls)), thread_name_prefix="subtool")
+            try:
+                futures = [pool.submit(contextvars.copy_context().run, run_sub, *call) for call in calls]
+                steps = wait_or_stop(futures, calls, reads_only=True)
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+            if len(calls) > 1:
+                with counter:
+                    batches["n"] += 1
+                    n = batches["n"]
+                for step in steps:
+                    step["parallel"] = n
+            with db.session() as c:
+                record(c, steps)
+            return steps
+        finally:
+            current_sub.reset(token)
+
+    def record(c, steps: list[dict]) -> None:
+        for step in steps:
+            step["result_chars"] = len(json.dumps(step.get("result"), ensure_ascii=False)) if step.get("result") is not None else 0
+            small = results.compact(c, tenant_id, user_id, episode_id, step["tool"], step.get("result"), bool(step.get("untrusted")))
+            if small:
+                step["result"], step["result_id"] = small, small["result_id"]
+            trace.append(step)
+            if step["status"] != "asked":
+                statuses.append(step["status"])
+
     def is_read(name: str) -> bool:
-        if name in (SKILL_TOOL, SEARCH_TOOL, PAGE_TOOL):
+        if name in (SKILL_TOOL, SEARCH_TOOL, PAGE_TOOL, DELEGATE_TOOL):
             return True
         r = conn.execute("SELECT action_class FROM tool_registry WHERE tenant_id=? AND tool=?", (tenant_id, name)).fetchone()
         return bool(r and r["action_class"] == "read")
 
-    def wait_or_stop(futures: list, calls: list[tuple[str, dict]]) -> list[dict]:
+    def wait_or_stop(futures: list, calls: list[tuple[str, dict]], reads_only: bool = False) -> list[dict]:
         """Đợi các lệnh chạy xong. Bấm dừng thì bỏ ngay nếu chỉ còn lệnh đọc (kết quả bỏ đi, kubectl bị giết);
         còn lệnh ghi đang chạy thì đợi nó xong rồi mới dừng, vì ngắt giữa chừng không hoàn tác được thay đổi đã gửi đi."""
         told = False
@@ -230,7 +338,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
             if not pending:
                 return [f.result() for f in futures]
             if cancelled is not None and cancelled.is_set():
-                writes = [calls[i][0] for i in pending if not is_read(calls[i][0])]
+                writes = [] if reads_only else [calls[i][0] for i in pending if not is_read(calls[i][0])]
                 if not writes:
                     raise llm.Cancelled()
                 if not told:
@@ -249,7 +357,9 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
             steps = [run_one(conn, *calls[0])]
         else:
             if len(calls) > 1:
-                batches["n"] += 1
+                with counter:
+                    batches["n"] += 1
+                    n = batches["n"]
             # Mỗi lệnh chạy ở luồng riêng để nút dừng có tác dụng ngay. Không dùng with: dừng thì không đợi luồng đã bỏ.
             pool = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, len(calls)), thread_name_prefix="tool")
             try:
@@ -260,15 +370,8 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
                 pool.shutdown(wait=False, cancel_futures=True)
             if len(calls) > 1:
                 for step in steps:
-                    step["parallel"] = batches["n"]
-        for step in steps:
-            step["result_chars"] = len(json.dumps(step.get("result"), ensure_ascii=False)) if step.get("result") is not None else 0
-            small = results.compact(conn, tenant_id, user_id, episode_id, step["tool"], step.get("result"), bool(step.get("untrusted")))
-            if small:
-                step["result"], step["result_id"] = small, small["result_id"]
-            trace.append(step)
-            if step["status"] != "asked":
-                statuses.append(step["status"])
+                    step["parallel"] = n
+        record(conn, steps)
         llm.check_cancelled(cancelled)  # lệnh ghi đã chạy xong và được ghi lại; giờ mới dừng
         return steps
 
@@ -308,6 +411,10 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         if skills:
             tool_list.append({"tool": SKILL_TOOL, "description": SKILL_DESCRIPTION, "action_class": "read", "canonical": SKILL_TOOL,
                               "input_schema": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string", "enum": sorted(skills)}}}})
+        sub_tools.update((t["tool"], t) for t in tool_list if t.get("action_class") == "read" and t["tool"] not in (ASK_TOOL, SEARCH_TOOL, PAGE_TOOL, SKILL_TOOL))
+        if sub_tools:
+            tool_list.append({"tool": DELEGATE_TOOL, "description": DELEGATE_DESCRIPTION, "action_class": "read", "canonical": DELEGATE_TOOL,
+                              "input_schema": DELEGATE_SCHEMA})
         allowed.update(t["tool"] for t in tool_list)
         turn = build_turn(conn, tenant_id, task, task_type, history, project=project, user_id=user_id, entities=entities,
                           tool_names=[t["tool"] for t in tool_list], incident_id=incident_id, continuation=bool(continuation_of), files=files)
@@ -316,7 +423,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         emit({"type": "context", "task_type": task_type, "ku_used": len(ku_used)})
         result = provider.run_agent(task, turn.stable, tool_list, call_tool, history=turn.history, turn_context=turn.turn_context,
                                     on_text=on_text if on_event else None, cancelled=cancelled)
-        tokens += result.get("tokens", 0)
+        tokens += result.get("tokens", 0) + batches["sub_tokens"]
         if result.get("messages"):
             transcript = {"format": provider.name, "messages": result["messages"]}
         flush_text()

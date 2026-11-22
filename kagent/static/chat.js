@@ -122,7 +122,7 @@ function renderMarkdown(text) {
 const SUMMARY_KEYS = ["command", "query", "expr", "sql", "url", "path", "matchers", "index", "name"];
 const STATUS_ICON = { ok: "✓", error: "✕", blocked: "⊘", invalid: "✕", denied: "✕", pending: "…", asked: "?", running: "" };
 
-function shortTool(tool) { return String(tool || "").split(".").pop(); }
+function shortTool(tool) { return tool === "agent.delegate" ? "agent con" : String(tool || "").split(".").pop(); }
 
 // Một dòng tóm tắt tham số: lệnh, query, URL... thay cho JSON.
 function argSummary(args) {
@@ -171,13 +171,13 @@ function toolRow(step) {
   const stopped = status === "blocked" || status === "invalid";
   const line = h("button", { type: "button", class: "tool-line", "aria-expanded": "false" },
     h("span", { class: "tool-icon s-" + status, "aria-label": LABEL[status] || status }, status === "running" ? h("span", { class: "spinner" }) : STATUS_ICON[status] || "•"),
-    h("span", { class: "tool-name" }, shortTool(step.tool)),
+    h("span", { class: "tool-name" }, step.sub ? `#${step.sub} ` : "", shortTool(step.tool), step.sub_id ? ` #${step.sub_id}` : ""),
     summaryEl(argSummary(step.args)),
     h("span", { class: "tool-meta" }, status === "running" ? h("span", { class: "elapsed" }, "0s") : fmtMs(step.ms)),
     step.untrusted && h("span", { class: "badge warn", title: "Kết quả chứa nội dung người ngoài ghi được (log, trang web...)" }, "nội dung ngoài"),
     status !== "running" && icon("chevron"));
   const detail = h("div", { class: "tool-detail", hidden: "" });
-  const row = h("div", { class: `tool-row ${kind} s-${status}` }, line,
+  const row = h("div", { class: `tool-row ${kind} s-${status}${step.sub ? " sub" : ""}` }, line,
     stopped && step.reasons && step.reasons.length > 0 && h("div", { class: "tool-note" }, step.reasons.join("; ")),
     status === "error" && step.result && step.result.error && h("div", { class: "tool-note" }, String(step.result.error).split("\n")[0].slice(0, 300)),
     step.change_id && changeLine({ id: step.change_id, status: "loading" }),
@@ -556,10 +556,14 @@ function chatView(main) {
     const byId = new Map(m.approvals.map((a) => [a.id, a]));
     const latest = m.id === latestId();
     const flow = h("div", { class: "flow" });
+    // Lệnh của agent con được ghi trước dòng giao việc (giao việc xong mới ghi); gom chúng xuống ngay dưới dòng đó. Lệnh chờ duyệt vẫn ở chỗ cũ.
+    const delegated = new Set(m.steps.filter((s) => s.tool === "agent.delegate" && s.sub_id).map((s) => s.sub_id));
+    const grouped = (s) => s.sub && delegated.has(s.sub) && !(s.approval_id && byId.has(s.approval_id));
     for (const item of timelineItems(m)) {
       if (item.text !== undefined) { addKids(flow, h("div", { class: "prose" }, renderMarkdown(item.text))); continue; }
       const st = m.steps[item.step];
-      if (!st) continue;
+      if (!st || grouped(st)) continue;
+      if (st.tool === "agent.delegate" && st.sub_id) { addKids(flow, toolRow(st), m.steps.filter((s) => s.sub === st.sub_id && grouped(s)).map(toolRow)); continue; }
       if (st.tool === "ask_user" && st.status === "asked" && st.questions) addKids(flow, questionCard(st, latest, (answer) => send(answer)));
       else if (st.approval_id && byId.has(st.approval_id)) { addKids(flow, approvalCard(byId.get(st.approval_id), decide)); byId.delete(st.approval_id); }
       else addKids(flow, toolRow(st));
@@ -739,7 +743,7 @@ function chatView(main) {
       } else if (ev.type === "tool_start") {
         if (frame) { cancelAnimationFrame(frame); paint(); }
         cur = null;
-        const row = toolRow({ tool: ev.tool, args: ev.args, status: "running" });
+        const row = toolRow({ tool: ev.tool, args: ev.args, status: "running", sub: ev.sub });
         running.push({ tool: ev.tool, args: ev.args, row, at: Date.now() });
         addKids(flow, row);
         tickStatus();

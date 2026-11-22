@@ -294,6 +294,11 @@ Mức rủi ro tối thiểu được tính từ metadata; template khai `risk_t
 ## Chạy nhiều công cụ cùng lúc và công cụ học được
 
 - **Chạy song song:** các lệnh model gọi trong cùng một lượt chạy song song, tối đa 4 lệnh. Ở chế độ heuristic, lệnh đọc chạy trước, lệnh ghi chạy sau.
+- **Agent con** (`agent.delegate {task, tools}`): agent chính giao một việc tra cứu đơn giản, gọi nhiều lần trong một lượt để các agent con chạy song song. Để rẻ:
+  - Agent con chỉ nhận môi trường cùng bản giao việc. Không có lịch sử, KU hay lời nhắc hệ thống của agent chính, nên `task` phải tự đủ nghĩa.
+  - Agent con chỉ thấy các công cụ đọc được giao trong `tools`, cộng `data.query` để lọc kết quả lớn. Gọi công cụ khác thì bị chặn, giao công cụ ghi thì lệnh giao việc báo `invalid`.
+  - Agent con dùng model tầng `fast`, tối đa `max_subagent_steps` (6) bước, cache TTL 5 phút. Agent chính chỉ nhận lại bản tóm tắt.
+  - Lệnh của agent con vẫn qua gateway với ý định gốc của người dùng và được ghi vào trace, có `sub` là số của agent con. Token được tính vào lượt và có mục đích `subagent` trong thống kê.
 - **Công cụ học được** (`learned.<tên>`) là chuỗi bước gọi các công cụ ở trên, sinh từ thao tác lặp lại hoặc lưu từ chat:
   - Mỗi bước vẫn qua gateway với quyền của người gọi.
   - Nếu kết nối của một bước bị gỡ hoặc tắt, công cụ học được bị chặn theo.

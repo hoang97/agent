@@ -311,6 +311,7 @@ input.narrow { width: 70px; }
 .flow > .prose { margin: 4px 0; }
 .tool-row { min-width: 0; font-size: 13.5px; border-left: 2px solid var(--line); margin: 0 0 0 4px; padding-left: 8px; }
 .tool-row.k-write { border-left-color: var(--warn); }
+.tool-row.sub { margin-left: 24px; }
 .tool-row.k-danger { border-left-color: var(--bad); }
 .tool-line { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; text-align: left; background: transparent; color: inherit; border: 0; border-radius: 6px; padding: 3px 6px 3px 2px; }
 .tool-line:hover { background: var(--code); }
