@@ -368,6 +368,16 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE session ADD COLUMN created_at TEXT")  # mốc để giới hạn tuổi tối đa của phiên trượt
     if "llm" not in {r["name"] for r in conn.execute("PRAGMA table_info(llm_call)")}:
         conn.execute("ALTER TABLE llm_call ADD COLUMN llm TEXT")  # tên cấu hình LLM đã dùng
+    incident_cols = {r["name"] for r in conn.execute("PRAGMA table_info(incident)")}
+    # Chuỗi 5 Whys của lượt điều tra mới nhất (incidents/rootcause.py); xác nhận của người cho chuỗi đó; sự cố sau có cùng nguyên nhân.
+    for column in ("whys", "rc_confirmed_by", "rc_confirmed_at", "rc_recurred_by"):
+        if column not in incident_cols:
+            conn.execute(f"ALTER TABLE incident ADD COLUMN {column} TEXT")
+    if "kind" not in {r["name"] for r in conn.execute("PRAGMA table_info(incident_action)")}:
+        conn.execute("ALTER TABLE incident_action ADD COLUMN kind TEXT")  # mitigate | fix: lệnh chỉ làm hết triệu chứng hay sửa nguyên nhân
+        from .incidents.rootcause import action_kind
+        for r in conn.execute("SELECT id, tool, args FROM incident_action").fetchall():
+            conn.execute("UPDATE incident_action SET kind=? WHERE id=?", (action_kind(r["tool"], json.loads(r["args"] or "null")), r["id"]))
     if "evidence" not in {r["name"] for r in conn.execute("PRAGMA table_info(source_doc)")}:
         conn.execute("ALTER TABLE source_doc ADD COLUMN evidence TEXT")  # bản ghi sự cố: mã căn cứ → mức tin, để chấm tin cậy từng KU (sources.py)
     if "cache_known" not in {r["name"] for r in conn.execute("PRAGMA table_info(llm_call)")}:

@@ -1758,6 +1758,25 @@ def incident_task_add(incident_id: str, body: IncidentTask, t: Tenant = Depends(
         return _incident_call(lambda: incidents.tasks.add(conn, t.tenant_id, incident_id, body.text, t.user_id))
 
 
+class RootCauseLink(BaseModel):
+    question: str = Field(default="", max_length=300)
+    answer: str = Field(max_length=600)
+    weakness: bool = False
+
+
+class RootCauseConfirm(BaseModel):
+    whys: list[RootCauseLink] | None = Field(default=None, max_length=7)
+    prevent: str = Field(default="", max_length=200)
+
+
+@app.post("/api/incidents/{incident_id}/rootcause/confirm")
+def incident_rootcause_confirm(incident_id: str, body: RootCauseConfirm, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_writer()
+    whys = [w.model_dump() for w in body.whys] if body.whys is not None else None
+    with db.tx(conn):
+        return _incident_call(lambda: incidents.rootcause.confirm(conn, t.tenant_id, incident_id, t.user_id, whys, body.prevent))
+
+
 class TaskDone(BaseModel):
     done: bool = True
 

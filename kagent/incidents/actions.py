@@ -6,6 +6,7 @@ from datetime import timedelta
 
 from .. import db
 from .common import BOT, IncidentError, _event, _label, _later
+from .rootcause import action_kind
 from .config import settings
 from .ingest import poll
 
@@ -103,7 +104,7 @@ def _insert(conn, tenant_id: str, incident_id: str, origin: str, requested_by: s
            "dry_run": _dump(step.get("dry_run")), "status": status, "auto": int(status in DONE), "proposed_at": now,
            "decided_by": None, "decided_at": None, "deny_reason": None, "ran_at": now if status in DONE else None,
            "result": _dump(step.get("result")), "result_line": result_line(step.get("result")) if status in DONE else None,
-           "verified": None, "verified_at": None, "superseded_by": None}
+           "verified": None, "verified_at": None, "superseded_by": None, "kind": action_kind(step["tool"], step.get("args"), step.get("kind"))}
     conn.execute(f"INSERT INTO incident_action({','.join(row)}) VALUES ({','.join('?' * len(row))})", tuple(row.values()))
     _emit(conn, row)
     return row
@@ -181,7 +182,7 @@ def act(conn, tenant_id: str, incident_id: str, report: dict, user: str, episode
         a = {**a, "args": strip_dry_run(a["args"])}
         step = gateway.invoke(conn, ctx, a["tool"], a["args"])  # như agent: không bọc giao dịch quanh lệnh gọi mạng
         with db.tx(conn):
-            done.append(_insert(conn, tenant_id, incident_id, "investigation", user, step, episode_id, a["why"]))
+            done.append(_insert(conn, tenant_id, incident_id, "investigation", user, {**step, "kind": a.get("kind")}, episode_id, a["why"]))
         if step["status"] != "ok":
             break  # bước sau dựa trên bước trước: chưa chạy được thì dừng
     stage = "verifying" if any(d["status"] == "ok" for d in done) else "awaiting_approval" if any(d["status"] == "pending" for d in done) else "needs_human"
@@ -272,7 +273,7 @@ def retry(conn, tenant_id: str, incident_id: str, action_id: str, user: str) -> 
                               roles=gateway.user_roles(conn, tenant_id, user), forced=[f"người dùng nhờ đề xuất lại lệnh {RETRYABLE[old['status']]}"])
     step = gateway.invoke(conn, ctx, old["tool"], json.loads(old["args"]))
     with db.tx(conn):
-        new = _insert(conn, tenant_id, incident_id, old["origin"], user, step, inc["episode_id"], old["why"])
+        new = _insert(conn, tenant_id, incident_id, old["origin"], user, {**step, "kind": old["kind"]}, inc["episode_id"], old["why"])
         if new["status"] in ("pending", "ok"):
             _supersede(conn, old, new["id"])
         if inc["status"] == "open" and inc["stage"] not in ("investigating", "verifying") and new["status"] in ("pending", "ok"):
@@ -312,7 +313,8 @@ def follow_up(conn, tenant_id: str) -> None:
     for inc in due:
         left = conn.execute("SELECT count(*) n FROM alert_event WHERE incident_id=? AND status='firing'", (inc["id"],)).fetchone()["n"]
         with db.tx(conn):
-            conn.execute("UPDATE incident_action SET verified=?, verified_at=? WHERE incident_id=? AND origin='investigation' AND status='ok' "
+            # Cả lệnh người chạy trong hội thoại: lệnh sửa của người cũng là căn cứ cho mức nguyên nhân (rootcause.level).
+            conn.execute("UPDATE incident_action SET verified=?, verified_at=? WHERE incident_id=? AND status='ok' "
                          "AND verified IS NULL", (int(left == 0), now, inc["id"]))
             conn.execute("UPDATE incident SET stage=?, verify_due=NULL, updated_at=? WHERE id=?", ("handled" if left == 0 else "needs_human", now, inc["id"]))
             _event(conn, tenant_id, inc["id"], "verified", "đã xác minh: cảnh báo đã hết" if left == 0 else

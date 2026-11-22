@@ -1007,3 +1007,107 @@ def test_cause_parts_splits_run_on_paragraph():
                                  "points": ["Hệ quả: flower restart 32 lần."], "gaps": ["Chưa đọc được ngưỡng của rule CPUThrottlingHigh."]}
     assert headline(text) == "Probe timeout 1s quá ngắn (scrape ~2,1s)"
     assert cause_parts("image lỗi") == {"hedge": None, "lead": "Image lỗi", "points": [], "gaps": []} and cause_parts("") is None
+
+
+class FiveWhys(Reporting):
+    """Báo cáo có chuỗi 5 Whys; same: id sự cố cũ mà so nguyên nhân trả về là trùng."""
+
+    def __init__(self, whys, stop="no_evidence", next_question="", same=(), **kw):
+        super().__init__(0.8, kw.pop("actions", []), **kw)
+        self.whys, self.stop, self.next_question, self.same, self.compared = whys, stop, next_question, list(same), []
+
+    def incident_report(self, data, tools):
+        out = super().incident_report(data, tools)
+        return {**out, "whys": self.whys, "stop": self.stop, "next_question": self.next_question,
+                "factors": [{"type": "detect", "text": "không có alert cho pod chưa sẵn sàng", "refs": ["S1"]}]}
+
+    def same_cause(self, new, olds):
+        self.compared.append((new, olds))
+        return [o["id"] for o in olds if o["id"] in self.same]
+
+
+TECH = {"question": "Tại sao CPU cao?", "answer": "pod web vòng lặp retry", "refs": ["S1"], "weakness": False}
+WEAK = {"question": "Tại sao retry không giới hạn?", "answer": "client không có backoff", "refs": [], "weakness": True}
+
+
+def test_report_saves_5_whys_and_asks_next_question(flow, users, infra):
+    iid = _web_incident(users)
+    provider = FiveWhys([TECH], next_question="Tại sao bản deploy mới bật retry?")
+    llm.set_provider(provider)
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+    assert provider.data["steps"][0]["code"] == "S1"
+    rc = flow.get(f"/api/incidents/{iid}").json()["rootcause"]
+    assert rc["whys"][0]["answer"] == "pod web vòng lặp retry" and rc["whys"][0]["grounded"] and rc["stop"] == "no_evidence"
+    assert rc["level"] == 0 and rc["factors"][0]["label"] == "phát hiện chậm" and rc["factors"][0]["grounded"]
+    task = next(w for w in flow.get(f"/api/incidents/{iid}").json()["waiting"] if w["kind"] == "task")
+    assert task["source"] == "why" and "bật retry" in task["text"]
+    with db.session() as conn:
+        assert "5 Whys (chưa rõ nguyên nhân" in incidents.context_block(conn, tenant(users), iid)
+
+
+def test_confirm_with_weakness_and_prevention_reaches_level_3(flow, users, infra):
+    iid = _web_incident(users)
+    llm.set_provider(FiveWhys([TECH], next_question="Tại sao retry không giới hạn?"))
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+    body = {"whys": [{"question": TECH["question"], "answer": TECH["answer"]}, {"question": WEAK["question"], "answer": WEAK["answer"], "weakness": True}],
+            "prevent": "Thêm backoff cho client web"}
+    assert flow.post(f"/api/incidents/{iid}/rootcause/confirm", json={"whys": [], "prevent": ""}).status_code == 400
+    lv = flow.post(f"/api/incidents/{iid}/rootcause/confirm", json=body).json()
+    assert lv["level"] == 3 and lv["confirmed"] and lv["weakness"] and lv["prevent"]
+    d = flow.get(f"/api/incidents/{iid}").json()
+    whys = d["rootcause"]["whys"]
+    assert whys[0]["grounded"] and not whys[0]["by_user"] and whys[1]["by_user"] and whys[1]["weakness"]
+    assert d["rootcause"]["prevent"] == ["Thêm backoff cho client web"] and d["rootcause"]["confirmed_by"]
+    assert not any(w["kind"] == "task" and w["source"] == "why" for w in d["waiting"])  # chuỗi đã dừng ở điểm yếu: bỏ câu hỏi mở
+    assert any(e["kind"] == "rc_confirmed" for e in d["timeline"])
+    # Điều tra lại thay chuỗi: xác nhận cũ hết hiệu lực.
+    with db.session() as conn:
+        conn.execute("UPDATE incident SET stage='reported' WHERE id=?", (iid,))
+        incidents.investigate(conn, tenant(users), iid)
+    assert flow.get(f"/api/incidents/{iid}").json()["rootcause"]["confirmed"] is False
+
+
+def test_same_cause_recurrence_downgrades_old_incident_and_blames_lessons(flow, users, infra):
+    from kagent import knowledge, sources
+    t = tenant(users)
+    old = _web_incident(users)
+    llm.set_provider(FiveWhys([TECH]))
+    with db.session() as conn:
+        incidents.investigate(conn, t, old)
+        conn.execute("UPDATE incident SET status='resolved', created_at=? WHERE id=?", (db.later(days=-3), old))
+        doc = sources.add(conn, t, title="Sự cố cũ", content="x", kind="incident", trust="verified_tool", ref=f"{old}@x")
+        ku = knowledge.add(conn, t, kind="lesson", title="retry gây CPU", content="c", source_eps=[f"doc:{doc['id']}#1"], source_trust="verified_tool")
+        fact = knowledge.add(conn, t, kind="fact", title="web có 2 pod", content="c", source_eps=[f"doc:{doc['id']}#1"], source_trust="verified_tool")
+        # Sự cố mới cùng nhóm.
+        new = db.new_id()
+        conn.execute("INSERT INTO incident(id,tenant_id,env,title,status,stage,created_at,updated_at,last_alert_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                     (new, t, "dev", "HighCPU · web lần 2", "open", "new", db.iso(), db.iso(), db.iso()))
+        conn.execute("UPDATE alert_event SET incident_id=? WHERE id=(SELECT id FROM alert_event WHERE incident_id=? LIMIT 1)", (new, old))
+        conn.execute("INSERT INTO alert_event(id,tenant_id,source,fingerprint,starts_at,alertname,severity,labels,summary,env,first_seen,last_seen,incident_id,status) "
+                     "SELECT ?,tenant_id,source,fingerprint||'b',starts_at,alertname,severity,labels,summary,env,first_seen,last_seen,?,'resolved' "
+                     "FROM alert_event WHERE incident_id=? LIMIT 1", (db.new_id(), old, new))
+        provider = FiveWhys([TECH], same=[old])
+        llm.set_provider(provider)
+        incidents.investigate(conn, t, new)
+        assert provider.compared and provider.compared[0][1][0]["id"] == old
+        row = conn.execute("SELECT * FROM incident WHERE id=?", (old,)).fetchone()
+        assert row["rc_recurred_by"] == new and incidents.rootcause.level(conn, row)["recurred"]["id"] == new
+        assert knowledge.get(conn, t, ku["id"])["harmful_cnt"] == 1 and knowledge.get(conn, t, fact["id"])["harmful_cnt"] == 0
+        incidents.rootcause.check_recurrence(conn, t, new, provider)  # đã đánh dấu: không so lại, không trừ điểm hai lần
+        assert knowledge.get(conn, t, ku["id"])["harmful_cnt"] == 1
+
+
+def test_restart_is_mitigation_even_if_report_calls_it_fix(flow, users, infra):
+    from kagent.incidents.rootcause import action_kind, is_mitigation
+    assert is_mitigation("k8s.kubectl_write", {"command": "rollout restart deployment/web -n default"})
+    assert is_mitigation("k8s.kubectl_write", {"command": "kubectl scale deploy/web --replicas=3"})
+    assert is_mitigation("os.api_write", {"path": "/servers/x/action", "body": {"reboot": {"type": "SOFT"}}})
+    assert not is_mitigation("k8s.kubectl_write", {"command": "rollout undo deployment/web"})
+    assert action_kind("k8s.kubectl_write", {"command": "rollout restart deploy/web"}, "fix") == "mitigate"
+    iid = _web_incident(users)
+    llm.set_provider(FiveWhys([TECH], actions=[{**RESTART, "kind": "fix"}]))
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+        assert conn.execute("SELECT kind FROM incident_action WHERE incident_id=?", (iid,)).fetchone()["kind"] == "mitigate"

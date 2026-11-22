@@ -351,6 +351,42 @@ function causeBody(p) {
     list("ix-points", "Diễn biến và bằng chứng", p.points), list("ix-gaps", "Chưa xác nhận", p.gaps)];
 }
 
+const RC_TONE = { 0: "", 1: "warn", 2: "info", 3: "ok" };
+const TASK_SOURCE = { summary: "Việc cần người, kagent nêu trong bản tóm tắt", prevent: "Việc phòng ngừa từ 5 Whys",
+  why: "Chuỗi 5 Whys dừng vì hết căn cứ: trả lời rồi thêm vào chuỗi ở thẻ Nguyên nhân" };
+
+// Chuỗi 5 Whys, mức đã xử lý tới đâu và form xác nhận (incidents/rootcause.py). act: hàm gọi API rồi tải lại trang.
+function rootCauseBody(rc, id, act, openIncident) {
+  const tag = (w) => w.by_user ? h("span", { class: "pill" }, "người viết") : !w.grounded && h("span", { class: "pill warn" }, "giả thuyết");
+  const rows = [...rc.whys, { question: "", answer: "" }].map((w) => ({
+    q: h("input", { value: w.question || "", placeholder: "Tại sao …?", maxlength: "300", "aria-label": "Câu hỏi tại sao" }),
+    a: h("textarea", { rows: "2", maxlength: "600", placeholder: "Câu trả lời (để trống để bỏ mắt xích)", "aria-label": "Câu trả lời" }, w.answer || ""),
+  }));
+  const weak = h("input", { type: "checkbox", checked: rc.weakness });
+  const prevent = h("input", { placeholder: "Vd. thêm bước CI chặn cấu hình sai", maxlength: "200", "aria-label": "Việc phòng ngừa" });
+  const form = h("details", { class: "ix-rc-form" }, h("summary", {}, rc.confirmed ? "Sửa và xác nhận lại chuỗi" : "Xác nhận hoặc sửa chuỗi"),
+    h("p", { class: "small" }, "Hỏi tại sao cho tới khi gặp một điểm yếu sửa được của hệ thống (cấu hình, kiến trúc, công cụ, quy trình); không dừng ở \"do người làm sai\"."),
+    rows.map((r, i) => h("div", { class: "ix-rc-row" }, h("span", { class: "small muted" }, `Tại sao ${i + 1}`), r.q, r.a)),
+    h("label", { class: "small" }, weak, " Mắt xích cuối là điểm yếu sửa được"),
+    h("label", { class: "small" }, "Việc phòng ngừa (cần để đạt mức 3)"), prevent,
+    h("button", { type: "button", class: "small-btn", onclick: act(() => api("POST", `/api/incidents/${id}/rootcause/confirm`, {
+      whys: rows.filter((r) => r.a.value.trim()).map((r, i, all) => ({ question: r.q.value.trim(), answer: r.a.value.trim(), weakness: i === all.length - 1 && weak.checked })),
+      prevent: prevent.value.trim() }), "Đã xác nhận chuỗi 5 Whys") }, "Xác nhận"));
+  return h("div", { class: "ix-rc" },
+    h("div", { class: "row" }, h("span", { class: "pill " + RC_TONE[rc.level] }, `Mức ${rc.level}: ${rc.label}`),
+      rc.notes.length > 0 && h("span", { class: "small" }, rc.notes.join("; "))),
+    rc.recurred && h("p", { class: "small" }, "Nguyên nhân lặp lại ở ", openIncident(rc.recurred)),
+    rc.whys.length > 0 && h("div", {}, h("div", { class: "ix-cause-h" }, "5 Whys"),
+      h("ol", { class: "ix-whys" }, rc.whys.map((w) => h("li", {}, h("div", { class: "small muted" }, w.question), h("div", {}, inlineMd(w.answer), " ", tag(w),
+        w.weakness && h("span", { class: "pill ok" }, "điểm yếu sửa được")))))),
+    rc.whys.length > 0 && rc.stop === "no_evidence" && h("p", { class: "small" }, "Chuỗi dừng vì hết căn cứ", rc.next_question ? `; cần người trả lời: ${rc.next_question}` : "."),
+    rc.factors.length > 0 && h("div", {}, h("div", { class: "ix-cause-h" }, "Yếu tố góp phần"),
+      h("ul", {}, rc.factors.map((f) => h("li", {}, `${f.label}: `, inlineMd(f.text), " ", !f.grounded && h("span", { class: "pill warn" }, "giả thuyết"))))),
+    rc.prevent.length > 0 && h("div", {}, h("div", { class: "ix-cause-h" }, "Việc phòng ngừa"), h("ul", {}, rc.prevent.map((t) => h("li", {}, t)))),
+    rc.confirmed_at && h("p", { class: "small" }, `${rc.confirmed_by || "?"} xác nhận lúc ${hmd(rc.confirmed_at)}`),
+    form);
+}
+
 async function incidentDetail(main, id) {
   const token = ++incidentTimer;
   const box = h("div", { class: "ix" });
@@ -442,7 +478,7 @@ async function incidentDetail(main, id) {
       }
       if (w.kind === "task") {
         return h("div", { class: "ix-item" }, h("span", { class: "ix-dot info", "aria-hidden": "true" }),
-          h("div", {}, h("strong", {}, w.text), h("span", { class: "small" }, w.source === "summary" ? "Việc cần người, kagent nêu trong bản tóm tắt" : `Việc cần người, thêm lúc ${hmd(w.created_at)}`)),
+          h("div", {}, h("strong", {}, w.text), h("span", { class: "small" }, TASK_SOURCE[w.source] || `Việc cần người, thêm lúc ${hmd(w.created_at)}`)),
           h("div", { class: "ix-acts" }, h("button", { type: "button", class: "ghost small-btn", onclick: act(() => api("POST", `/api/incidents/${id}/tasks/${w.task_id}/done`, { done: true }), "Đã đánh dấu xong") }, "Đánh dấu đã xong")));
       }
       const isError = w.kind === "error";
@@ -507,6 +543,7 @@ async function incidentDetail(main, id) {
         c && h("span", { class: "small" }, [c.round ? `lượt điều tra ${c.round}` : null, c.at ? hmd(c.at) : null, `độ tin ${(c.confidence || 0).toFixed(2)}`].filter(Boolean).join(" · "))),
       busyNow ? busy(d.queued === "slot" ? "Đang chờ tới lượt điều tra…" : "Agent đang điều tra bằng các lệnh chỉ đọc…") : null,
       c ? [c.parts ? causeBody(c.parts) : h("p", {}, "Chưa rõ nguyên nhân."),
+        rootCauseBody(d.rootcause, id, act, (r) => h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("incidents", undefined, r.id); } }, r.title)),
         h("details", {}, h("summary", {}, `${c.steps} lệnh đọc và bằng chứng`),
           c.evidence.length ? h("ul", { class: "small" }, c.evidence.map((e) => h("li", {}, e))) : h("p", { class: "small" }, "Không có bằng chứng được ghi."),
           d.conversation_id && h("a", { href: "#", class: "small", onclick: (e) => { e.preventDefault(); go("chat", d.conversation_id); } }, "Từng lệnh và câu trả lời đầy đủ ở hội thoại điều tra"))]

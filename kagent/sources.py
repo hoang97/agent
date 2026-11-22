@@ -206,13 +206,18 @@ def _excerpt(result) -> str:
     return text[:STEP_CHARS] + ("…" if len(text) > STEP_CHARS else "")
 
 
-def _steps(conn, inc) -> list[dict]:
+def _key(tool, args) -> tuple:
+    """Một bước theo công cụ và tham số (bỏ --dry-run): khớp bước giữa vết điều tra, lệnh khắc phục và chuỗi 5 Whys."""
+    from .incidents.actions import strip_dry_run
+    return (tool, json.dumps(strip_dry_run(args if isinstance(args, dict) else {}), sort_keys=True, ensure_ascii=False))
+
+
+def _steps(conn, inc, keep: set | None = None) -> list[dict]:
     """Các bước đã chạy của sự cố: bước đọc từ vết điều tra và hội thoại, rồi lệnh khắc phục (kèm kết quả kiểm tra)."""
     from .conversation import _untrusted_tool
-    from .incidents.actions import strip_dry_run
     actions = [dict(r) for r in conn.execute("SELECT * FROM incident_action WHERE incident_id=? AND status IN ('ok','error') AND superseded_by IS NULL "
                                              "ORDER BY coalesce(ran_at, proposed_at)", (inc["id"],))]
-    key = lambda tool, args: (tool, json.dumps(strip_dry_run(args if isinstance(args, dict) else {}), sort_keys=True, ensure_ascii=False))
+    key = _key
     seen = {key(a["tool"], json.loads(a["args"] or "{}")) for a in actions}
     reads = []
     rs = conn.execute("SELECT trace FROM episode WHERE tenant_id=? AND (id=? OR (conversation_id IS NOT NULL AND conversation_id=?)) ORDER BY started_at",
@@ -231,13 +236,17 @@ def _steps(conn, inc) -> list[dict]:
                 if part is not None:
                     trusted, result, viewed = True, part, True
             reads.append({"tool": st["tool"], "args": st.get("args") or {}, "status": st["status"], "trusted": trusted,
-                          "result": result, "fix": None, "action": False, "viewed": viewed})
-    out = reads[:MAX_STEPS]
+                          "result": result, "fix": None, "action": False, "viewed": viewed, "key": k})
+    keep = keep or set()
+    picked = {i for i, r in enumerate(reads) if r["key"] in keep}  # bước chuỗi 5 Whys trích luôn được giữ
+    picked |= set([i for i in range(len(reads)) if i not in picked][:max(0, MAX_STEPS - len(picked))])
+    out = [r for i, r in enumerate(reads) if i in picked]
     for a in actions:
         args = json.loads(a["args"] or "{}")
         fix = None if a["status"] != "ok" else {1: "verified", 0: "failed"}.get(a["verified"], "unchecked")
         out.append({"tool": a["tool"], "args": args, "status": a["status"], "trusted": not _untrusted_tool(conn, inc["tenant_id"], a["tool"], args),
-                    "result": a["result_line"] or a["result"], "fix": fix, "why": a["why"], "action": True})
+                    "result": a["result_line"] or a["result"], "fix": fix, "why": a["why"], "action": True,
+                    "key": _key(a["tool"], args)})
     return out
 
 
@@ -261,39 +270,81 @@ def _structured(conn, tenant_id: str, tool: str, result):
         return None
 
 
-FIX_TEXT = {"verified": "kiểm tra sau khi chạy: đạt", "failed": "kiểm tra sau khi chạy: không đạt", "unchecked": "chưa kiểm tra sau khi chạy"}
+FIX_TEXT = {"recurred": "kiểm tra sau khi chạy đạt nhưng nguyên nhân lặp lại ở sự cố sau", "verified": "kiểm tra sau khi chạy: đạt", "failed": "kiểm tra sau khi chạy: không đạt", "unchecked": "chưa kiểm tra sau khi chạy"}
 
 
 def incident_record(conn, inc) -> tuple[str, dict]:
     """Bản ghi sự cố cho bước rút KU và bảng căn cứ: mã → mức tin. Kết quả chữ tự do (log, describe) không đưa vào bản ghi,
     để model rút KU không đọc phải nội dung người ngoài viết; KU trích bước đó vẫn bị coi là chưa tin cậy. Công cụ có trusted_view
-    thì đưa phần có cấu trúc vào và bước đó thành căn cứ tin cậy."""
+    thì đưa phần có cấu trúc vào và bước đó thành căn cứ tin cậy.
+
+    Mức tin theo 5 Whys (incidents/rootcause.py): [NN] tin được từ mức 2; mắt xích điểm yếu chỉ tin được ở mức 3 (người xác nhận và có
+    việc phòng ngừa); mắt xích khác mang mức thấp nhất của các bước nó trích. Nguyên nhân lặp lại ở sự cố sau thì lệnh sửa "đạt" mất giá trị."""
+    from .incidents import rootcause
     cause = inc["cause"] or inc["root_cause"]
-    steps = _steps(conn, inc)
-    verified = any(st["fix"] == "verified" for st in steps)
+    lv = rootcause.level(conn, inc)
+    c = rootcause.chain(inc)
+    steps = _steps(conn, inc, {_key(x["tool"], x["args"]) for item in c["whys"] + c["factors"] for x in item.get("steps") or []})
+    if lv["recurred"]:
+        for st in steps:
+            st["fix"] = "recurred" if st["fix"] == "verified" else st["fix"]
     evidence = {"CB": {"trust": "internal_doc"}, "NV": {"trust": "internal_doc"},
-                "NN": {"trust": "verified_tool" if verified else "external_untrusted"}}
+                "NN": {"trust": "verified_tool" if lv["level"] >= 2 else "external_untrusted"}}
+    codes = {}
+    step_lines = []
+    for n, st in enumerate(steps, 1):
+        code = f"B{n}"
+        codes.setdefault(st["key"], code)
+        evidence[code] = {"trust": "verified_tool" if st["trusted"] else "external_untrusted", "fix": st["fix"]}
+        head = f"- [{code}] {_label(st)}" + (" (lệnh khắc phục" + (f": {st['why']}" if st["why"] else "") + ")" if st["action"] else "")
+        body = (f"kết quả{' (đã lược chữ tự do)' if st.get('viewed') else ''}: {_excerpt(st['result'])}" if st["trusted"] and st["result"] else
+                "kết quả là chữ tự do (log, mô tả), không đưa vào bản ghi" if not st["trusted"] else "")
+        step_lines.append(f"{head} → {'chạy được' if st['status'] == 'ok' else 'lỗi'}" + (f"; {FIX_TEXT[st['fix']]}" if st["fix"] else "")
+                          + (f". {body}" if body else ""))
+
+    def cited(item) -> list[str]:
+        out = [codes[k] for k in (_key(x["tool"], x["args"]) for x in item.get("steps") or []) if k in codes]
+        return list(dict.fromkeys(out + (["CB"] if "CB" in (item.get("refs") or []) else [])))
+
+    def lowest(refs: list[str]) -> str:
+        return min((evidence[r]["trust"] for r in refs), key=knowledge.TRUST_ORDER.index) if refs else "external_untrusted"
+
     lines = [f"Môi trường: {inc['env']}. Mức độ: {inc['severity'] or 'không rõ'}. Từ {inc['created_at']} tới {inc['resolved_at'] or inc['updated_at']}."]
     alerts = conn.execute("SELECT alertname, max(summary) summary, count(*) n FROM alert_event WHERE incident_id=? GROUP BY alertname", (inc["id"],)).fetchall()
     if alerts:
         lines += ["", "## [CB] Cảnh báo", *[f"- {a['alertname']} ({a['n']} lần): {a['summary'] or ''}" for a in alerts]]
-    check = "đã kiểm chứng: lệnh khắc phục chạy xong thì cảnh báo hết" if verified else "chưa kiểm chứng"
-    lines += ["", "## [NN] Nguyên nhân", f"{cause} (độ tin {inc['confidence'] or 0:.2f}, {check})" if cause else "Chưa xác định."]
+    status = lv["label"] + (f" ({'; '.join(lv['notes'])})" if lv["notes"] else "")
+    lines += ["", "## [NN] Nguyên nhân", f"{cause} (độ tin {inc['confidence'] or 0:.2f}; mức xử lý: {status})" if cause else f"Chưa xác định (mức xử lý: {status})."]
     if inc["summary"]:
         lines += ["", inc["summary"]]
-    if steps:
-        lines += ["", "## Các bước đã chạy"]
-        for n, st in enumerate(steps, 1):
-            code = f"B{n}"
-            evidence[code] = {"trust": "verified_tool" if st["trusted"] else "external_untrusted", "fix": st["fix"]}
-            head = f"- [{code}] {_label(st)}" + (" (lệnh khắc phục" + (f": {st['why']}" if st["why"] else "") + ")" if st["action"] else "")
-            body = (f"kết quả{' (đã lược chữ tự do)' if st.get('viewed') else ''}: {_excerpt(st['result'])}" if st["trusted"] and st["result"] else
-                    "kết quả là chữ tự do (log, mô tả), không đưa vào bản ghi" if not st["trusted"] else "")
-            lines.append(f"{head} → {'chạy được' if st['status'] == 'ok' else 'lỗi'}" + (f"; {FIX_TEXT[st['fix']]}" if st["fix"] else "")
-                         + (f". {body}" if body else ""))
-    done = conn.execute("SELECT text FROM incident_task WHERE incident_id=? AND done_at IS NOT NULL", (inc["id"],)).fetchall()
+    if c["whys"]:
+        lines += ["", "## 5 Whys" + (" (người vận hành đã xác nhận)" if lv["confirmed"] else "")]
+        for n, w in enumerate(c["whys"], 1):
+            refs = cited(w)
+            if w.get("by_user"):
+                trust = "internal_doc"  # người xác nhận tự viết: người đứng ra bảo đảm
+            elif w.get("weakness"):
+                trust = "verified_tool" if lv["level"] == 3 else "external_untrusted"
+            else:
+                trust = lowest(refs)
+            evidence[f"W{n}"] = {"trust": trust}
+            basis = "người vận hành viết" if w.get("by_user") else (f"căn cứ: {', '.join(refs)}" if refs else "giả thuyết, chưa có căn cứ")
+            lines.append(f"- [W{n}] {w['question']} → {w['answer']} ({basis})" + (" — điểm yếu sửa được của hệ thống" if w.get("weakness") else ""))
+        if c["stop"] == "no_evidence":
+            lines.append("Chuỗi dừng vì hết căn cứ" + (f"; câu còn mở: {c['next_question']}" if c["next_question"] else "") + ".")
+    if c["factors"]:
+        lines += ["", "## Yếu tố góp phần"]
+        for n, f in enumerate(c["factors"], 1):
+            refs = cited(f)
+            evidence[f"F{n}"] = {"trust": lowest([r for r in refs])}
+            lines.append(f"- [F{n}] {rootcause.FACTOR_LABEL[f['type']]}: {f['text']}" + (f" (căn cứ: {', '.join(refs)})" if refs else " (giả thuyết)"))
+    if step_lines:
+        lines += ["", "## Các bước đã chạy", *step_lines]
+    done = conn.execute("SELECT text, source, done_at FROM incident_task WHERE incident_id=? AND removed_at IS NULL AND (done_at IS NOT NULL OR source='prevent')",
+                        (inc["id"],)).fetchall()
     if done:
-        lines += ["", "## [NV] Việc người vận hành đã làm", *[f"- {t['text']}" for t in done]]
+        lines += ["", "## [NV] Việc người vận hành đã làm hoặc đã giao",
+                  *[f"- {t['text']}" + (" (việc phòng ngừa" + (", đã xong)" if t["done_at"] else ", chưa xong)") if t["source"] == "prevent" else "") for t in done]]
     return "\n".join(lines), evidence
 
 
@@ -311,7 +362,7 @@ def evidence_trust(kind: str, cited: list[str], evidence: dict) -> str:
         e = evidence.get(c.strip().strip("[]").upper())
         if e is None:
             continue
-        levels.append("external_untrusted" if e.get("fix") == "unchecked" and kind in ("lesson", "insight") else e["trust"])
+        levels.append("external_untrusted" if e.get("fix") in ("unchecked", "recurred") and kind in ("lesson", "insight") else e["trust"])
     return min(levels, key=knowledge.TRUST_ORDER.index) if levels else "external_untrusted"
 
 
@@ -334,6 +385,20 @@ def queue_incidents(conn, tenant_id: str, limit: int = 5) -> int:
                      "done_at=CASE WHEN ? THEN ? ELSE done_at END WHERE id=?",
                      (json.dumps(evidence), empty, empty, json.dumps({"skipped": "không có nguyên nhân hay bước nào để học", "kus": 0}, ensure_ascii=False),
                       empty, db.iso(), doc["id"]))
+    return len(rs) + _refresh_confirmed(conn, tenant_id, limit)
+
+
+def _refresh_confirmed(conn, tenant_id: str, limit: int) -> int:
+    """Người xác nhận chuỗi 5 Whys sau khi nguồn đã đọc: đọc lại đúng nguồn đó với bảng căn cứ mới, không tạo nguồn mới, vì hai nguồn
+    của cùng một sự cố sẽ bị tính là hai xác nhận độc lập ở cổng duyệt."""
+    rs = conn.execute(
+        "SELECT i.*, d.id doc_id FROM incident i JOIN source_doc d ON d.tenant_id=i.tenant_id AND d.kind='incident' "
+        "AND d.ref=i.id || '@' || coalesce(i.cause_at, '') WHERE i.tenant_id=? AND i.rc_confirmed_at IS NOT NULL "
+        "AND d.status IN ('done','error') AND coalesce(d.done_at, '') < i.rc_confirmed_at LIMIT ?", (tenant_id, limit)).fetchall()
+    for inc in rs:
+        content, evidence = incident_record(conn, inc)
+        conn.execute("UPDATE source_doc SET content=?, evidence=?, status='pending', result=NULL, done_at=NULL WHERE id=?",
+                     (knowledge.scrub(content), json.dumps(evidence), inc["doc_id"]))
     return len(rs)
 
 

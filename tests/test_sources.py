@@ -2,7 +2,7 @@
 import json
 import time
 
-from kagent import db, knowledge, learning, lint, results, sources
+from kagent import db, incidents, knowledge, learning, lint, results, sources
 
 DOC = """Giới thiệu chung về hệ thống.
 
@@ -108,9 +108,10 @@ def _episode(conn, tenant, inc, trace):
 
 
 def _action(conn, tenant, inc, command, verified):
-    conn.execute("INSERT INTO incident_action(id,tenant_id,incident_id,origin,requested_by,tool,args,status,proposed_at,ran_at,result_line,verified) "
-                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                 (db.new_id(), tenant, inc["id"], "chat", "alice", "k8s.kubectl_admin", json.dumps({"command": command}), "ok", db.iso(), db.iso(), "done", verified))
+    conn.execute("INSERT INTO incident_action(id,tenant_id,incident_id,origin,requested_by,tool,args,status,proposed_at,ran_at,result_line,verified,kind) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (db.new_id(), tenant, inc["id"], "chat", "alice", "k8s.kubectl_admin", json.dumps({"command": command}), "ok", db.iso(), db.iso(), "done", verified,
+                  incidents.rootcause.action_kind("k8s.kubectl_admin", {"command": command})))
 
 
 READ_OK = {"type": "tool_call", "tool": "k8s.kubectl_read", "args": {"command": "get pods -n web"}, "status": "ok", "untrusted": False,
@@ -177,13 +178,49 @@ def test_unresolved_incident_still_yields_trusted_facts(users):
     assert trust == {"web chạy trong namespace web": "verified_tool", "log web-1 báo lỗi": "external_untrusted", "web lỗi do cấu hình": "external_untrusted"}
 
 
-def test_verified_fix_makes_cause_trusted(users):
+def _whys(conn, inc, links, stop="no_evidence"):
+    conn.execute("UPDATE incident SET whys=? WHERE id=?", (json.dumps({"whys": links, "stop": stop, "next_question": "", "factors": [
+        {"type": "detect", "text": "không có alert cho số pod sẵn sàng", "refs": [], "steps": []}]}), inc["id"]))
+
+
+GET_PODS = {"tool": "k8s.kubectl_read", "args": {"command": "get pods -n web"}}
+
+
+def test_cause_trust_follows_5_whys_level(users):
+    tenant = users["admin"].tenant
+    link = {"question": "Tại sao pod lỗi?", "answer": "image tag không tồn tại", "refs": ["S1"], "steps": [GET_PODS], "weakness": False}
+    weak = {"question": "Tại sao tag sai lọt vào?", "answer": "pipeline không kiểm tra tag tồn tại", "refs": [], "steps": [], "weakness": True}
+    with db.session() as conn:
+        rec = lambda inc: sources.incident_record(conn, conn.execute("SELECT * FROM incident WHERE id=?", (inc["id"],)).fetchone())
+        inc = _incident(conn, tenant)
+        _action(conn, tenant, inc, "rollout undo deploy/web", 1)
+        assert rec(inc)[1]["NN"]["trust"] == "external_untrusted"  # lệnh sửa đạt nhưng chưa có mắt xích có căn cứ
+        _episode(conn, tenant, inc, [READ_OK])
+        _whys(conn, inc, [link, weak], "weakness")
+        text, ev = rec(inc)
+        assert ev["NN"]["trust"] == "verified_tool" and ev["W1"]["trust"] == "verified_tool"  # mức 2
+        assert ev["W2"]["trust"] == "external_untrusted" and ev["F1"]["trust"] == "external_untrusted"  # điểm yếu cần mức 3
+        assert "[W1] Tại sao pod lỗi? → image tag không tồn tại (căn cứ: B1)" in text and "điểm yếu sửa được" in text
+        # Người xác nhận và giao việc phòng ngừa: mức 3, mắt xích điểm yếu tin được.
+        incidents.rootcause.confirm(conn, tenant, inc["id"], "alice", None, "Thêm bước CI kiểm tra tag image")
+        text, ev = rec(inc)
+        assert ev["W2"]["trust"] == "verified_tool" and "việc phòng ngừa, chưa xong" in text
+        # Cùng nguyên nhân lặp lại ở sự cố sau: lệnh sửa "đạt" mất giá trị, mức về 1.
+        later = _incident(conn, tenant)
+        conn.execute("UPDATE incident SET rc_recurred_by=? WHERE id=?", (later["id"], inc["id"]))
+        text, ev = rec(inc)
+        assert ev["NN"]["trust"] == "external_untrusted" and ev["B2"]["fix"] == "recurred" and "lặp lại" in text
+
+
+def test_mitigation_does_not_raise_level(users):
     tenant = users["admin"].tenant
     with db.session() as conn:
         inc = _incident(conn, tenant)
-        _action(conn, tenant, inc, "rollout undo deploy/web", 1)
-        _, ev = sources.incident_record(conn, conn.execute("SELECT * FROM incident WHERE id=?", (inc["id"],)).fetchone())
-    assert ev["NN"]["trust"] == "verified_tool" and ev["B1"]["fix"] == "verified"
+        _episode(conn, tenant, inc, [READ_OK])
+        _whys(conn, inc, [{"question": "q", "answer": "a", "refs": ["S1"], "steps": [GET_PODS], "weakness": False}])
+        _action(conn, tenant, inc, "rollout restart deploy/web", 1)
+        row = conn.execute("SELECT * FROM incident WHERE id=?", (inc["id"],)).fetchone()
+        assert incidents.rootcause.level(conn, row)["level"] == 1
 
 
 def test_incident_with_nothing_to_learn_is_marked_done(users):

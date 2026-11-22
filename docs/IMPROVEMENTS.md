@@ -381,3 +381,27 @@ mới được học, nên 41/56 sự cố bị bỏ qua, mất cả những fac
   `-o yaml/jsonpath`/`custom-columns` tùy ý, và kết quả lớn đã hết hạn. Tổng căn cứ tin cậy trên 58 sự cố: 696 → 785.
 - **Còn mở:** "triệt để" mới chỉ là kiểm tra đạt sau `verify_minutes`, chưa xét cảnh báo có quay lại trong N giờ không. Kết quả kiểm tra
   chưa cộng vào bộ đếm hữu ích/có hại của KU đã dùng. 15 nguồn sự cố cũ không có bảng căn cứ nên giữ mức tin cũ của cả nguồn.
+
+## Đợt 41 — 2026-11-23: nguyên nhân gốc theo 5 Whys
+
+"Kiểm tra đạt" (cảnh báo hết sau `verify_minutes`) không có nghĩa là đã xử lý: 2/4 sự cố kiểm tra đạt (`patch prometheus`, `uncordon`)
+lặp lại 8 và 6 lần. Theo quy trình postmortem của tổ chức: hỏi "tại sao" tới khi gặp một điểm yếu sửa được của hệ thống, không dừng ở
+"do người làm sai" hay tác nhân kích hoạt; `mitigated` là dịch vụ đã phục hồi nhưng nguyên nhân gốc có thể chưa sửa; S3 cùng nguyên nhân
+lặp lại 2 lần trong 30 ngày là dấu hiệu chưa xử lý.
+- **Báo cáo điều tra có chuỗi 5 Whys:** mỗi mắt xích trích `S<n>` (20 bước đầu của lượt điều tra, đánh mã) hoặc `CB`; không trích được
+  thì là giả thuyết. Điểm dừng: `weakness` (điểm yếu sửa được) hoặc `no_evidence`, khi đó câu tại sao tiếp theo thành việc cần người
+  (`incident_task.source='why'`). Thêm yếu tố góp phần: làm nặng hơn, phát hiện chậm, phục hồi lâu. Agent thường chỉ có căn cứ cho 1–2 mắt
+  xích kỹ thuật; ép đủ 5 tầng thì model bịa chuỗi nghe hợp lý, nên mắt xích không có căn cứ không bao giờ được tin.
+- **Lệnh sửa có `kind`:** `mitigate` (restart, xóa pod, scale, cordon/uncordon/drain, reboot/start/stop máy ảo; luật cứng thắng nhãn của
+  model) hoặc `fix`. Kiểm tra sau khi chạy nay ghi cho cả lệnh người chạy trong hội thoại.
+- **Mức (tính lúc đọc, `incidents/rootcause.py`):** 1 đã dập triệu chứng; 2 rõ nguyên nhân kỹ thuật (mắt xích có căn cứ và lệnh `fix` kiểm
+  tra đạt, hoặc người xác nhận); 3 rõ nguyên nhân gốc (người xác nhận, chuỗi dừng ở điểm yếu, có việc phòng ngừa). Mức 3 bắt buộc có người
+  vì nguyên nhân gốc là kết luận về quy trình, ngoài tầm quan sát của agent, giống trưởng nhóm duyệt postmortem.
+- **Xác nhận:** thẻ Nguyên nhân có form sửa chuỗi, đánh dấu điểm yếu, nhập việc phòng ngừa (`source='prevent'`). Lượt điều tra mới thay
+  chuỗi thì xác nhận cũ hết hiệu lực.
+- **Lặp lại cùng nguyên nhân:** sau lượt điều tra có chuỗi, model nhanh so với sự cố cùng nhóm trong 30 ngày; cùng cảnh báo khác nguyên nhân
+  không tính. Trùng thì ca cũ có `rc_recurred_by`, mức về 1, lesson/insight rút từ ca cũ cộng một lần có hại. Chế độ không model không so.
+- **Học tri thức:** bản ghi sự cố thêm `[Wn]` (mắt xích kỹ thuật: mức thấp nhất của các bước trích; điểm yếu: chỉ tin ở mức 3; người viết:
+  `internal_doc`) và `[Fn]`; `[NN]` tin từ mức 2; lệnh sửa của ca đã lặp lại không còn là căn cứ "đạt". Xác nhận sau khi nguồn đã đọc thì
+  đọc lại đúng nguồn đó, không tạo nguồn mới, để cổng duyệt không tính hai lần một sự cố.
+- **Chưa làm:** soạn sẵn Phần A và 5 Whys cho issue của repo incidents. 58 sự cố cũ không có chuỗi nên ở mức 1 cho tới khi điều tra lại.

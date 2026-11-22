@@ -19,7 +19,7 @@ from .ingest import _env_of, _fingerprint, fetch, poll, source_status
 from .investigate import (INVESTIGATE_TASK, _investigate_run, _recover_orphans, _write_tools, ensure_conversation, investigate, queued,
                           reinvestigate, start_investigation)
 from .summary import ACTION_STATUS, MAX_SUMMARIES_PER_DAY, _summary_input, due_summaries, last_activity, start_summary, summarize, summary_view
-from . import tasks
+from . import rootcause, tasks
 from .views import SHOWN_EVENTS, context_block, actions_by_episode, get, list_incidents, timeline, view
 
 

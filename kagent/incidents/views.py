@@ -5,7 +5,7 @@ import json
 import re
 
 from .. import db
-from . import actions, tasks
+from . import actions, rootcause, tasks
 from .common import BOT, STAGE_LABEL, IncidentError, _cmd, first_sentence, _worse, _is_write, _label, _method_label, _running, _shown_stage, describe, who
 from .config import settings
 from .grouping import merged_from, related
@@ -52,7 +52,8 @@ def list_incidents(conn, tenant_id: str, status: str = "open", limit: int = 100)
 # Chỉ việc đã xảy ra với sự cố: lệnh đã thực sự chạy (ran, failed), không có đề xuất hay trạng thái chờ (no_action, quota, error, stopped...).
 # Sự kiện ẩn vẫn ghi: mốc cho bản tóm tắt, và "Đang chờ" đọc no_action/quota/error/stopped.
 SHOWN_EVENTS = ("investigated", "verified", "resolved", "reopened", "closed", "task_added", "task_done", "task_reopened", "ran", "failed",
-                "change_checked", "change_check_failed", "reverted", "revert_failed")  # kiểm tra sau khi chạy và hoàn tác (undo.py)
+                "change_checked", "change_check_failed", "reverted", "revert_failed",  # kiểm tra sau khi chạy và hoàn tác (undo.py)
+                "rc_confirmed", "rc_unconfirmed", "rc_recurred", "rc_same_cause")  # 5 Whys (rootcause.py)
 
 
 INVESTIGATED = re.compile(r"^(?P<steps>\d+) lệnh đọc → (?P<cause>.*) \(độ tin (?P<conf>[\d.]+)\)$", re.S)  # câu do investigate.py ghi
@@ -141,7 +142,8 @@ def _attach_check(conn, e: dict, acts: dict[str, dict], ran: dict[str, dict]) ->
 EVENT_CAT = {"alert": "alert", "alert_resolved": "alert", "resolved": "alert", "reopened": "alert",
              "ran": "action", "failed": "action", "verified": "action", "closed": "action",
              "change_checked": "action", "change_check_failed": "action", "reverted": "action", "revert_failed": "action",
-             "task_added": "action", "task_done": "action", "task_reopened": "action"}
+             "task_added": "action", "task_done": "action", "task_reopened": "action",
+             "rc_confirmed": "agent", "rc_unconfirmed": "agent", "rc_recurred": "agent", "rc_same_cause": "agent"}
 
 
 def actions_by_episode(conn, incident_id: str, episodes: list[dict]) -> dict[str, list[dict]]:
@@ -223,6 +225,14 @@ def get(conn, tenant_id: str, incident_id: str) -> dict:
                        for t in tasks.current(conn, incident_id) if t["done_at"]]
     d["cause"] = {"text": d["cause"] or d["root_cause"], "at": d["cause_at"], "round": d["investigations"], "confidence": d["confidence"],
                   "evidence": d["evidence"], "steps": len(d["steps"]), "parts": cause_parts(d["cause"] or d["root_cause"])} if d["episode_id"] else None
+    c = rootcause.chain(r)
+    d["rootcause"] = {**rootcause.level(conn, r), "whys": [{k: w.get(k) for k in ("question", "answer", "refs", "weakness", "by_user")}
+                                                          | {"grounded": bool(w.get("steps")) or "CB" in (w.get("refs") or [])} for w in c["whys"]],
+                      "stop": c["stop"], "next_question": c["next_question"],
+                      "factors": [{"type": f["type"], "label": rootcause.FACTOR_LABEL[f["type"]], "text": f["text"], "grounded": bool(f.get("steps"))}
+                                  for f in c["factors"]],
+                      "confirmed_by": _username(conn, d["rc_confirmed_by"]), "confirmed_at": d["rc_confirmed_at"],
+                      "prevent": [t["text"] for t in tasks.current(conn, incident_id) if t["source"] == "prevent"]}
     return d
 
 
@@ -331,6 +341,12 @@ def context_block(conn, tenant_id: str, incident_id: str) -> str:
     cause = r["cause"] or r["root_cause"]
     if cause:
         lines.append(f"Nguyên nhân (lượt điều tra {r['investigations']}): {cause[:800]}")
+    c = rootcause.chain(r)
+    if c["whys"]:
+        lv = rootcause.level(conn, r)
+        lines.append(f"5 Whys ({lv['label']}" + (f"; {', '.join(lv['notes'])}" if lv["notes"] else "") + "):\n" + "\n".join(
+            f"- {w['question']} → {w['answer'][:300]}" + (" [điểm yếu sửa được]" if w.get("weakness") else "")
+            + ("" if w.get("steps") or "CB" in (w.get("refs") or []) or w.get("by_user") else " [giả thuyết]") for w in c["whys"]))
     if r["summary"]:
         lines.append(f"Tóm tắt: {r['summary']}")
     todo = []
