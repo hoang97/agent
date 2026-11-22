@@ -389,17 +389,28 @@ def queue_incidents(conn, tenant_id: str, limit: int = 5) -> int:
 
 
 def _refresh_confirmed(conn, tenant_id: str, limit: int) -> int:
-    """Người xác nhận chuỗi 5 Whys sau khi nguồn đã đọc: đọc lại đúng nguồn đó với bảng căn cứ mới, không tạo nguồn mới, vì hai nguồn
-    của cùng một sự cố sẽ bị tính là hai xác nhận độc lập ở cổng duyệt."""
+    """Đọc lại đúng nguồn cũ của sự cố, không tạo nguồn mới (hai nguồn của cùng một sự cố sẽ bị tính là hai xác nhận độc lập ở cổng duyệt):
+    người xác nhận chuỗi 5 Whys sau khi nguồn đã đọc, hoặc nguồn đọc trước khi có bảng căn cứ (mức tin của cả nguồn)."""
     rs = conn.execute(
         "SELECT i.*, d.id doc_id FROM incident i JOIN source_doc d ON d.tenant_id=i.tenant_id AND d.kind='incident' "
-        "AND d.ref=i.id || '@' || coalesce(i.cause_at, '') WHERE i.tenant_id=? AND i.rc_confirmed_at IS NOT NULL "
-        "AND d.status IN ('done','error') AND coalesce(d.done_at, '') < i.rc_confirmed_at LIMIT ?", (tenant_id, limit)).fetchall()
+        "AND d.ref=i.id || '@' || coalesce(i.cause_at, '') WHERE i.tenant_id=? AND d.status IN ('done','error') "
+        "AND ((i.rc_confirmed_at IS NOT NULL AND coalesce(d.done_at, '') < i.rc_confirmed_at) OR d.evidence IS NULL) LIMIT ?",
+        (tenant_id, limit)).fetchall()
     for inc in rs:
         content, evidence = incident_record(conn, inc)
+        _drop_candidates(conn, tenant_id, inc["doc_id"])
         conn.execute("UPDATE source_doc SET content=?, evidence=?, status='pending', result=NULL, done_at=NULL WHERE id=?",
                      (knowledge.scrub(content), json.dumps(evidence), inc["doc_id"]))
     return len(rs)
+
+
+def _drop_candidates(conn, tenant_id: str, doc_id: str) -> None:
+    """Trước khi đọc lại: ứng viên chỉ đến từ nguồn này mang mức tin cũ; để nguyên thì Curator thấy trùng ý và bỏ qua KU mới, mức tin
+    không bao giờ đổi. KU đang dùng hoặc có nguồn khác thì giữ."""
+    for r in conn.execute("SELECT id, source_eps FROM knowledge_unit WHERE tenant_id=? AND status='candidate' AND source_eps LIKE ?",
+                          (tenant_id, f'%"doc:{doc_id}#%')).fetchall():
+        if all(e.startswith(f"doc:{doc_id}#") for e in json.loads(r["source_eps"])):
+            knowledge.update(conn, tenant_id, r["id"], {"status": "rejected"}, "EXPIRE", "sources", "đọc lại nguồn sự cố với cách chấm mức tin mới")
 
 
 def tick(conn, tenant_id: str) -> None:

@@ -1758,6 +1758,11 @@ def incident_task_add(incident_id: str, body: IncidentTask, t: Tenant = Depends(
         return _incident_call(lambda: incidents.tasks.add(conn, t.tenant_id, incident_id, body.text, t.user_id))
 
 
+@app.get("/api/incidents/{incident_id}/export")
+def incident_export(incident_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    return _incident_call(lambda: incidents.export.draft(conn, t.tenant_id, incident_id))
+
+
 class RootCauseLink(BaseModel):
     question: str = Field(default="", max_length=300)
     answer: str = Field(max_length=600)

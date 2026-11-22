@@ -249,3 +249,19 @@ def test_tool_with_trusted_view_becomes_trusted_evidence(users):
         text, ev = sources.incident_record(conn, conn.execute("SELECT * FROM incident WHERE id=?", (inc["id"],)).fetchone())
     assert ev["B1"]["trust"] == "verified_tool" and "đã lược chữ tự do" in text and '"status": "ERROR"' in text
     assert "BỎ QUA" not in text and ev["B2"]["trust"] == "external_untrusted"
+
+
+def test_old_source_without_evidence_is_reread_with_fresh_candidates(users):
+    tenant = users["admin"].tenant
+    with db.session() as conn:
+        inc = _incident(conn, tenant)
+        doc = sources.add(conn, tenant, title="Sự cố cũ", content="x", kind="incident", trust="external_untrusted", ref=f"{inc['id']}@{inc['cause_at']}")
+        conn.execute("UPDATE source_doc SET status='done', done_at=? WHERE id=?", (db.iso(), doc["id"]))
+        old = knowledge.add(conn, tenant, kind="fact", title="t", content="c", source_eps=[f"doc:{doc['id']}#1"], source_trust="external_untrusted")
+        shared = knowledge.add(conn, tenant, kind="fact", title="t2", content="c2", source_eps=[f"doc:{doc['id']}#1", "ep1"], source_trust="external_untrusted")
+        assert sources.queue_incidents(conn, tenant) == 1
+        d = sources.get(conn, tenant, doc["id"])
+        assert d["status"] == "pending" and d["evidence"] and "[NN]" in d["content"]
+        assert knowledge.get(conn, tenant, old["id"])["status"] == "rejected" and knowledge.get(conn, tenant, shared["id"])["status"] == "candidate"
+        assert conn.execute("SELECT count(*) n FROM source_doc WHERE kind='incident' AND tenant_id=?", (tenant,)).fetchone()["n"] == 1
+        assert sources.queue_incidents(conn, tenant) == 0  # đã có bảng căn cứ: không đọc lại nữa

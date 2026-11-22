@@ -387,14 +387,41 @@ function rootCauseBody(rc, id, act, openIncident) {
     form);
 }
 
+async function copyText(text, area) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    area.select(); document.execCommand("copy");  // trang mở qua http theo IP: không có clipboard API
+  }
+  toast("Đã chép");
+}
+
+// Bản nháp issue và postmortem cho repo incident của tổ chức (incidents/export.py); TODO là phần người phải điền.
+function exportCard(x) {
+  const box = (label, text, rows) => {
+    const area = h("textarea", { readonly: true, rows: String(rows), "aria-label": label }, text);
+    return h("div", { class: "ix-exp" }, h("div", { class: "ix-sec" }, h("h3", {}, label),
+      h("button", { type: "button", class: "ghost small-btn", onclick: guard(() => copyText(text, area)) }, "Chép")), area);
+  };
+  const i = x.issue;
+  return h("section", { class: "card ix-export", "aria-label": "Bản nháp cho repo incidents" },
+    h("p", { class: "small" }, `Severity gợi ý: ${i.severity} (${i.severity_reason}). Thay <SERVICE> và service::<x>, điền các chỗ TODO trước khi tạo issue hoặc merge postmortem; kagent không đoán ảnh hưởng khách hàng.`),
+    box("Tiêu đề và nhãn", `${i.title}\n${i.labels.join(" ")}`, 2),
+    box("Mô tả issue (Phần A)", i.body, 10),
+    box("Comment nhật ký xử lý (mỗi dòng một comment)", i.comments.join("\n"), Math.min(10, Math.max(3, i.comments.length))),
+    box("Postmortem: các mục kagent có dữ liệu", x.postmortem, 16));
+}
+
 async function incidentDetail(main, id) {
   const token = ++incidentTimer;
   const box = h("div", { class: "ix" });
   addKids(main, box);
   let filter = "all";
   let menuOpen = false;
+  let exportOpen = false;
   async function load() {
-    const [d, open] = await Promise.all([api("GET", `/api/incidents/${id}`), api("GET", "/api/incidents?status=open")]);
+    const [d, open, draft] = await Promise.all([api("GET", `/api/incidents/${id}`), api("GET", "/api/incidents?status=open"),
+      exportOpen ? api("GET", `/api/incidents/${id}/export`) : null]);
     const act = (fn, msg) => guard(async () => { await fn(); if (msg) toast(msg); await load(); });
     const busyNow = d.investigating || d.stage === "investigating";
     const tone = STATE_TONE[d.state.key] || "";
@@ -437,7 +464,10 @@ async function incidentDetail(main, id) {
           d.conversation_id && h("button", { type: "button", class: "small-btn", onclick: () => go("chat", d.conversation_id) }, busyNow ? "Xem agent đang điều tra" : "Mở hội thoại điều tra"),
           d.status === "open" && h("button", { type: "button", class: "ghost small-btn", disabled: busyNow || d.stage === "verifying",
             onclick: act(() => api("POST", `/api/incidents/${id}/investigate`), "Đã bắt đầu điều tra lại") }, busyNow ? "Đang điều tra…" : "Điều tra lại"),
+          h("button", { type: "button", class: "ghost small-btn", "aria-expanded": String(exportOpen), onclick: act(() => { exportOpen = !exportOpen; }) },
+            exportOpen ? "Ẩn bản nháp cho repo incidents" : "Soạn cho repo incidents"),
           d.status !== "closed" && h("div", { class: "ix-menu" }, more, pop))));
+    const exported = draft && exportCard(draft);
 
     // Đang chờ: việc cần người, mỗi việc kèm nút làm luôn.
     const waitItem = (w) => {
@@ -559,7 +589,7 @@ async function incidentDetail(main, id) {
       !rel.open.length && !rel.history_count && h("p", { class: "small muted" }, `Không có sự cố cùng nhóm trong ${rel.days} ngày.`));
     const recap = d.summary && summaryCard(d.summary, id);
     setKids(box);
-    appendKids(box, [head, wait, h("div", { class: "ix-grid" }, h("div", { class: "ix-col" }, recap, events), h("aside", { class: "ix-col", "aria-label": "Thông tin sự cố" }, times, alerts, cause, related))]);
+    appendKids(box, [head, exported, wait, h("div", { class: "ix-grid" }, h("div", { class: "ix-col" }, recap, events), h("aside", { class: "ix-col", "aria-label": "Thông tin sự cố" }, times, alerts, cause, related))]);
     if (!menuOpen && d.status === "open" && (busyNow || ["new", "awaiting_approval", "verifying"].includes(d.stage))) refreshLater(8000, token, load);
   }
   await load();

@@ -404,4 +404,11 @@ lặp lại 2 lần trong 30 ngày là dấu hiệu chưa xử lý.
 - **Học tri thức:** bản ghi sự cố thêm `[Wn]` (mắt xích kỹ thuật: mức thấp nhất của các bước trích; điểm yếu: chỉ tin ở mức 3; người viết:
   `internal_doc`) và `[Fn]`; `[NN]` tin từ mức 2; lệnh sửa của ca đã lặp lại không còn là căn cứ "đạt". Xác nhận sau khi nguồn đã đọc thì
   đọc lại đúng nguồn đó, không tạo nguồn mới, để cổng duyệt không tính hai lần một sự cố.
-- **Chưa làm:** soạn sẵn Phần A và 5 Whys cho issue của repo incidents. 58 sự cố cũ không có chuỗi nên ở mức 1 cho tới khi điều tra lại.
+- **Soạn cho repo incidents (`incidents/export.py`):** nút trên trang sự cố mở bản nháp để chép: tiêu đề `[<SERVICE>] <triệu chứng> tại <vị trí>`,
+  Phần A, comment nhật ký `<hành động> → <kết quả>` (bot của repo dựng nhật ký postmortem từ comment), và các mục postmortem có dữ liệu
+  (3 mốc giờ UTC+7, 4 nhật ký, 5 Whys và yếu tố góp phần, 6 monitoring, 8 xử lý ngắn hạn, 9 action item, 11 sự cố cùng nguyên nhân).
+  Không tự tạo issue. Ảnh hưởng khách hàng, SLA, `service::`, người phụ trách, tác nhân kích hoạt để TODO: lint của repo chặn merge khi
+  còn TODO, nên người viết phải điền thay vì nhận số đoán. Severity gợi ý S4 cho dev/staging, môi trường khác để người đánh giá.
+- **Đọc lại nguồn cũ:** nguồn sự cố đọc trước khi có bảng căn cứ được đọc lại một lần, cùng nguồn. Trước khi đọc lại (cả khi người xác nhận
+  muộn), ứng viên chỉ đến từ nguồn đó chuyển `rejected`: để nguyên thì Curator thấy trùng ý và bỏ KU mới, mức tin không bao giờ đổi.
+- **Chưa làm:** 58 sự cố cũ không có chuỗi nên ở mức 1 cho tới khi điều tra lại.

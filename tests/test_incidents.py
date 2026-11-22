@@ -1111,3 +1111,24 @@ def test_restart_is_mitigation_even_if_report_calls_it_fix(flow, users, infra):
     with db.session() as conn:
         incidents.investigate(conn, tenant(users), iid)
         assert conn.execute("SELECT kind FROM incident_action WHERE incident_id=?", (iid,)).fetchone()["kind"] == "mitigate"
+
+
+def test_export_drafts_issue_and_postmortem_without_guessing(flow, users, infra):
+    iid = _web_incident(users)
+    llm.set_provider(FiveWhys([TECH], next_question="Tại sao retry không giới hạn?", actions=[RESTART]))
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+    flow.post(f"/api/incidents/{iid}/rootcause/confirm", json={"whys": [{"question": TECH["question"], "answer": TECH["answer"]},
+                                                                      {"question": WEAK["question"], "answer": WEAK["answer"], "weakness": True}],
+                                                             "prevent": "Thêm backoff cho client web"})
+    d = flow.get(f"/api/incidents/{iid}/export").json()
+    issue, pm = d["issue"], d["postmortem"]
+    assert issue["title"].startswith("[<SERVICE>] ") and " tại " in issue["title"]
+    assert "## Phần A: Thông tin incident" in issue["body"] and "| Ảnh hưởng khách hàng | Chưa xác định |" in issue["body"]
+    assert "@TODO" in issue["body"] and '~"issuetype::Incident"' in issue["body"]
+    assert any("rollout restart" in c and "→" in c for c in issue["comments"]), issue["comments"]
+    assert "1. Tại sao CPU cao? pod web vòng lặp retry" in pm and "2. Tại sao retry không giới hạn? client không có backoff — điểm yếu sửa được" in pm
+    assert "| Thêm backoff cho client web | phòng ngừa | @TODO | YYYY-MM-DD | TODO |" in pm
+    assert "| không có alert cho pod chưa sẵn sàng | phát hiện |" in pm and "| Lỗ hổng monitoring | không có alert cho pod chưa sẵn sàng |" in pm
+    assert "Biện pháp tạm thời còn giữ:** TODO: còn giữ" in pm  # restart là giảm nhẹ
+    assert "**Tác nhân kích hoạt:** TODO" in pm and "Số khách hàng" not in pm  # không đoán ảnh hưởng khách hàng

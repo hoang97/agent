@@ -435,6 +435,8 @@ input.narrow { width: 70px; }
 .ix-whys .pill { margin-left: 2px; }
 .ix-rc-form { display: grid; gap: 6px; }
 .ix-rc-row { display: grid; gap: 4px; }
+.ix-export { display: grid; gap: 10px; }
+.ix-exp textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; font-size: 12.5px; }
 .ix-rc-form textarea, .ix-rc-form input:not([type=checkbox]) { width: 100%; box-sizing: border-box; }
 .ix .incident-summary { margin: 0; }
 .ix details > summary { cursor: pointer; color: var(--accent); font-size: 13px; }
