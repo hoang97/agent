@@ -151,7 +151,7 @@ CREATE TABLE IF NOT EXISTS ku_consolidation (
 CREATE TABLE IF NOT EXISTS source_doc (
   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL,
   trust TEXT NOT NULL, ref TEXT, created_by TEXT, user_id TEXT, activate INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'pending', result TEXT, created_at TEXT NOT NULL, done_at TEXT
+  status TEXT NOT NULL DEFAULT 'pending', result TEXT, created_at TEXT NOT NULL, done_at TEXT, evidence TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_source_doc ON source_doc(tenant_id, status, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_source_doc_ref ON source_doc(tenant_id, kind, ref) WHERE ref IS NOT NULL;
@@ -368,6 +368,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE session ADD COLUMN created_at TEXT")  # mốc để giới hạn tuổi tối đa của phiên trượt
     if "llm" not in {r["name"] for r in conn.execute("PRAGMA table_info(llm_call)")}:
         conn.execute("ALTER TABLE llm_call ADD COLUMN llm TEXT")  # tên cấu hình LLM đã dùng
+    if "evidence" not in {r["name"] for r in conn.execute("PRAGMA table_info(source_doc)")}:
+        conn.execute("ALTER TABLE source_doc ADD COLUMN evidence TEXT")  # bản ghi sự cố: mã căn cứ → mức tin, để chấm tin cậy từng KU (sources.py)
     if "cache_known" not in {r["name"] for r in conn.execute("PRAGMA table_info(llm_call)")}:
         # 0: dịch vụ không báo token cache (vd. vLLM tắt prompt_tokens_details). Dữ liệu cũ: chỉ Claude và lời gọi có số cache là chắc có báo.
         conn.execute("ALTER TABLE llm_call ADD COLUMN cache_known INTEGER NOT NULL DEFAULT 1")

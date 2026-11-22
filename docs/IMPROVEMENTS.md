@@ -354,3 +354,21 @@ Xét đề xuất "Code Mode" (Cloudflare, Anthropic: model viết script gọi 
 - **Chỗ hở thật:** chỉ khoảng 1,4 lệnh mỗi bước model (lệnh cùng giây coi là một bước), mỗi bước 15–20 giây; các truy vấn độc lập bị tách nhiều bước.
   `AGENT_SYSTEM` và `SUBAGENT_SYSTEM` nay yêu cầu liệt kê dữ liệu cần cho các giả thuyết rồi gọi hết lệnh không phụ thuộc nhau trong cùng một lượt,
   chỉ tách bước khi tham số phụ thuộc kết quả trước. Đo lại cùng chỉ số sau triển khai; mục tiêu 2,5–3 lệnh mỗi bước.
+
+## Đợt 40 — 2026-11-23: học từ sự cố theo căn cứ của từng KU
+
+Trước đợt này, 15 sự cố đã thành nguồn tri thức nhưng cho 0 KU đang dùng: 34 ứng viên, 12 bị loại. Có hai nguyên nhân. Một là cả sự cố
+bị coi là `external_untrusted` khi một bước bất kỳ đọc log, OpenStack hay `data.query`. Hai là chỉ sự cố có nguyên nhân đạt độ tin ≥ 0,5
+mới được học, nên 41/56 sự cố bị bỏ qua, mất cả những fact và cách điều tra đúng của chúng.
+- **Bản ghi sự cố có mã căn cứ:** `[CB]` cảnh báo, `[NN]` nguyên nhân, `[NV]` việc người vận hành đã làm, `[Bn]` từng bước đã chạy (bước đọc
+  từ vết điều tra và hội thoại, tối đa 24, rồi lệnh khắc phục kèm kết quả kiểm tra). Bước có cấu trúc kèm 300 ký tự kết quả. Bước chữ tự do
+  không đưa nguyên văn vào, để model rút KU không đọc phải nội dung người ngoài viết. Bảng mã → mức tin lưu ở `source_doc.evidence`.
+- **Mức tin theo từng KU (`evidence_trust`):** lấy mức thấp nhất trong các mã KU trích; mã không có trong bảng thì không tính, nên model
+  không bịa mã để nâng mức tin được. Bước có cấu trúc: `verified_tool`; bước chữ tự do: `external_untrusted`; `[CB]`, `[NV]`: `internal_doc`;
+  `[NN]`: `verified_tool` khi có lệnh khắc phục kiểm tra đạt, ngược lại `external_untrusted`. Lesson/insight dựa vào lệnh khắc phục chưa
+  kiểm tra thì `external_untrusted`; lệnh kiểm tra không đạt là căn cứ cho bài học phủ định. Cổng duyệt giữ nguyên: tự nâng khi có 2 nguồn độc lập.
+- **Bỏ ngưỡng 0,5 khi chọn sự cố.** Ngưỡng chuyển thành điều kiện kiểm chứng của `[NN]`. Sự cố không có nguyên nhân và không có bước nào
+  vẫn được ghi một nguồn `done` (skipped), để không bị xét lại mãi và chặn hàng đợi.
+- **Thêm `trusted_when`:** OpenStack api_read với tài nguyên hạ tầng của nhà vận hành; `data.query` mang mức tin của kết quả gốc trong `tool_result`.
+- **Còn mở:** "triệt để" mới chỉ là kiểm tra đạt sau `verify_minutes`, chưa xét cảnh báo có quay lại trong N giờ không. Kết quả kiểm tra
+  chưa cộng vào bộ đếm hữu ích/có hại của KU đã dùng. 15 nguồn sự cố cũ không có bảng căn cứ nên giữ mức tin cũ của cả nguồn.

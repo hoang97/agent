@@ -261,6 +261,19 @@ def _path(args: dict) -> str:
     return path
 
 
+# Tài nguyên hạ tầng do nhà vận hành đặt tên; tài nguyên của khách hàng (servers, ports, volumes, stacks...) có name/description/metadata do
+# khách hàng viết nên vẫn là chữ tự do. Danh sách máy ảo theo hypervisor hay usage theo tenant kèm tên máy ảo: loại riêng.
+OPERATOR_PATHS = re.compile(r"^/(v2\.0/)?(os-hypervisors|os-services|os-availability-zone|availability_zones|os-aggregates|limits|os-quota-sets|"
+                            r"quotas|agents|lbaas/amphorae|v2/lbaas/amphorae)(/|$)")
+
+
+def trusted_output(args: dict) -> bool:
+    """Lệnh đọc chỉ trả dữ liệu hạ tầng có cấu trúc do nhà vận hành quản lý (trusted_when của api_read)."""
+    path = str(args.get("path") or "").split("?", 1)[0].rstrip("/") or "/"
+    return (str(args.get("method") or "GET").upper() in ("GET", "HEAD") and bool(OPERATOR_PATHS.match(path))
+            and "server" not in json.dumps([args.get("path"), args.get("query")]).lower())  # /os-hypervisors/{id}/servers, ?with_servers=true
+
+
 def _actions(body) -> set[str]:
     return set(body) if isinstance(body, dict) else set()
 

@@ -8,6 +8,7 @@ tools:
       Lọc kết quả lớn đã lưu (result_id) mà không gọi lại hệ thống. Tham số giống _filter: path, where [{field, op, value}]
       (op: eq ne contains icontains regex gt gte lt lte exists in), fields, group_by, sort ("-field" để giảm dần), limit, max_chars.
     handler: data:query
+    trusted_when: data:trusted_output
     action_class: read
     data_sensitivity: internal
     untrusted_output: true

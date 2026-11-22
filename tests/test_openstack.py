@@ -133,3 +133,14 @@ def test_rejects_bad_paths(infra, path):
 def test_private_endpoint_blocked(infra):
     with pytest.raises(Exception, match="nội bộ|private|10.0.0.5"):
         openstack.api_read(p(interface="internal"), {"service": "nova", "path": "/servers/detail"})
+
+
+def test_only_operator_resources_count_as_structured_output():
+    spec = tools.TEMPLATES["openstack"].tools["api_read"]
+    trusted = lambda **a: not spec.untrusted({"service": "compute", **a})
+    assert trusted(path="/os-hypervisors/detail") and trusted(path="/os-services") and trusted(path="/v2.0/agents", service="network")
+    assert trusted(path="/v2/lbaas/amphorae", service="load-balancer")
+    # Tài nguyên của khách hàng có name/description/metadata do khách hàng viết.
+    assert not trusted(path="/servers/detail") and not trusted(path="/v2.0/ports", service="network") and not trusted(path="/v2/images")
+    assert not trusted(path="/os-hypervisors/h1/servers") and not trusted(path="/os-hypervisors/detail", query={"with_servers": True})
+    assert not trusted(path="/servers/s1/action", method="POST", body={"os-getConsoleOutput": {}})

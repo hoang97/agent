@@ -19,7 +19,6 @@ KINDS = ("doc", "incident")
 MAX_CHARS = 200_000
 MAX_CHUNK = 6000
 MAX_CHUNKS = 40  # mỗi đoạn một lần gọi model mạnh; tài liệu dài hơn thì tách file
-MIN_INCIDENT_CONFIDENCE = 0.5
 INCIDENT_QUIET_MINUTES = 30  # để bản tóm tắt sự cố kịp viết lại sau khi yên
 INGEST_PER_TICK = 3
 DOC_ITEMS, INCIDENT_ITEMS = 6, 3  # số KU tối đa mỗi đoạn
@@ -116,6 +115,7 @@ def ingest(conn, tenant_id: str, doc_id: str, provider=None) -> dict:
     ops: dict[str, int] = {}
     errors, titles = [], []
     known = entities.top(conn, tenant_id)
+    evidence = json.loads(doc["evidence"]) if doc.get("evidence") else None  # nguồn sự cố cũ chưa có bảng căn cứ: dùng mức tin của cả nguồn
     # Bản ghi sự cố là một ca liền mạch: đọc riêng từng mục (cảnh báo, nguyên nhân, lệnh) thì các KU lặp ý nhau.
     parts = [{"section": doc["title"], "text": doc["content"][:MAX_CHUNK * 2]}] if doc["kind"] == "incident" else chunks(doc["title"], doc["content"])
     max_items = INCIDENT_ITEMS if doc["kind"] == "incident" else DOC_ITEMS
@@ -131,7 +131,8 @@ def ingest(conn, tenant_id: str, doc_id: str, provider=None) -> dict:
                     continue
                 for item in items:
                     origin = {"id": f"doc:{doc_id}#{n}", "user_id": doc["user_id"], "scope": "tenant", "task_type": item["domain"]}
-                    op = learning.curate_item(conn, tenant_id, provider, {**item, "scope": "tenant"}, origin, doc["trust"])
+                    trust = evidence_trust(item["kind"], item.get("evidence") or [], evidence) if evidence is not None else doc["trust"]
+                    op = learning.curate_item(conn, tenant_id, provider, {**item, "scope": "tenant"}, origin, trust)
                     ops[op] = ops.get(op, 0) + 1
                     titles.append(item["title"])
         finally:
@@ -188,39 +189,125 @@ def _untrusted(conn, inc) -> bool:
     return False
 
 
-def incident_text(conn, inc) -> str:
+MAX_STEPS = 24
+STEP_CHARS = 300
+
+
+def _excerpt(result) -> str:
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except ValueError:
+            pass
+    if isinstance(result, dict):
+        result = result.get("stdout") or result.get("error") or result.get("summary") or result
+    text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+    text = " | ".join(line.strip() for line in text.splitlines() if line.strip())
+    return text[:STEP_CHARS] + ("…" if len(text) > STEP_CHARS else "")
+
+
+def _steps(conn, inc) -> list[dict]:
+    """Các bước đã chạy của sự cố: bước đọc từ vết điều tra và hội thoại, rồi lệnh khắc phục (kèm kết quả kiểm tra)."""
+    from .conversation import _untrusted_tool
+    from .incidents.actions import strip_dry_run
+    actions = [dict(r) for r in conn.execute("SELECT * FROM incident_action WHERE incident_id=? AND status IN ('ok','error') AND superseded_by IS NULL "
+                                             "ORDER BY coalesce(ran_at, proposed_at)", (inc["id"],))]
+    key = lambda tool, args: (tool, json.dumps(strip_dry_run(args if isinstance(args, dict) else {}), sort_keys=True, ensure_ascii=False))
+    seen = {key(a["tool"], json.loads(a["args"] or "{}")) for a in actions}
+    reads = []
+    rs = conn.execute("SELECT trace FROM episode WHERE tenant_id=? AND (id=? OR (conversation_id IS NOT NULL AND conversation_id=?)) ORDER BY started_at",
+                      (inc["tenant_id"], inc["episode_id"], inc["conversation_id"])).fetchall()
+    for r in rs:
+        for st in json.loads(r["trace"] or "[]", parse_constant=lambda _: None):
+            if not (isinstance(st, dict) and st.get("type") == "tool_call" and st.get("status") in ("ok", "error")):
+                continue
+            k = key(st.get("tool"), st.get("args"))
+            if k in seen:
+                continue
+            seen.add(k)
+            reads.append({"tool": st["tool"], "args": st.get("args") or {}, "status": st["status"], "trusted": not st.get("untrusted"),
+                          "result": st.get("result"), "fix": None, "action": False})
+    out = reads[:MAX_STEPS]
+    for a in actions:
+        args = json.loads(a["args"] or "{}")
+        fix = None if a["status"] != "ok" else {1: "verified", 0: "failed"}.get(a["verified"], "unchecked")
+        out.append({"tool": a["tool"], "args": args, "status": a["status"], "trusted": not _untrusted_tool(conn, inc["tenant_id"], a["tool"], args),
+                    "result": a["result_line"] or a["result"], "fix": fix, "why": a["why"], "action": True})
+    return out
+
+
+FIX_TEXT = {"verified": "kiểm tra sau khi chạy: đạt", "failed": "kiểm tra sau khi chạy: không đạt", "unchecked": "chưa kiểm tra sau khi chạy"}
+
+
+def incident_record(conn, inc) -> tuple[str, dict]:
+    """Bản ghi sự cố cho bước rút KU và bảng căn cứ: mã → mức tin. Kết quả chữ tự do (log, describe) không đưa vào bản ghi,
+    để model rút KU không đọc phải nội dung người ngoài viết; KU trích bước đó vẫn bị coi là chưa tin cậy."""
     cause = inc["cause"] or inc["root_cause"]
+    steps = _steps(conn, inc)
+    verified = any(st["fix"] == "verified" for st in steps)
+    evidence = {"CB": {"trust": "internal_doc"}, "NV": {"trust": "internal_doc"},
+                "NN": {"trust": "verified_tool" if verified else "external_untrusted"}}
     lines = [f"Môi trường: {inc['env']}. Mức độ: {inc['severity'] or 'không rõ'}. Từ {inc['created_at']} tới {inc['resolved_at'] or inc['updated_at']}."]
     alerts = conn.execute("SELECT alertname, max(summary) summary, count(*) n FROM alert_event WHERE incident_id=? GROUP BY alertname", (inc["id"],)).fetchall()
     if alerts:
-        lines += ["", "## Cảnh báo", *[f"- {a['alertname']} ({a['n']} lần): {a['summary'] or ''}" for a in alerts]]
-    lines += ["", "## Nguyên nhân", f"{cause} (độ tin {inc['confidence'] or 0:.2f})"]
+        lines += ["", "## [CB] Cảnh báo", *[f"- {a['alertname']} ({a['n']} lần): {a['summary'] or ''}" for a in alerts]]
+    check = "đã kiểm chứng: lệnh khắc phục chạy xong thì cảnh báo hết" if verified else "chưa kiểm chứng"
+    lines += ["", "## [NN] Nguyên nhân", f"{cause} (độ tin {inc['confidence'] or 0:.2f}, {check})" if cause else "Chưa xác định."]
     if inc["summary"]:
-        lines += ["", "## Tóm tắt", inc["summary"]]
-    ran = conn.execute("SELECT tool, args, why, result_line, verified FROM incident_action WHERE incident_id=? AND status='ok' ORDER BY ran_at", (inc["id"],)).fetchall()
-    if ran:
-        lines += ["", "## Lệnh khắc phục đã chạy"]
-        for a in ran:
-            check = {1: "kiểm tra sau khi chạy: đạt", 0: "kiểm tra sau khi chạy: không đạt"}.get(a["verified"], "")
-            lines.append(f"- {a['tool']} {a['args'] or ''}{' — ' + a['why'] if a['why'] else ''}. Kết quả: {a['result_line'] or 'ok'}. {check}".strip())
+        lines += ["", inc["summary"]]
+    if steps:
+        lines += ["", "## Các bước đã chạy"]
+        for n, st in enumerate(steps, 1):
+            code = f"B{n}"
+            evidence[code] = {"trust": "verified_tool" if st["trusted"] else "external_untrusted", "fix": st["fix"]}
+            head = f"- [{code}] {_label(st)}" + (" (lệnh khắc phục" + (f": {st['why']}" if st["why"] else "") + ")" if st["action"] else "")
+            body = (f"kết quả: {_excerpt(st['result'])}" if st["trusted"] and st["result"] else
+                    "kết quả là chữ tự do (log, mô tả), không đưa vào bản ghi" if not st["trusted"] else "")
+            lines.append(f"{head} → {'chạy được' if st['status'] == 'ok' else 'lỗi'}" + (f"; {FIX_TEXT[st['fix']]}" if st["fix"] else "")
+                         + (f". {body}" if body else ""))
     done = conn.execute("SELECT text FROM incident_task WHERE incident_id=? AND done_at IS NOT NULL", (inc["id"],)).fetchall()
     if done:
-        lines += ["", "## Việc người vận hành đã làm", *[f"- {t['text']}" for t in done]]
-    return "\n".join(lines)
+        lines += ["", "## [NV] Việc người vận hành đã làm", *[f"- {t['text']}" for t in done]]
+    return "\n".join(lines), evidence
+
+
+def _label(st: dict) -> str:
+    from .incidents.common import _label as label
+    text = label({"tool": st["tool"], "args": st["args"]})
+    return text[:250] + ("…" if len(text) > 250 else "")
+
+
+def evidence_trust(kind: str, cited: list[str], evidence: dict) -> str:
+    """Mức tin của một KU theo các mã nó trích, lấy mức thấp nhất. Mã không có trong bảng không tính: model không tự nâng được mức tin
+    bằng cách bịa mã. Lesson/insight dựa vào lệnh khắc phục chưa kiểm tra thì tác dụng của lệnh chưa có căn cứ."""
+    levels = []
+    for c in cited:
+        e = evidence.get(c.strip().strip("[]").upper())
+        if e is None:
+            continue
+        levels.append("external_untrusted" if e.get("fix") == "unchecked" and kind in ("lesson", "insight") else e["trust"])
+    return min(levels, key=knowledge.TRUST_ORDER.index) if levels else "external_untrusted"
 
 
 def queue_incidents(conn, tenant_id: str, limit: int = 5) -> int:
-    """Sự cố đã hết, có nguyên nhân đủ tin và đã yên một lúc thì thành một nguồn; mở lại rồi có nguyên nhân mới thì thành nguồn mới."""
+    """Sự cố đã hết và đã yên một lúc thì thành một nguồn, kể cả khi chưa rõ nguyên nhân: fact, cách điều tra và lệnh sửa không đạt
+    vẫn là tri thức đúng; mức tin chấm theo từng KU (evidence_trust). Mở lại rồi có nguyên nhân mới thì thành nguồn mới.
+    Sự cố không có gì để học vẫn ghi một nguồn đã xong, để không bị xét lại mãi và chặn hàng đợi."""
     rs = conn.execute(
-        "SELECT * FROM incident i WHERE tenant_id=? AND status IN ('resolved','closed') AND coalesce(cause, root_cause, '')!='' "
-        "AND coalesce(confidence, 0) >= ? AND updated_at < ? "
+        "SELECT * FROM incident i WHERE tenant_id=? AND status IN ('resolved','closed') AND updated_at < ? "
         "AND NOT EXISTS (SELECT 1 FROM incident_event v WHERE v.incident_id=i.id AND v.kind='merged') "
         "AND NOT EXISTS (SELECT 1 FROM source_doc d WHERE d.tenant_id=i.tenant_id AND d.kind='incident' AND d.ref=i.id || '@' || coalesce(i.cause_at, '')) "
         "ORDER BY updated_at LIMIT ?",
-        (tenant_id, MIN_INCIDENT_CONFIDENCE, db.later(minutes=-INCIDENT_QUIET_MINUTES), limit)).fetchall()
+        (tenant_id, db.later(minutes=-INCIDENT_QUIET_MINUTES), limit)).fetchall()
     for inc in rs:
-        add(conn, tenant_id, title=f"Sự cố: {inc['title']}", content=incident_text(conn, inc), kind="incident",
-            trust="external_untrusted" if _untrusted(conn, inc) else "verified_tool", ref=f"{inc['id']}@{inc['cause_at'] or ''}", created_by="incident")
+        content, evidence = incident_record(conn, inc)
+        doc = add(conn, tenant_id, title=f"Sự cố: {inc['title']}", content=content, kind="incident",
+                  trust="external_untrusted" if _untrusted(conn, inc) else "verified_tool", ref=f"{inc['id']}@{inc['cause_at'] or ''}", created_by="incident")
+        empty = not (inc["cause"] or inc["root_cause"]) and not any(c.startswith("B") for c in evidence)
+        conn.execute("UPDATE source_doc SET evidence=?, status=CASE WHEN ? THEN 'done' ELSE status END, result=CASE WHEN ? THEN ? ELSE result END, "
+                     "done_at=CASE WHEN ? THEN ? ELSE done_at END WHERE id=?",
+                     (json.dumps(evidence), empty, empty, json.dumps({"skipped": "không có nguyên nhân hay bước nào để học", "kus": 0}, ensure_ascii=False),
+                      empty, db.iso(), doc["id"]))
     return len(rs)
 
 

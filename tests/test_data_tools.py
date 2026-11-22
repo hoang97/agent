@@ -4,7 +4,7 @@ import json
 import pytest
 
 from conftest import tool_steps
-from kagent import datafilter, db, gateway, results
+from kagent import datafilter, db, gateway, results, tools
 
 LOGS = {"total": 5, "hits": [
     {"timestamp": "t1", "source": json.dumps({"level": "ERROR", "request_id": "a1", "msg": "409 Conflict"})},
@@ -245,3 +245,13 @@ def test_count_logs_retries_keyword_when_text_field_gives_no_buckets(infra):
     p = {"_allow_private": False, "url": "https://es.test:9200", "api_key": fakes.ES_KEY}
     out = elasticsearch.count_logs(p, {"query": "*", "group_by": "module"})
     assert out["group_by"] == "module.keyword" and out["buckets"]
+
+
+def test_query_inherits_trust_of_stored_result(users):
+    tenant = users["admin"].tenant
+    with db.session() as conn:
+        clean = results.save(conn, tenant, "u", None, "k8s.kubectl_read", {"items": [1]}, False)
+        dirty = results.save(conn, tenant, "u", None, "kibana.search_logs", LOGS, True)
+    spec = tools.TEMPLATES["data"].tools["query"]
+    assert not spec.untrusted({"result_id": clean, "fields": ["x"]})
+    assert spec.untrusted({"result_id": dirty}) and spec.untrusted({"result_id": "r_000000000000"}) and spec.untrusted({})

@@ -134,17 +134,21 @@ kind: fact (sự thật về hệ thống), procedure (các bước làm), lesso
 insight (chiến lược điều tra), rule (quy ước nhóm phải theo, chỉ khi tài liệu nói rõ là quy định).
 Với bản ghi sự cố: ưu tiên một lesson "triệu chứng → nguyên nhân → cách khắc phục", rồi procedure kiểm tra hoặc khắc phục nếu có lệnh đã chạy thành công;
 nguyên nhân còn ghi "nghi ngờ"/"chưa khẳng định" thì giữ nguyên mức chắc chắn đó, không viết thành sự thật.
+Sự cố chưa sửa xong vẫn có thể cho fact (hệ thống trông thế nào), procedure (cách điều tra đã cho ra dữ liệu dùng được)
+và lesson phủ định (lệnh sửa đã chạy nhưng kiểm tra không đạt).
+evidence: mã trong ngoặc vuông ([B1], [CB], [NN], [NV]) của đúng những phần làm căn cứ cho mục đó; mục nói về nguyên nhân
+hoặc tác dụng của lệnh sửa phải trích [NN] hoặc bước lệnh sửa. Tài liệu không có mã thì để rỗng.
 domain là loại nhiệm vụ sẽ dùng tri thức này. entities: tối đa 5 tên cụ thể, viết thường; cùng một thứ thì dùng lại đúng tên trong known_entities.
 Không ghi lại điều đã có trong known_titles."""
 EXTRACT_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["items"],
     "properties": {"items": {"type": "array", "items": {
         "type": "object", "additionalProperties": False,
-        "required": ["kind", "title", "content", "applies_when", "entities", "domain"],
+        "required": ["kind", "title", "content", "applies_when", "entities", "domain", "evidence"],
         "properties": {
             "kind": {"type": "string", "enum": ["rule", "fact", "procedure", "lesson", "insight"]},
             "title": {"type": "string"}, "content": {"type": "string"}, "applies_when": {"type": "string"},
-            "entities": {"type": "array", "items": {"type": "string"}},
+            "entities": {"type": "array", "items": {"type": "string"}}, "evidence": {"type": "array", "items": {"type": "string"}},
             "domain": {"type": "string", "enum": ["k8s_ops", "observability", "docs", "research", "general"]},
         }}}},
 }
@@ -154,7 +158,7 @@ def check_extract(data: dict) -> list[dict]:
     spec = EXTRACT_SCHEMA["properties"]["items"]["items"]
     out = []
     for item in data.get("items") if isinstance(data.get("items"), list) else []:
-        if not isinstance(item, dict) or set(spec["required"]) - {"domain"} - set(item):
+        if not isinstance(item, dict) or set(spec["required"]) - {"domain", "evidence"} - set(item):
             continue
         if item["kind"] not in spec["properties"]["kind"]["enum"] or not isinstance(item["entities"], list):
             continue
@@ -162,8 +166,10 @@ def check_extract(data: dict) -> list[dict]:
             continue
         if item.get("domain") not in spec["properties"]["domain"]["enum"]:
             item["domain"] = "general"
-        out.append({k: item[k] for k in spec["required"]} | {"entities": [e for e in item["entities"] if isinstance(e, str)][:5],
-                                                             "applies_when": str(item.get("applies_when") or "")})
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), list) else []
+        out.append({k: item[k] for k in spec["required"] if k != "evidence"} | {"entities": [e for e in item["entities"] if isinstance(e, str)][:5],
+                                                             "applies_when": str(item.get("applies_when") or ""),
+                                                             "evidence": [e for e in evidence if isinstance(e, str)][:10]})
     return out[:8]
 
 
@@ -686,7 +692,7 @@ class HeuristicProvider:
         if not source.get("section") or not text:
             return []
         return [{"kind": "fact", "title": source["section"][:80], "content": text[:400], "applies_when": f"khi làm việc với {source['section'][:60]}",
-                 "entities": [], "domain": "general"}]
+                 "entities": [], "domain": "general", "evidence": []}]
 
     def curate(self, new: dict, near: list[dict]) -> dict:
         near = [n for n in near if n.get("via") != "entity"]  # chỉ chung thực thể: không đoán được trùng hay mâu thuẫn bằng từ vựng

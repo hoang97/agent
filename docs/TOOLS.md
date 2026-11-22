@@ -229,7 +229,7 @@ Công cụ chia theo việc lệnh gọi làm gì. Role của tài khoản trong
 | api_write R3 | POST, PUT, PATCH: tạo hoặc sửa tài nguyên, action máy ảo (os-start, os-stop, reboot, resize, migrate...) |
 | api_admin R4 | Mọi lệnh, gồm: DELETE; action phá dữ liệu (rebuild, forceDelete, evacuate, reset state, revert volume, khôi phục backup đè volume); mọi thay đổi Keystone; đọc bí mật (payload Barbican, credential EC2, mật khẩu máy ảo) |
 
-OpenStack không có chế độ chạy thử phía server, nên api_write và api_admin không có bước kiểm tra trước. Kết quả đều bị coi là chưa tin cậy, vì tên và mô tả tài nguyên do người dùng tự ghi.
+OpenStack không có chế độ chạy thử phía server, nên api_write và api_admin không có bước kiểm tra trước. Kết quả bị coi là chưa tin cậy, vì tên, mô tả và metadata của tài nguyên do khách hàng tự ghi. Ngoại lệ là api_read đọc tài nguyên hạ tầng do nhà vận hành quản lý (`trusted_when`): `os-hypervisors`, `os-services`, availability zone, `os-aggregates`, `limits`, quota, neutron `agents`, amphora của Octavia. Ngoại lệ này không áp dụng khi đường dẫn hay query chạm tới danh sách máy ảo (`/os-hypervisors/{id}/servers`, `with_servers`).
 
 ## Tự xử lý cảnh báo (tab Sự cố)
 

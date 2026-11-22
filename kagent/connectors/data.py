@@ -78,6 +78,17 @@ def _load(p, result_id: str):
             raise ConnectorError(str(exc)) from exc
 
 
+def trusted_output(args: dict) -> bool:
+    """data.query mang đúng mức tin của kết quả gốc. Tra theo id mà không cần tenant được: id ngẫu nhiên, và handler vẫn chỉ cho
+    người tạo đọc; tra sai hay không thấy thì vẫn coi là chưa tin cậy."""
+    result_id = args.get("result_id")
+    if not isinstance(result_id, str):
+        return False
+    with db.session() as conn:
+        r = conn.execute("SELECT untrusted FROM tool_result WHERE id=?", (result_id,)).fetchone()
+    return r is not None and not r["untrusted"]
+
+
 def ping(p, args=None):
     return {"ok": True}
 

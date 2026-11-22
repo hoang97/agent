@@ -29,6 +29,7 @@ tools:
       /os-hypervisors/detail; network: /v2.0/ports?device_id=...; image: /v2/images; block-storage: /volumes/detail; orchestration: /stacks;
       load-balancer: /v2/lbaas/loadbalancers. Không đọc được payload của secret, credential EC2, mật khẩu máy ảo
     handler: openstack:api_read
+    trusted_when: openstack:trusted_output
     action_class: read
     blast_radius: object
     data_sensitivity: personal
