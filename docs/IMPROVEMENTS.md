@@ -375,5 +375,9 @@ mới được học, nên 41/56 sự cố bị bỏ qua, mất cả những fac
   theo danh sách cấm, vì khách hàng viết được nhiều trường hơn name/description (metadata, tags, user_data, hostname, khoá của addresses,
   fault.message). Kết quả lớn đọc bản đầy đủ trong `tool_result`; hết hạn 7 ngày thì bước đó vẫn chưa tin cậy. Thay cho `trusted_when` theo
   đường dẫn hạ tầng làm thử trước đó.
+- **kubectl có `trusted_view`:** `describe` lọc theo dòng với danh sách khoá cho phép, bảng (Events, Conditions) tách cột theo dòng gạch và bỏ
+  cột Message; `get events` dạng bảng, `-o json`, hoặc `custom-columns` chỉ gồm trường cấu trúc. Lệnh đã qua grep mất dòng tiêu đề thì
+  không lọc. Trên dữ liệu thật: 39/214 bước kubectl chưa tin cậy thành căn cứ; phần còn lại chủ yếu là `logs` (48), lệnh lỗi,
+  `-o yaml/jsonpath`/`custom-columns` tùy ý, và kết quả lớn đã hết hạn. Tổng căn cứ tin cậy trên 58 sự cố: 696 → 785.
 - **Còn mở:** "triệt để" mới chỉ là kiểm tra đạt sau `verify_minutes`, chưa xét cảnh báo có quay lại trong N giờ không. Kết quả kiểm tra
   chưa cộng vào bộ đếm hữu ích/có hại của KU đã dùng. 15 nguồn sự cố cũ không có bảng căn cứ nên giữ mức tin cũ của cả nguồn.

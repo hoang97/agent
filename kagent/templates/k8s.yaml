@@ -19,6 +19,7 @@ tools:
     description: "Chạy lệnh kubectl chỉ đọc (get, describe, logs, top, events, explain, auth can-i, rollout status/history...) bằng quyền nhóm đọc. Ví dụ command: get pods -n app -o wide. Lọc kết quả được bằng | grep [-i -v -E -F -w -c], | head -n N, | tail -n N, | wc -l (kagent tự lọc, không có shell)"
     handler: kubectl:run_read
     trusted_when: kubectl:trusted_output
+    trusted_view: kubectl:trusted_view
     action_class: read
     blast_radius: cluster
     data_sensitivity: personal
@@ -33,6 +34,7 @@ tools:
     description: "Chạy lệnh kubectl thay đổi tài nguyên (apply, create, patch, replace, label, annotate, scale, set, rollout restart/undo, cordon...) bằng quyền nhóm ghi; không xóa được. Luôn chạy thử --dry-run=server trước"
     handler: kubectl:run_write
     trusted_when: kubectl:trusted_output
+    trusted_view: kubectl:trusted_view
     check: kubectl:check_write
     action_class: write
     reversible: partial
@@ -53,6 +55,7 @@ tools:
     description: "Chạy lệnh kubectl bất kỳ trong phạm vi nhóm quản trị (delete, drain, exec, run, certificate approve và mọi lệnh của nhóm ghi, đọc). Luôn cần duyệt"
     handler: kubectl:run_admin
     trusted_when: kubectl:trusted_output
+    trusted_view: kubectl:trusted_view
     check: kubectl:check_admin
     action_class: destructive
     reversible: "no"

@@ -9,6 +9,7 @@ Kubeconfig tạm trỏ thẳng vào IP đã kiểm tra bởi net (chống DNS re
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import shlex
@@ -452,3 +453,117 @@ def trusted_output(args: dict) -> bool:
     if info["key"] in MUTATIONS or info["sub"] in MUTATIONS:
         return output in (None, "name")
     return False
+
+
+# trusted_view: phần có cấu trúc của describe và get events để học tri thức từ sự cố. Message của event, annotation, label, env, command/args,
+# message của điều kiện là chữ do ứng dụng hay người triển khai viết, nên chỉ giữ theo danh sách cho phép; ô không đúng dạng thì lược.
+DESCRIBE_KEYS = {
+    "name", "namespace", "priority", "priority class name", "service account", "node", "start time", "status", "reason", "ip", "controlled by",
+    "qos class", "container id", "image", "image id", "port", "ports", "host port", "host ports", "state", "last state", "ready", "restart count",
+    "exit code", "signal", "started", "finished", "cpu", "memory", "ephemeral-storage", "pods", "replicas", "strategytype", "minreadyseconds",
+    "desired number of nodes scheduled", "current number of nodes scheduled", "number of nodes misscheduled", "pods status", "type", "roles",
+    "unschedulable", "internalip", "externalip", "hostname", "kernel version", "os image", "operating system", "architecture",
+    "container runtime version", "kubelet version", "kube-proxy version", "podcidr", "providerid", "capacity", "storageclass", "access modes",
+    "volumemode", "volume", "used by", "claimname", "readonly", "optional", "completions", "parallelism", "succeeded", "failed", "active",
+    "schedule", "last schedule time", "min replicas", "max replicas", "current replicas", "desired replicas", "clusterip", "clusterips",
+    "targetport", "endpoints", "session affinity", "loadbalancer ingress", "nodeport", "ip family policy", "ip families", "created",
+}
+DESCRIBE_SECTIONS = {"containers", "init containers", "conditions", "events", "limits", "requests", "capacity", "allocatable", "addresses",
+                     "volumes", "system info", "allocated resources", "replica set status", "pod template", "port", "mounts"}
+DROP_COLUMNS = {"message", "note", "lastheartbeattime", "lasttransitiontime"}
+_CELL = re.compile(r"^[\w.:/@+\-<>,%=]{0,128}$")
+_AGE = re.compile(r"^\d+[smhdy]\w*( \(x\d+ over \d+[smhdy]\w*\))?$")
+_DATE = re.compile(r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{1,2} [A-Z][a-z]{2} \d{4} \d\d:\d\d:\d\d [+-]\d{4}$")
+_KEYLINE = re.compile(r"^(\s*)([A-Za-z][\w .\-/]{0,40}?):(?:\s+(.*))?$")
+LACKS = "…"
+EVENT_PATHS = {".lastTimestamp", ".firstTimestamp", ".eventTime", ".reason", ".type", ".count", ".involvedObject.kind", ".involvedObject.name",
+               ".involvedObject.namespace", ".metadata.namespace", ".source.component", ".source.host", ".reportingController"}
+
+
+def _cell(v: str) -> str:
+    v = v.strip()
+    return v if _CELL.match(v) or _AGE.match(v) or _DATE.match(v) else LACKS
+
+
+def _columns(header: str, dashes: str | None) -> list[tuple[int, int, str]]:
+    marks = [(m.start(), m.end()) for m in re.finditer(r"-+" if dashes else r"\S+(?: \S+)*", dashes or header)]
+    return [(s, marks[i + 1][0] if i + 1 < len(marks) else 10**6, header[s:marks[i + 1][0] if i + 1 < len(marks) else None].strip())
+            for i, (s, _) in enumerate(marks)]
+
+
+def _table(lines: list[str], dashes: bool) -> list[str]:
+    """Bảng căn cột: dòng tiêu đề (kèm dòng gạch nếu có) rồi các dòng dữ liệu; bỏ cột chữ tự do, kiểm từng ô."""
+    cols = _columns(lines[0], lines[1] if dashes else None)
+    keep = [c for c in cols if c[2].lower() not in DROP_COLUMNS]
+    out = ["   ".join(c[2] for c in keep)]
+    for row in lines[2 if dashes else 1:]:
+        out.append("   ".join(_cell(row[s:e]) for s, e, _ in keep))
+    return out
+
+
+def _describe(text: str) -> str:
+    lines, out, i = text.splitlines(), [], 0
+    while i < len(lines):
+        line = lines[i]
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        if nxt.strip() and set(nxt.strip()) <= {"-", " "} and line.strip():  # tiêu đề bảng có dòng gạch: Events, Conditions...
+            indent = line[:len(line) - len(line.lstrip())]
+            j = i + 2
+            while j < len(lines) and lines[j].strip() and len(lines[j]) - len(lines[j].lstrip()) >= len(indent):
+                j += 1
+            out += [indent + r for r in _table([l[len(indent):] for l in lines[i:j]], dashes=True)]
+            i = j
+            continue
+        m = _KEYLINE.match(line.rstrip())
+        if m:
+            indent, key, value = m.group(1), m.group(2).strip(), (m.group(3) or "").strip()
+            low = key.lower()
+            if not value and (low in DESCRIBE_SECTIONS or _CELL.match(key)):
+                out.append(f"{indent}{key}:")
+            elif value and low in DESCRIBE_KEYS:
+                out.append(f"{indent}{key}: {_cell(value)}")
+        i += 1
+    return "\n".join(out)
+
+
+def trusted_view(result):
+    """Phần có cấu trúc của kết quả kubectl_* (trusted_view): describe, get events dạng bảng hoặc JSON. Lệnh khác (logs, exec,
+    -o yaml...) trả None: vẫn là chữ tự do."""
+    if not isinstance(result, dict) or not isinstance(result.get("stdout"), str) or not isinstance(result.get("command"), str):
+        return None
+    try:
+        argv, _ = _split_pipeline(shlex.split(result["command"])[1:])
+    except (ValueError, ConnectorError):
+        return None
+    if not argv:
+        return None
+    text = result["stdout"]
+    if argv[0] == "describe":
+        return {"stdout": _describe(text)}
+    kinds = (_positionals(argv)[:1] or [""])[0].split(",")
+    if argv[0] != "get" or not all(k.split(".")[0].lower() in ("events", "event", "ev") for k in kinds):
+        return None
+    output = _output(argv)
+    if output in (None, "wide"):
+        lines = [l for l in text.splitlines() if l.strip()]
+        if not lines or not re.match(r"^\s*(NAMESPACE|LAST SEEN)\b", lines[0]):
+            return None  # bộ lọc grep đã bỏ dòng tiêu đề: không biết cột nào là message
+        return {"stdout": "\n".join(_table(lines, dashes=False))}
+    if output and output.startswith("custom-columns="):
+        paths = [c.split(":", 1)[1] if ":" in c else "" for c in output.split("=", 1)[1].split(",")]
+        lines = [l for l in text.splitlines() if l.strip()]
+        if not lines or not all(p in EVENT_PATHS for p in paths) or len(lines[0].split()) != len(paths):
+            return None  # cột tùy ý (message...) hoặc grep đã bỏ dòng tiêu đề
+        return {"stdout": "\n".join(_table(lines, dashes=False))}
+    if output == "json":
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return None
+        keep = lambda e: {"type": _cell(str(e.get("type", ""))), "reason": _cell(str(e.get("reason", ""))), "count": e.get("count"),
+                          "object": {k: _cell(str((e.get("involvedObject") or e.get("regarding") or {}).get(k, ""))) for k in ("kind", "name", "namespace")},
+                          "last": _cell(str(e.get("lastTimestamp") or e.get("eventTime") or "")),
+                          "source": _cell(str((e.get("source") or {}).get("component") or e.get("reportingController") or ""))}
+        items = data.get("items") if isinstance(data, dict) and "items" in data else [data]
+        return {"items": [keep(e) for e in items if isinstance(e, dict)][:500]}
+    return None
