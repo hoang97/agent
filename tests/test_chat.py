@@ -564,7 +564,7 @@ def test_anthropic_loop_puts_queued_text_after_tool_results_and_continues_on_it(
     p = llm.AnthropicProvider(NS(messages=fake, beta=NS(messages=fake)))
     queue = ["[thêm] xem log", "[thêm] đừng restart"]
     call_tool = lambda n, a: {"status": "ok", "result": 1}
-    call_tool.drain = lambda: queue.pop(0) if queue else None
+    call_tool.drain = lambda final=False: queue.pop(0) if queue else None
     out = p.run_agent("x", "c", [], call_tool)
     after_tools = calls[1][-1]["content"]
     assert after_tools[0]["type"] == "tool_result" and after_tools[-1]["text"] == "[thêm] xem log"

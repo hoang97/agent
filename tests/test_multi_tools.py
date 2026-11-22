@@ -252,3 +252,61 @@ def test_one_connection_runs_at_most_per_connection_calls(users, monkeypatch):
     [t.join() for t in threads]
     gateway._slots.clear()
     assert peak[0] == 2
+
+
+def _slow_sql(monkeypatch, marker, seconds):
+    real = gateway._run
+
+    def run(conn, tenant_id, tool_name, args, check=False, user_id=None):
+        if marker in str(args.get("sql", "")):
+            time.sleep(seconds)
+        return real(conn, tenant_id, tool_name, args, check, user_id)
+
+    monkeypatch.setattr(gateway, "_run", run)
+
+
+def test_background_job_result_arrives_after_other_work(users, monkeypatch):
+    _slow_sql(monkeypatch, "orders", 0.5)
+    seen = {}
+
+    def main(call_tool):
+        started = time.monotonic()
+        seen["bg"] = call_tool(agent.BACKGROUND_TOOL, {"tool": "db.query", "args": {"sql": "SELECT count(*) FROM orders"}})
+        seen["quick"] = call_tool("db.query", {"sql": "SELECT 1"})
+        seen["quick_s"] = time.monotonic() - started
+        seen["early"] = call_tool.drain()  # lệnh nền chưa xong: chưa có gì
+        seen["final"] = call_tool.drain(final=True)  # định kết thúc lượt: đợi lệnh nền
+        return "xong"
+
+    ep = _run_delegating(users, Delegating(main, None))
+    assert seen["bg"]["status"] == "ok" and seen["bg"]["result"]["job_id"] == "bg1"
+    assert seen["quick"]["status"] == "ok" and seen["quick_s"] < 0.4 and seen["early"] is None
+    assert seen["final"].startswith("[Lệnh nền bg1 (db.query) đã xong]") and "[[6]]" in seen["final"]
+    bg = next(s for s in tool_steps(ep) if s.get("background") == "bg1")
+    assert bg["tool"] == "db.query" and bg["result"]["rows"] == [[6]]
+
+
+def test_background_only_takes_read_tools(users):
+    seen = {}
+
+    def main(call_tool):
+        seen["step"] = call_tool(agent.BACKGROUND_TOOL, {"tool": "k8s.kubectl_write", "args": {"command": "rollout restart deployment/web"}})
+        return "xong"
+
+    _run_delegating(users, Delegating(main, None))
+    assert seen["step"]["status"] == "invalid" and "db.query" in seen["step"]["reasons"][0]
+
+
+def test_unfinished_background_job_is_dropped_at_end_of_turn(users, monkeypatch):
+    _slow_sql(monkeypatch, "customers", 0.5)
+
+    def main(call_tool):
+        call_tool(agent.BACKGROUND_TOOL, {"tool": "db.query", "args": {"sql": "SELECT count(*) FROM customers"}})
+        return "xong"
+
+    ep = _run_delegating(users, Delegating(main, None))
+    assert {"type": "background_dropped", "jobs": {"bg1": "db.query"}} in ep["trace"]
+    time.sleep(0.7)
+    with db.session() as conn:
+        trace = agent.get_episode(conn, users["alice"].tenant, ep["id"])["trace"]
+    assert not any(s.get("background") for s in trace)  # kết quả đến muộn không chen vào episode đã ghi

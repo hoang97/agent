@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import queue
 import re
 import threading
 import time
@@ -64,6 +65,17 @@ DELEGATE_DESCRIPTION = ("Giao một việc tra cứu đơn giản, chỉ đọc,
                         "Dùng khi cần gom dữ liệu từ nhiều nguồn độc lập (pod, metric, log, ticket...): gọi nhiều lần trong cùng một lượt để các agent con chạy song song. "
                         "Agent con không thấy hội thoại, tri thức hay kết quả trước đó, nên task phải tự đủ nghĩa. "
                         "Không giao việc cần lệnh ghi, cần suy luận nhiều bước hay chỉ là một lệnh bạn tự gọi được.")
+
+BACKGROUND_TOOL = "agent.run_background"
+BACKGROUND_SCHEMA = {
+    "type": "object", "required": ["tool", "args"],
+    "properties": {"tool": {"type": "string", "description": "Tên công cụ đọc cần chạy nền"},
+                   "args": {"type": "object", "description": "Tham số như khi gọi thẳng công cụ đó"}},
+}
+BACKGROUND_DESCRIPTION = ("Chạy một lệnh đọc lâu ở nền (kubectl rollout status hoặc wait với timeout_seconds dài, truy vấn chậm, agent.delegate) "
+                          "để làm việc khác trong lúc chờ. Trả ngay job_id. Kết quả tự đến sau lệnh kế tiếp của bạn; "
+                          "nếu bạn kết thúc lượt khi lệnh nền chưa xong, hệ thống đợi nó xong rồi đưa kết quả để bạn làm tiếp. "
+                          "Chỉ dùng khi có việc khác làm song song; lệnh nhanh thì gọi thẳng.")
 
 SKILL_DESCRIPTION = ("Đọc toàn bộ quy trình của một skill trong danh sách <skills>. Gọi khi nhiệm vụ khớp mô tả của skill, "
                      "trước khi bắt tay làm, rồi làm theo các bước trong đó.")
@@ -179,6 +191,9 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
     counter = threading.Lock()  # agent con chạy ở nhiều luồng cùng tăng các bộ đếm trên
     current_sub: contextvars.ContextVar[int | None] = contextvars.ContextVar("current_sub", default=None)
     sub_tools: dict[str, dict] = {}  # công cụ đọc agent con được chọn
+    read_names: set[str] = set()  # tính sẵn: lệnh nền được tạo từ luồng con, không dùng conn của lượt để tra
+    jobs: dict = {"n": 0, "running": {}, "closed": False, "pool": None}
+    finished: queue.Queue = queue.Queue()
 
     allowed: set[str] = set()  # read_only: chỉ công cụ đã cho agent thấy, chặn cả tên model tự bịa ra
 
@@ -212,6 +227,8 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
             return step
         if name == DELEGATE_TOOL:
             return delegate(args)
+        if name == BACKGROUND_TOOL:
+            return background(args)
         if name == SEARCH_TOOL:
             result, found = search_tool(c, tenant_id, args, files, project=project, user_id=user_id)
             ku_used.extend(i for i in found if i not in ku_used)
@@ -279,6 +296,39 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         emit({"type": "tool_end", "step": step})
         return step
 
+    def background(args: dict) -> dict:
+        inner, inner_args = args.get("tool"), args.get("args")
+        if not isinstance(inner, str) or inner == BACKGROUND_TOOL or inner not in read_names or not isinstance(inner_args, dict):
+            step = {"type": "tool_call", "tool": BACKGROUND_TOOL, "args": args, "env": env, "decision": "allowed", "status": "invalid",
+                    "reasons": [f"chỉ chạy nền được công cụ đọc trong danh sách: {', '.join(sorted(read_names - {BACKGROUND_TOOL}))}"]}
+            emit({"type": "tool_end", "step": step})
+            return step
+        with counter:
+            jobs["n"] += 1
+            job_id = f"bg{jobs['n']}"
+            if jobs["pool"] is None:
+                jobs["pool"] = ThreadPoolExecutor(max_workers=max_parallel, thread_name_prefix="bg")
+            emit({"type": "tool_start", "tool": inner, "args": inner_args, "background": job_id})
+            jobs["running"][job_id] = inner
+            jobs["pool"].submit(contextvars.copy_context().run, run_background, job_id, inner, inner_args)
+        step = {"type": "tool_call", "tool": BACKGROUND_TOOL, "args": args, "env": env, "decision": "allowed", "status": "ok",
+                "result": {"job_id": job_id, "note": "đang chạy nền; kết quả sẽ tự đến"}}
+        emit({"type": "tool_end", "step": step})
+        return step
+
+    def run_background(job_id: str, name: str, args: dict) -> None:
+        try:
+            step = run_isolated(name, args)
+        except Exception as exc:  # gồm Cancelled: lượt đã dừng thì kết quả không còn ai đọc
+            step = {"type": "tool_call", "tool": name, "args": args, "env": env, "decision": "allowed", "status": "error", "result": {"error": str(exc) or "đã dừng"}}
+        step["background"] = job_id
+        with counter:
+            if jobs["closed"]:
+                return
+        with db.session() as c:
+            record(c, [step])
+        finished.put((job_id, step))
+
     def sub_batch(sub_id: int, allowed_sub: set[str], calls: list[tuple[str, dict]]) -> list[dict]:
         """Lệnh của agent con: luôn ở luồng riêng với kết nối riêng, vì luồng đang chạy agent con không được dùng conn của lượt."""
         llm.check_cancelled(cancelled)
@@ -325,7 +375,7 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
                 statuses.append(step["status"])
 
     def is_read(name: str) -> bool:
-        if name in (SKILL_TOOL, SEARCH_TOOL, PAGE_TOOL, DELEGATE_TOOL):
+        if name in (SKILL_TOOL, SEARCH_TOOL, PAGE_TOOL, DELEGATE_TOOL, BACKGROUND_TOOL):
             return True
         r = conn.execute("SELECT action_class FROM tool_registry WHERE tenant_id=? AND tool=?", (tenant_id, name)).fetchone()
         return bool(r and r["action_class"] == "read")
@@ -406,16 +456,46 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
 
     call_tool.review_answer = review_answer
 
-    def drain() -> str | None:
+    def drain(final: bool = False) -> str | None:
+        """Kết quả lệnh nền đã xong và tin người dùng gửi thêm. final: model định kết thúc lượt, còn lệnh nền thì đợi lệnh xong đầu tiên."""
         texts = [t for t in (inbox() if inbox else []) if t.strip()]
-        if not texts:
+        ready = []
+        while True:
+            try:
+                ready.append(finished.get_nowait())
+            except queue.Empty:
+                break
+        while final and not ready and not texts and jobs["running"]:
+            llm.check_cancelled(cancelled)
+            try:
+                ready.append(finished.get(timeout=0.2))
+            except queue.Empty:
+                texts = [t for t in (inbox() if inbox else []) if t.strip()]
+        if not ready and not texts:
             return None
         flush_text()
+        parts = []
+        for job_id, step in ready:
+            with counter:
+                jobs["running"].pop(job_id, None)
+            parts.append(f"[Lệnh nền {job_id} ({step['tool']}) đã xong] {llm._tool_payload(step)}")
         for text in texts:
             trace.append({"type": "user_message", "text": text})
             ctx.intent.append(text)  # auto mode xét lệnh sau theo cả lời mới của người dùng
             emit({"type": "user_message", "text": text})
-        return QUEUED_PREFIX + "\n\n".join(texts)
+        if texts:
+            parts.append(QUEUED_PREFIX + "\n\n".join(texts))
+        return "\n\n".join(parts)
+
+    def close_jobs() -> None:
+        """Hết lượt: lệnh nền chưa xong bị bỏ (chỉ là lệnh đọc), ghi lại để biết."""
+        with counter:
+            jobs["closed"] = True
+            left = dict(jobs["running"])
+        if left:
+            trace.append({"type": "background_dropped", "jobs": left})
+        if jobs["pool"] is not None:
+            jobs["pool"].shutdown(wait=False, cancel_futures=True)
 
     call_tool.drain = drain
 
@@ -443,6 +523,9 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         if sub_tools:
             tool_list.append({"tool": DELEGATE_TOOL, "description": DELEGATE_DESCRIPTION, "action_class": "read", "canonical": DELEGATE_TOOL,
                               "input_schema": DELEGATE_SCHEMA})
+            tool_list.append({"tool": BACKGROUND_TOOL, "description": BACKGROUND_DESCRIPTION, "action_class": "read", "canonical": BACKGROUND_TOOL,
+                              "input_schema": BACKGROUND_SCHEMA})
+        read_names.update(t["tool"] for t in tool_list if t.get("action_class") == "read" and t["tool"] != ASK_TOOL)
         allowed.update(t["tool"] for t in tool_list)
         turn = build_turn(conn, tenant_id, task, task_type, history, project=project, user_id=user_id, entities=entities,
                           tool_names=[t["tool"] for t in tool_list], incident_id=incident_id, continuation=bool(continuation_of), files=files)
@@ -470,6 +553,8 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         trace.append({"type": "error", "message": str(exc)})
         output = f"Lỗi khi gọi model: {exc}"
         outcome, outcome_src = "failure", "metric"
+    finally:
+        close_jobs()
 
     input_doc = {"task": task, "entities": entities, "project": project, **({"continuation_of": continuation_of} if continuation_of else {})}
     conn.execute(

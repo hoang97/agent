@@ -122,7 +122,8 @@ function renderMarkdown(text) {
 const SUMMARY_KEYS = ["command", "query", "expr", "sql", "url", "path", "matchers", "index", "name"];
 const STATUS_ICON = { ok: "✓", error: "✕", blocked: "⊘", invalid: "✕", denied: "✕", pending: "…", asked: "?", running: "" };
 
-function shortTool(tool) { return tool === "agent.delegate" ? "agent con" : String(tool || "").split(".").pop(); }
+const TOOL_LABEL = { "agent.delegate": "agent con", "agent.run_background": "chạy nền" };
+function shortTool(tool) { return TOOL_LABEL[tool] || String(tool || "").split(".").pop(); }
 
 // Một dòng tóm tắt tham số: lệnh, query, URL... thay cho JSON.
 function argSummary(args) {
@@ -174,6 +175,7 @@ function toolRow(step) {
     h("span", { class: "tool-name" }, step.sub ? `#${step.sub} ` : "", shortTool(step.tool), step.sub_id ? ` #${step.sub_id}` : ""),
     summaryEl(argSummary(step.args)),
     h("span", { class: "tool-meta" }, status === "running" ? h("span", { class: "elapsed" }, "0s") : fmtMs(step.ms)),
+    step.background && h("span", { class: "badge", title: "Chạy nền: agent làm việc khác trong lúc chờ" }, `nền #${step.background}`),
     step.untrusted && h("span", { class: "badge warn", title: "Kết quả chứa nội dung người ngoài ghi được (log, trang web...)" }, "nội dung ngoài"),
     status !== "running" && icon("chevron"));
   const detail = h("div", { class: "tool-detail", hidden: "" });
@@ -779,7 +781,7 @@ function chatView(main) {
       } else if (ev.type === "tool_start") {
         if (frame) { cancelAnimationFrame(frame); paint(); }
         cur = null;
-        const row = toolRow({ tool: ev.tool, args: ev.args, status: "running", sub: ev.sub });
+        const row = toolRow({ tool: ev.tool, args: ev.args, status: "running", sub: ev.sub, background: ev.background });
         running.push({ tool: ev.tool, args: ev.args, row, at: Date.now() });
         addKids(flow, row);
         tickStatus();

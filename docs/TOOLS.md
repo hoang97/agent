@@ -305,6 +305,11 @@ Mức rủi ro tối thiểu được tính từ metadata; template khai `risk_t
   - Agent con chỉ thấy các công cụ đọc được giao trong `tools`, cộng `data.query` để lọc kết quả lớn. Gọi công cụ khác thì bị chặn, giao công cụ ghi thì lệnh giao việc báo `invalid`.
   - Agent con dùng model tầng `fast`, tối đa `max_subagent_steps` (6) bước, cache TTL 5 phút. Agent chính chỉ nhận lại bản tóm tắt.
   - Lệnh của agent con vẫn qua gateway với ý định gốc của người dùng và được ghi vào trace, có `sub` là số của agent con. Token được tính vào lượt và có mục đích `subagent` trong thống kê.
+- **Chạy nền** (`agent.run_background {tool, args}`): chạy một lệnh đọc lâu ở nền, ví dụ `kubectl rollout status` hoặc `wait` với `timeout_seconds` tới 120, truy vấn chậm, hay `agent.delegate`. Lệnh trả ngay `job_id`, agent làm việc khác trong lúc chờ.
+  - Kết quả được chèn vào sau lệnh kế tiếp của agent, cùng cách với tin người dùng nhắn thêm.
+  - Agent định kết thúc lượt khi còn lệnh nền thì runner đợi lệnh xong đầu tiên, đưa kết quả cho agent rồi chạy tiếp. Mỗi lần như vậy tính một bước.
+  - Hết lượt (hết bước, lỗi, dừng) mà lệnh nền chưa xong thì lệnh bị bỏ, ghi vào trace là `background_dropped`. Vì chỉ là lệnh đọc nên bỏ được.
+  - Chỉ nhận công cụ đọc có trong danh sách của lượt. Lệnh vẫn qua gateway. Trong trace, lệnh nền có `background` là `job_id`.
 - **Công cụ học được** (`learned.<tên>`) là chuỗi bước gọi các công cụ ở trên, sinh từ thao tác lặp lại hoặc lưu từ chat:
   - Mỗi bước vẫn qua gateway với quyền của người gọi.
   - Nếu kết nối của một bước bị gỡ hoặc tắt, công cụ học được bị chặn theo.
