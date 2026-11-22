@@ -57,3 +57,8 @@ docker run --rm -v "$PWD":/src -v "$DRY":/dry -w /src -e HOME=/tmp -e PYTHONPATH
 - Cần gọi LLM thật thì thêm `--env-file .env --network host`. Lệnh này tốn tiền.
 
 Thêm connector mới thì tạo fake trong `tests/fakes.py`, kèm `tests/test_<name>.py`, rồi thêm một dòng vào bảng trên.
+
+## UI (`kagent/static`)
+
+- Không gọi `replaceChildren`/`append` gốc với con kiểu `cond && el`: trình duyệt in chữ `false`. Dùng `h()` hoặc `setKids`/`addKids` trong `app.js`, chúng lọc bỏ `false`.
+- Không dùng lại một node DOM (ví dụ ô tiêu đề) cho nhiều bảng: node chỉ nằm được một chỗ, bảng trước mất nó. Tạo node mới cho từng bảng, rồi đếm số tiêu đề bằng số ô.
