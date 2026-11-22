@@ -6,6 +6,7 @@ import logging
 import threading
 
 from .. import db, live
+from . import rounds
 from .actions import act
 from .common import IncidentError, _event, _lock, _running, _slots, _waiting
 from .config import bot_user
@@ -142,6 +143,10 @@ def _investigate_run(conn, tenant_id: str, incident_id: str, inc, user: str, tas
         _event(conn, tenant_id, incident_id, "investigated",
                f"{len(steps)} lệnh đọc → {headline(report['root_cause']) or 'chưa rõ nguyên nhân'} (độ tin {report['confidence']:.2f})",
                {"episode_id": ep["id"], "steps": len(steps), "round": n}, actor="kagent")
+        try:
+            rounds.record(conn, tenant_id, incident_id, n, ep["id"], report, alerts, steps)
+        except Exception:  # ảnh chụp cho panel không được làm hỏng lượt điều tra
+            log.exception("không ghi được ảnh chụp lượt %s của sự cố %s", n, incident_id)
     return act(conn, tenant_id, incident_id, report, user, ep["id"], alerts, steps)
 
 

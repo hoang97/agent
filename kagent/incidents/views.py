@@ -5,7 +5,7 @@ import json
 import re
 
 from .. import db
-from . import actions, tasks
+from . import actions, rounds, tasks
 from .common import BOT, STAGE_LABEL, IncidentError, _cmd, first_sentence, _worse, _is_write, _label, _method_label, _running, _shown_stage, describe, who
 from .config import settings
 from .grouping import merged_from, related
@@ -223,6 +223,22 @@ def get(conn, tenant_id: str, incident_id: str) -> dict:
                        for t in tasks.current(conn, incident_id) if t["done_at"]]
     d["cause"] = {"text": d["cause"] or d["root_cause"], "at": d["cause_at"], "round": d["investigations"], "confidence": d["confidence"],
                   "evidence": d["evidence"], "steps": len(d["steps"]), "parts": cause_parts(d["cause"] or d["root_cause"])} if d["episode_id"] else None
+    return d
+
+
+def panel(conn, tenant_id: str, incident_id: str, round_no: int | None = None) -> dict:
+    """Dữ liệu cho panel sự cố: như trang sự cố, kèm danh sách lượt và ảnh chụp của lượt được chọn (mặc định lượt mới nhất).
+    Sự cố điều tra trước khi có incident_round: dựng lượt tạm từ kết luận đang lưu, đánh dấu synthesized."""
+    d = get(conn, tenant_id, incident_id)
+    d["rounds"] = rounds.list_rounds(conn, incident_id)
+    d["round"] = rounds.get_round(conn, incident_id, round_no)
+    if d["round"] is None and round_no is not None and d["rounds"]:
+        raise IncidentError("không có lượt điều tra này", 404)
+    if d["round"] is None and d.get("cause"):
+        c = d["cause"]
+        d["round"] = {"round": c["round"], "created_at": c["at"], "steps": c["steps"], "episode_id": d["episode_id"], "synthesized": True,
+                      "report": {"root_cause": c["text"], "confidence": c["confidence"], "evidence": c["evidence"]},
+                      "entities": rounds.extract_entities(d["alerts"], d["steps"], c["text"] or ""), "signals": [], "graph": {}}
     return d
 
 
