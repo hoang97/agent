@@ -369,6 +369,11 @@ mới được học, nên 41/56 sự cố bị bỏ qua, mất cả những fac
   kiểm tra thì `external_untrusted`; lệnh kiểm tra không đạt là căn cứ cho bài học phủ định. Cổng duyệt giữ nguyên: tự nâng khi có 2 nguồn độc lập.
 - **Bỏ ngưỡng 0,5 khi chọn sự cố.** Ngưỡng chuyển thành điều kiện kiểm chứng của `[NN]`. Sự cố không có nguyên nhân và không có bước nào
   vẫn được ghi một nguồn `done` (skipped), để không bị xét lại mãi và chặn hàng đợi.
-- **Thêm `trusted_when`:** OpenStack api_read với tài nguyên hạ tầng của nhà vận hành; `data.query` mang mức tin của kết quả gốc trong `tool_result`.
+- **`data.query` có `trusted_when`:** mang mức tin của kết quả gốc trong `tool_result`.
+- **`trusted_view` (khoá template mới):** hàm (kết quả) → phần có cấu trúc, chỉ dùng khi dựng bản ghi sự cố; agent vẫn thấy nguyên kết quả và
+  cờ chưa tin cậy ở gateway giữ nguyên, vì agent cần tên tài nguyên để làm việc. OpenStack api_read giữ trường theo danh sách cho phép, không
+  theo danh sách cấm, vì khách hàng viết được nhiều trường hơn name/description (metadata, tags, user_data, hostname, khoá của addresses,
+  fault.message). Kết quả lớn đọc bản đầy đủ trong `tool_result`; hết hạn 7 ngày thì bước đó vẫn chưa tin cậy. Thay cho `trusted_when` theo
+  đường dẫn hạ tầng làm thử trước đó.
 - **Còn mở:** "triệt để" mới chỉ là kiểm tra đạt sau `verify_minutes`, chưa xét cảnh báo có quay lại trong N giờ không. Kết quả kiểm tra
   chưa cộng vào bộ đếm hữu ích/có hại của KU đã dùng. 15 nguồn sự cố cũ không có bảng căn cứ nên giữ mức tin cũ của cả nguồn.

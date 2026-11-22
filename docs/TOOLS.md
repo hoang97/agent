@@ -229,7 +229,7 @@ Công cụ chia theo việc lệnh gọi làm gì. Role của tài khoản trong
 | api_write R3 | POST, PUT, PATCH: tạo hoặc sửa tài nguyên, action máy ảo (os-start, os-stop, reboot, resize, migrate...) |
 | api_admin R4 | Mọi lệnh, gồm: DELETE; action phá dữ liệu (rebuild, forceDelete, evacuate, reset state, revert volume, khôi phục backup đè volume); mọi thay đổi Keystone; đọc bí mật (payload Barbican, credential EC2, mật khẩu máy ảo) |
 
-OpenStack không có chế độ chạy thử phía server, nên api_write và api_admin không có bước kiểm tra trước. Kết quả bị coi là chưa tin cậy, vì tên, mô tả và metadata của tài nguyên do khách hàng tự ghi. Ngoại lệ là api_read đọc tài nguyên hạ tầng do nhà vận hành quản lý (`trusted_when`): `os-hypervisors`, `os-services`, availability zone, `os-aggregates`, `limits`, quota, neutron `agents`, amphora của Octavia. Ngoại lệ này không áp dụng khi đường dẫn hay query chạm tới danh sách máy ảo (`/os-hypervisors/{id}/servers`, `with_servers`).
+OpenStack không có chế độ chạy thử phía server, nên api_write và api_admin không có bước kiểm tra trước. Kết quả bị coi là chưa tin cậy, vì tên, mô tả, metadata, tags, user_data và tên mạng do khách hàng tự ghi; agent vẫn thấy nguyên kết quả. Khi học tri thức từ sự cố, api_read có `trusted_view`: chỉ giữ các trường theo danh sách cho phép (id, status/state, host, AZ, flavor, size, thời gian, IP...), giá trị chuỗi phải là một token không khoảng trắng, chỉ đi vào nhánh có tên đã biết (`servers`, `volumes`, `items`...). Phần còn lại là căn cứ tin cậy cho KU.
 
 ## Tự xử lý cảnh báo (tab Sự cố)
 
@@ -276,6 +276,8 @@ Màn **Sự cố** gồm danh sách (lọc theo trạng thái, tự làm mới 1
        data_sensitivity: internal    # public | internal | personal | confidential | secret
        dry_run: server
        untrusted_output: false
+       # trusted_when: module:ham    (args) -> True khi lệnh này chỉ trả dữ liệu có cấu trúc; hạ cờ cả khi agent làm việc
+       # trusted_view: module:ham    (result) -> phần có cấu trúc; chỉ dùng khi học tri thức từ sự cố
        input_schema:
          properties: {name: {type: string}}
          required: [name]

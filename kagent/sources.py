@@ -225,8 +225,13 @@ def _steps(conn, inc) -> list[dict]:
             if k in seen:
                 continue
             seen.add(k)
-            reads.append({"tool": st["tool"], "args": st.get("args") or {}, "status": st["status"], "trusted": not st.get("untrusted"),
-                          "result": st.get("result"), "fix": None, "action": False})
+            trusted, result, viewed = not st.get("untrusted"), st.get("result"), False
+            if not trusted and st["status"] == "ok":
+                part = _structured(conn, inc["tenant_id"], st["tool"], result)
+                if part is not None:
+                    trusted, result, viewed = True, part, True
+            reads.append({"tool": st["tool"], "args": st.get("args") or {}, "status": st["status"], "trusted": trusted,
+                          "result": result, "fix": None, "action": False, "viewed": viewed})
     out = reads[:MAX_STEPS]
     for a in actions:
         args = json.loads(a["args"] or "{}")
@@ -236,12 +241,33 @@ def _steps(conn, inc) -> list[dict]:
     return out
 
 
+def _structured(conn, tenant_id: str, tool: str, result):
+    """Phần có cấu trúc của kết quả chữ tự do, theo trusted_view của công cụ; None khi công cụ không khai hoặc không lấy được.
+    Kết quả lớn trong vết chỉ còn bản xem trước: đọc bản đầy đủ đã lưu (giữ results.KEEP_DAYS ngày)."""
+    from .tools import spec_of
+    r = conn.execute("SELECT * FROM tool_registry WHERE tenant_id=? AND tool=?", (tenant_id, tool)).fetchone()
+    spec = spec_of(r) if r else None
+    if not (spec and spec.trusted_view):
+        return None
+    if isinstance(result, dict) and isinstance(result.get("result_id"), str):
+        row = conn.execute("SELECT data FROM tool_result WHERE id=? AND tenant_id=?", (result["result_id"], tenant_id)).fetchone()
+        if row is None:
+            return None
+        result = json.loads(row["data"])
+    try:
+        return spec.trusted_view(result)
+    except Exception:
+        log.warning("trusted_view của %s lỗi", tool, exc_info=True)
+        return None
+
+
 FIX_TEXT = {"verified": "kiểm tra sau khi chạy: đạt", "failed": "kiểm tra sau khi chạy: không đạt", "unchecked": "chưa kiểm tra sau khi chạy"}
 
 
 def incident_record(conn, inc) -> tuple[str, dict]:
     """Bản ghi sự cố cho bước rút KU và bảng căn cứ: mã → mức tin. Kết quả chữ tự do (log, describe) không đưa vào bản ghi,
-    để model rút KU không đọc phải nội dung người ngoài viết; KU trích bước đó vẫn bị coi là chưa tin cậy."""
+    để model rút KU không đọc phải nội dung người ngoài viết; KU trích bước đó vẫn bị coi là chưa tin cậy. Công cụ có trusted_view
+    thì đưa phần có cấu trúc vào và bước đó thành căn cứ tin cậy."""
     cause = inc["cause"] or inc["root_cause"]
     steps = _steps(conn, inc)
     verified = any(st["fix"] == "verified" for st in steps)
@@ -261,7 +287,7 @@ def incident_record(conn, inc) -> tuple[str, dict]:
             code = f"B{n}"
             evidence[code] = {"trust": "verified_tool" if st["trusted"] else "external_untrusted", "fix": st["fix"]}
             head = f"- [{code}] {_label(st)}" + (" (lệnh khắc phục" + (f": {st['why']}" if st["why"] else "") + ")" if st["action"] else "")
-            body = (f"kết quả: {_excerpt(st['result'])}" if st["trusted"] and st["result"] else
+            body = (f"kết quả{' (đã lược chữ tự do)' if st.get('viewed') else ''}: {_excerpt(st['result'])}" if st["trusted"] and st["result"] else
                     "kết quả là chữ tự do (log, mô tả), không đưa vào bản ghi" if not st["trusted"] else "")
             lines.append(f"{head} → {'chạy được' if st['status'] == 'ok' else 'lỗi'}" + (f"; {FIX_TEXT[st['fix']]}" if st["fix"] else "")
                          + (f". {body}" if body else ""))

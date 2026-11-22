@@ -261,17 +261,59 @@ def _path(args: dict) -> str:
     return path
 
 
-# Tài nguyên hạ tầng do nhà vận hành đặt tên; tài nguyên của khách hàng (servers, ports, volumes, stacks...) có name/description/metadata do
-# khách hàng viết nên vẫn là chữ tự do. Danh sách máy ảo theo hypervisor hay usage theo tenant kèm tên máy ảo: loại riêng.
-OPERATOR_PATHS = re.compile(r"^/(v2\.0/)?(os-hypervisors|os-services|os-availability-zone|availability_zones|os-aggregates|limits|os-quota-sets|"
-                            r"quotas|agents|lbaas/amphorae|v2/lbaas/amphorae)(/|$)")
+# Khách hàng tự viết name, description, metadata, tags, user_data, tên mạng (khoá của addresses)... nên phần dùng để học tri thức chỉ giữ
+# trường theo danh sách cho phép: thiếu một trường có ích thì chỉ mất chút tri thức, sót một trường chữ tự do là mở đường chèn lệnh.
+VIEW_SCALARS = {
+    "id", "uuid", "status", "state", "power_state", "vm_state", "task_state", "host", "hypervisor_hostname", "hypervisor_type", "zone",
+    "availability_zone", "flavor", "original_name", "vcpus", "ram", "disk", "ephemeral", "swap", "size", "volume_type", "bootable", "encrypted",
+    "multiattach", "attach_status", "migration_status", "replication_status", "device", "progress", "created", "updated", "created_at",
+    "updated_at", "launched_at", "terminated_at", "deleted_at", "binding", "enabled", "admin_state_up", "operating_status",
+    "provisioning_status", "device_owner", "vnic_type", "vif_type", "mtu", "network_type", "physical_network", "segmentation_id",
+    "ip_address", "addr", "mac_addr", "mac_address", "cidr", "gateway_ip", "ip_version", "protocol", "direction", "ethertype",
+    "port_range_min", "port_range_max", "role", "lb_network_ip", "ha_ip", "cert_expiration", "running_vms", "vcpus_used", "memory_mb",
+    "memory_mb_used", "local_gb", "local_gb_used", "free_ram_mb", "free_disk_gb", "current_workload", "disk_available_least",
+    "alive", "agent_type", "binary", "forced_down", "total", "matched", "count", "service", "stack_status", "resource_status",
+    "resource_type", "server_id", "volume_id", "network_id", "subnet_id", "port_id", "device_id", "project_id", "tenant_id", "user_id",
+    "image_id", "flavor_id", "host_id", "router_id", "loadbalancer_id", "listener_id", "pool_id", "compute_host", "amphora_id",
+}
+VIEW_CONTAINERS = {
+    "json", "items", "server", "servers", "volume", "volumes", "port", "ports", "network", "networks", "subnet", "subnets", "router",
+    "routers", "floatingip", "floatingips", "hypervisor", "hypervisors", "services", "agents", "aggregates", "hosts", "flavor", "flavors",
+    "image", "images", "attachments", "volumes_attached", "fixed_ips", "security_groups", "security_group_rules", "loadbalancer",
+    "loadbalancers", "listeners", "pools", "members", "amphora", "amphorae", "stack", "stacks", "resources", "availability_zone_info",
+    "zonestate", "quota_set", "limits", "absolute", "groups",
+}
+_TOKEN = re.compile(r"^[\w.:/@+\-]{0,128}$")
+DROPPED = "…"
 
 
-def trusted_output(args: dict) -> bool:
-    """Lệnh đọc chỉ trả dữ liệu hạ tầng có cấu trúc do nhà vận hành quản lý (trusted_when của api_read)."""
-    path = str(args.get("path") or "").split("?", 1)[0].rstrip("/") or "/"
-    return (str(args.get("method") or "GET").upper() in ("GET", "HEAD") and bool(OPERATOR_PATHS.match(path))
-            and "server" not in json.dumps([args.get("path"), args.get("query")]).lower())  # /os-hypervisors/{id}/servers, ?with_servers=true
+def _field(k: str) -> str:
+    return str(k).rsplit(".", 1)[-1].rsplit(":", 1)[-1].lower()  # "server.OS-EXT-STS:vm_state" (bộ lọc làm phẳng) → "vm_state"
+
+
+def _view(value, depth: int = 0):
+    if depth > 8:
+        return DROPPED
+    if isinstance(value, list):
+        return [_view(v, depth + 1) for v in value[:200]]
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            name = _field(k)
+            if isinstance(v, (dict, list)):
+                if name in VIEW_CONTAINERS or (name in VIEW_SCALARS and isinstance(v, dict)):
+                    out[k] = _view(v, depth + 1)
+            elif name in VIEW_SCALARS:
+                out[k] = v if v is None or isinstance(v, (bool, int, float)) or _TOKEN.match(str(v)) else DROPPED
+        return out
+    return DROPPED  # phần tử chuỗi trong danh sách (tags...)
+
+
+def trusted_view(result):
+    """Phần có cấu trúc của kết quả api_read để học tri thức (trusted_view): bỏ mọi chữ khách hàng tự viết, kể cả text và console log."""
+    if not isinstance(result, dict):
+        return None
+    return _view({k: v for k, v in result.items() if k != "text"})
 
 
 def _actions(body) -> set[str]:
