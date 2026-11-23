@@ -505,3 +505,29 @@ input.narrow { width: 70px; }
 .stop-bar.paused { background: var(--bad-bg); border-color: var(--bad); }
 .ix-src { margin-right: 10px; white-space: nowrap; }
 .ix-links li { margin: 2px 0; overflow-wrap: anywhere; }
+.ix-topo .tp-wrap { overflow-x: auto; margin: 6px 0; }
+.tp-svg { min-width: 100%; height: auto; display: block; }
+.tp-row { font-size: 11px; fill: var(--muted); }
+.tp-edge { stroke: var(--muted); stroke-width: 1.4; }
+.tp-edge.hint { stroke-dasharray: 5 4; }
+.tp-edge.group { stroke: var(--line); stroke-dasharray: 2 3; }
+.tp-node { cursor: pointer; }
+.tp-node rect { fill: var(--panel); stroke: var(--line); stroke-width: 1.2; }
+.tp-node .tp-label { font-size: 12px; font-weight: 600; fill: var(--text); }
+.tp-node .tp-sub { font-size: 10.5px; fill: var(--muted); }
+.tp-node.alert rect { fill: var(--warn-bg); stroke: var(--warn); stroke-width: 2; }
+.tp-node.other_alert rect { stroke: var(--warn); stroke-dasharray: 4 3; stroke-width: 1.6; }
+.tp-node.suspect rect { fill: var(--bad-bg); stroke: var(--bad); stroke-width: 3; }
+.tp-node.suspect .tp-label { fill: var(--bad); }
+.tp-node.common rect { stroke: var(--accent); stroke-dasharray: 6 3; }
+.tp-node.aggregate rect { fill: var(--side); stroke-dasharray: 3 3; }
+.tp-node.aggregate .tp-label { font-weight: 400; fill: var(--muted); }
+.tp-node:focus-visible rect { stroke: var(--accent); stroke-width: 3; }
+.tp-node.dim, .tp-edge.dim { opacity: 0.18; }
+.tp-legend { gap: 6px 14px; flex-wrap: wrap; }
+.tp-key { padding: 1px 8px; border-radius: 4px; border: 1.5px solid var(--line); }
+.tp-key.suspect { background: var(--bad-bg); border-color: var(--bad); }
+.tp-key.alert { background: var(--warn-bg); border-color: var(--warn); }
+.tp-key.other_alert { border-color: var(--warn); border-style: dashed; }
+.tp-key.common { border-color: var(--accent); border-style: dashed; }
+.ix-tp-detail { border-top: 1px solid var(--line); padding-top: 6px; }

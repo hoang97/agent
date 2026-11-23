@@ -488,9 +488,11 @@ async function incidentDetail(main, id) {
   let filter = "all";
   let menuOpen = false;
   let exportOpen = false;
+  let topo = null;  // tính nặng hơn trang sự cố và ít đổi: tải một lần, nút Làm mới tải lại
   async function load() {
     const [d, open, draft] = await Promise.all([api("GET", `/api/incidents/${id}`), api("GET", "/api/incidents?status=open"),
       exportOpen ? api("GET", `/api/incidents/${id}/export`) : null]);
+    if (!topo) topo = await api("GET", `/api/incidents/${id}/topology`).catch(() => ({ available: false, reason: "không tải được topology" }));
     const act = (fn, msg) => guard(async () => { await fn(); if (msg) toast(msg); await load(); });
     const busyNow = d.investigating || d.stage === "investigating";
     const tone = STATE_TONE[d.state.key] || "";
@@ -663,7 +665,7 @@ async function incidentDetail(main, id) {
       !rel.open.length && !rel.history_count && h("p", { class: "small muted" }, `Không có sự cố cùng nhóm trong ${rel.days} ngày.`));
     const recap = d.summary && summaryCard(d.summary, id);
     setKids(box);
-    appendKids(box, [head, exported, wait, h("div", { class: "ix-grid" }, h("div", { class: "ix-col" }, recap, events), h("aside", { class: "ix-col", "aria-label": "Thông tin sự cố" }, times, impactCard, alerts, cause, related))]);
+    appendKids(box, [head, exported, wait, h("div", { class: "ix-grid" }, h("div", { class: "ix-col" }, recap, topologyGraph(topo, async () => { topo = null; await load(); }), events), h("aside", { class: "ix-col", "aria-label": "Thông tin sự cố" }, times, impactCard, alerts, cause, related))]);
     if (!menuOpen && d.status === "open" && (busyNow || ["new", "awaiting_approval", "verifying"].includes(d.stage))) refreshLater(8000, token, load);
   }
   await load();
@@ -732,6 +734,104 @@ async function topologyCard() {
           r.status !== "error" && Object.entries(r.layers || {}).filter(([, text]) => text !== "ok").map(([layer, text]) => h("div", { class: "small muted" }, `${layer}: ${text}`))))),
         Object.keys(st.entities).length > 0 && h("p", { class: "small" }, Object.entries(st.entities).map(([k, n]) => `${n} ${TOPO_TYPES[k] || k}`).join(" · ")),
         st.can_manage && h("button", { type: "button", class: "ghost small-btn", onclick: scanNow }, "Quét ngay")));
+}
+
+const TP_W = 150, TP_H = 42, TP_GAP = 22, TP_ROW = 92;
+
+// Xếp nút trong từng tầng theo vị trí trung bình của các nút nối với nó (hai lượt trên → dưới, dưới → trên) để ít cạnh chéo.
+function tpLayout(nodes, edges) {
+  const rows = [...new Set(nodes.map((n) => n.layer))].sort((a, b) => a - b);
+  const byRow = new Map(rows.map((r) => [r, nodes.filter((n) => n.layer === r)]));
+  const nb = new Map(nodes.map((n) => [n.id, []]));
+  edges.forEach((e) => { if (nb.has(e.from) && nb.has(e.to)) { nb.get(e.from).push(e.to); nb.get(e.to).push(e.from); } });
+  const pos = new Map();
+  const place = (r) => byRow.get(r).forEach((n, i) => pos.set(n.id, i));
+  rows.forEach(place);
+  const sweep = (order) => order.forEach((r) => {
+    const key = (n) => { const xs = nb.get(n.id).filter((m) => pos.has(m)).map((m) => pos.get(m)); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : pos.get(n.id); };
+    byRow.set(r, [...byRow.get(r)].sort((a, b) => key(a) - key(b)));
+    place(r);
+  });
+  sweep(rows); sweep([...rows].reverse()); sweep(rows);
+  const widest = Math.max(...rows.map((r) => byRow.get(r).length));
+  const W = Math.max(600, widest * (TP_W + TP_GAP) + TP_GAP);
+  const xy = new Map();
+  rows.forEach((r, ri) => { const list = byRow.get(r); const left = (W - list.length * (TP_W + TP_GAP) + TP_GAP) / 2;
+    list.forEach((n, i) => xy.set(n.id, { x: left + i * (TP_W + TP_GAP), y: 34 + ri * TP_ROW })); });
+  return { xy, rows, W, H: 34 + rows.length * TP_ROW };
+}
+
+const TP_ROLE = { suspect: "nghi gây lỗi", alert: "đang bị cảnh báo", other_alert: "cảnh báo ở sự cố khác", common: "tầng dưới chung", path: "", aggregate: "" };
+
+// Topology của phần bị ảnh hưởng (topology.incident_view): làm nổi thực thể nghi gây lỗi, rồi thực thể bị cảnh báo. Bấm một nút làm nổi
+// đường nối của nó, không lọc.
+function topologyGraph(v, reload) {
+  const box = h("section", { class: "card ix-topo", "aria-labelledby": "ix-tp-h" });
+  const head = h("div", { class: "ix-sec" }, h("h3", { id: "ix-tp-h" }, "Topology bị ảnh hưởng"),
+    h("button", { type: "button", class: "ghost small-btn", onclick: guard(reload) }, "Làm mới"));
+  if (!v.available) { addKids(box, head, h("p", { class: "small muted" }, v.reason)); return box; }
+  const real = v.nodes.filter((n) => n.role !== "aggregate");
+  if (!real.length) {
+    addKids(box, head, h("p", { class: "small muted" }, "Không gắn được cảnh báo nào của sự cố với topology đã quét."),
+      v.unmapped.length > 0 && h("p", { class: "small" }, "Chưa gắn được: " + v.unmapped.map((u) => u.alertname).join(", ")));
+    return box;
+  }
+  const { xy, rows, W, H } = tpLayout(v.nodes, v.edges);
+  const byId = new Map(v.nodes.map((n) => [n.id, n]));
+  const detail = h("div", { class: "small ix-tp-detail" }, "Bấm một nút để xem chi tiết và làm nổi đường nối của nó.");
+  const lines = v.edges.filter((e) => xy.has(e.from) && xy.has(e.to)).map((e) => {
+    const a = xy.get(e.from), b = xy.get(e.to);
+    const down = a.y <= b.y;
+    const el = svg("line", { class: "tp-edge " + (e.trust === "tin cậy" ? "ok" : e.trust === "nhóm" ? "group" : "hint"),
+      x1: a.x + TP_W / 2, y1: down ? a.y + TP_H : a.y, x2: b.x + TP_W / 2, y2: down ? b.y : b.y + TP_H }, svg("title", {}, `${e.rel} · ${e.trust}${e.why ? " · " + e.why : ""}`));
+    return { e, el };
+  });
+  const related = (id) => {  // tổ tiên và con cháu theo hướng cạnh
+    const out = new Set([id]);
+    for (const dir of ["from", "to"]) {
+      const other = dir === "from" ? "to" : "from";
+      let frontier = [id];
+      while (frontier.length) { const next = []; v.edges.forEach((e) => { if (frontier.includes(e[dir]) && !out.has(e[other])) { out.add(e[other]); next.push(e[other]); } }); frontier = next; }
+    }
+    return out;
+  };
+  const groups = v.nodes.filter((n) => xy.has(n.id)).map((n) => {
+    const { x, y } = xy.get(n.id);
+    const sub = n.role === "aggregate" ? n.type_label : [n.type_label, TP_ROLE[n.role], n.alerts.length ? `${n.alerts.length} cảnh báo` : "", n.gone ? "đã mất" : ""].filter(Boolean).join(" · ");
+    const g = svg("g", { class: `tp-node ${n.role}`, transform: `translate(${x},${y})`, tabindex: 0, role: "button", "aria-label": `${n.label}, ${sub}` },
+      svg("rect", { width: TP_W, height: TP_H, rx: 6 }),
+      svg("text", { x: 8, y: 17, class: "tp-label" }, n.label.length > 20 ? n.label.slice(0, 19) + "…" : n.label),
+      svg("text", { x: 8, y: 33, class: "tp-sub" }, sub.length > 26 ? sub.slice(0, 25) + "…" : sub), svg("title", {}, `${n.label}\n${sub}`));
+    const pick = () => {
+      const on = related(n.id);
+      groups.forEach(({ n: m, g: el }) => el.classList.toggle("dim", !on.has(m.id)));
+      lines.forEach(({ e, el }) => el.classList.toggle("dim", !(on.has(e.from) && on.has(e.to))));
+      setKids(detail, h("strong", {}, n.label), ` · ${n.type_label}`, TP_ROLE[n.role] && h("span", { class: "pill" }, TP_ROLE[n.role]),
+        n.alerts.length > 0 && h("div", {}, "Cảnh báo: " + n.alerts.join(", ")),
+        n.note && h("div", { class: "muted" }, n.note),
+        n.incident && h("div", {}, "Thuộc sự cố ", h("a", { href: "#", onclick: (ev) => { ev.preventDefault(); go("incidents", undefined, n.incident.id); } }, n.incident.title)),
+        n.role !== "aggregate" && h("div", { class: "muted" }, n.id));
+    };
+    g.addEventListener("click", pick);
+    g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); pick(); } });
+    return { n, g };
+  });
+  const rowLabels = rows.map((r, i) => svg("text", { class: "tp-row", x: 6, y: 34 + i * TP_ROW - 8 }, v.layers[r] || ""));
+  const chart = svg("svg", { class: "tp-svg", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Topology của phần bị ảnh hưởng theo tầng" },
+    rowLabels, lines.map((l) => l.el), groups.map((x) => x.g));
+  const s = v.suspect;
+  addKids(box, head,
+    h("p", { class: "small" }, s.ids.length ? [h("span", { class: "pill bad" }, "Nghi gây lỗi"), " ", s.reason]
+      : "Chưa có thực thể nghi gây lỗi: chưa mắt xích 5 Whys có căn cứ nào đọc tới thực thể trong topology, và không tầng dưới chung nào đặc hiệu (xem nút \"tầng dưới chung\")."),
+    h("div", { class: "tp-wrap" }, chart),
+    h("div", { class: "row small tp-legend" }, h("span", { class: "tp-key suspect" }, "nghi gây lỗi"), h("span", { class: "tp-key alert" }, "bị cảnh báo"),
+      h("span", { class: "tp-key other_alert" }, "cảnh báo ở sự cố khác"), h("span", { class: "tp-key common" }, "tầng dưới chung"),
+      h("span", {}, "— cạnh tin cậy"), h("span", {}, "- - cạnh gợi ý (cần đọc lại)")),
+    detail,
+    h("p", { class: "small muted" }, `Theo topology tại lúc cảnh báo bắt đầu (${hmd(v.at)}), quét gần nhất ${hmd(v.last_scan)}. Topology đã lưu là gợi ý, không phải bằng chứng.`),
+    v.unmapped.length > 0 && h("p", { class: "small muted" }, "Chưa gắn được với topology: " + [...new Set(v.unmapped.map((u) => u.alertname))].join(", ")),
+    Object.keys(v.skipped_layers).length > 0 && h("p", { class: "small muted" }, "Tầng bị bỏ qua: " + Object.entries(v.skipped_layers).map(([k, t]) => `${k} (${t})`).join("; ")));
+  return box;
 }
 
 const NOTICE_TONE = { sent: "ok", failed: "bad", sending: "", skipped: "" };

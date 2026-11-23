@@ -26,12 +26,14 @@ INCIDENT_MINUTES = 15  # có sự cố mở sau lần quét gần nhất mà l�
 TEMPLATES = ("k8s", "openstack")
 SAFE = re.compile(r"^[\w.:/@+\-]{1,128}$")  # tên do người đặt (VM, volume) có thể chứa chữ tự do: không khớp thì không đưa cho model
 # Cạnh tin được bao lâu sau lần thấy gần nhất (giờ), theo tốc độ thay đổi; đề xuất, chờ người vận hành từng tầng xác nhận.
-TRUST_HOURS = {("k8s.node", "member_of"): 24 * 7, ("k8s.node", "runs_on"): 24, ("k8s.pvc", "uses"): 24, ("k8s.pv", "uses"): 24,
+TRUST_HOURS = {("k8s.node", "member_of"): 24 * 7, ("k8s.pod", "runs_on"): 0.25, ("k8s.pod", "uses"): 0.25, ("k8s.node", "runs_on"): 24, ("k8s.pvc", "uses"): 24, ("k8s.pv", "uses"): 24,
                ("os.server", "member_of"): 24 * 7, ("os.server", "uses"): FULL_HOURS + 1, ("os.server", "runs_on"): FULL_HOURS + 1,
                ("os.volume", "runs_on"): FULL_HOURS + 1}
 DOWN = ("runs_on", "uses")  # đi xuống tầng dưới
 NODE_COLS = ("NAME:.metadata.name,PROVIDER:.spec.providerID,IP:.status.addresses[?(@.type==\"InternalIP\")].address,"
              "READY:.status.conditions[?(@.type==\"Ready\")].status")
+POD_COLS = "NAME:.metadata.name,NODE:.spec.nodeName,PVC:.spec.volumes[*].persistentVolumeClaim.claimName,PHASE:.status.phase"
+MAX_POD_NAMESPACES = 10
 PV_COLS = ("NAME:.metadata.name,DRIVER:.spec.csi.driver,HANDLE:.spec.csi.volumeHandle,CINDER:.spec.cinder.volumeID,"
            "NS:.spec.claimRef.namespace,CLAIM:.spec.claimRef.name,SC:.spec.storageClassName,STATUS:.status.phase")
 UUID = re.compile(r"[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}|[0-9a-z]{1,64}", re.I)
@@ -63,6 +65,7 @@ class _Scan:
 
     def __init__(self, source: str):
         self.source, self.entities, self.edges, self.complete, self.layers = source, {}, set(), set(), {}
+        self.complete_prefix: list[tuple[str, str]] = []  # (type, tiền tố id): liệt kê đủ trong phạm vi, vd pod của một namespace
 
     def entity(self, eid: str, type_: str, name: str | None, **attrs) -> str:
         self.entities[eid] = (type_, _safe(name) or eid.split(":", 1)[1][-64:], {k: v for k, v in attrs.items() if v not in (None, "")})
@@ -193,7 +196,33 @@ def _scan_k8s(conn, tenant_id: str, row: dict) -> _Scan:
         if p.get("NS") and p.get("CLAIM"):
             s.edge(s.entity(f"k8s.pvc:{c}/{p['NS']}/{p['CLAIM']}", "k8s.pvc", p["CLAIM"], namespace=p["NS"]), "uses", pid)
     s.layers["k8s"] = "ok" if not partial else "một phần: danh sách node bị cắt"
+    for ns in _incident_namespaces(conn, tenant_id):
+        try:
+            out = _call(conn, tenant_id, row, "kubectl_read", {"command": f"get pods -n {ns} -o " + shlex.quote(f"custom-columns={POD_COLS}")})
+        except TopologyError as exc:
+            s.layers[f"pod:{ns}"] = f"lỗi: {exc}"
+            continue
+        if "đã cắt" not in (out.get("stdout") or ""):
+            s.complete_prefix.append(("k8s.pod", f"k8s.pod:{c}/{ns}/"))
+        for p in _columns(out.get("stdout")):
+            pid = s.entity(f"k8s.pod:{c}/{ns}/{p['NAME']}", "k8s.pod", p["NAME"], namespace=ns, phase=p.get("PHASE"))
+            if p.get("NODE"):
+                s.edge(pid, "runs_on", f"k8s.node:{c}/{p['NODE']}")
+            for claim in (p.get("PVC") or "").split(","):
+                if claim:
+                    s.edge(pid, "uses", f"k8s.pvc:{c}/{ns}/{claim}")
     return s
+
+
+def _incident_namespaces(conn, tenant_id: str) -> list[str]:
+    """Namespace của cảnh báo đang bắn thuộc sự cố đang mở: pod chỉ quét ở đây (đổi nhanh, quét cả cụm thì tốn)."""
+    out = []
+    for r in conn.execute("SELECT a.labels FROM alert_event a JOIN incident i ON i.id=a.incident_id WHERE a.tenant_id=? AND i.status='open' "
+                          "AND a.status='firing' ORDER BY a.last_seen DESC LIMIT 200", (tenant_id,)):
+        ns = _safe(json.loads(r["labels"]).get("namespace"))
+        if ns and ns not in out and re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", ns):
+            out.append(ns)
+    return out[:MAX_POD_NAMESPACES]
 
 
 def _store(conn, tenant_id: str, scan: _Scan, now: str) -> dict:
@@ -203,9 +232,12 @@ def _store(conn, tenant_id: str, scan: _Scan, now: str) -> dict:
         conn.execute("INSERT INTO topo_entity(tenant_id,id,type,name,attrs,source,first_seen,last_seen) VALUES (?,?,?,?,?,?,?,?) "
                      "ON CONFLICT(tenant_id,id) DO UPDATE SET name=excluded.name, attrs=excluded.attrs, source=excluded.source, "
                      "last_seen=excluded.last_seen, gone_at=NULL", (tenant_id, eid, type_, name, json.dumps(attrs, ensure_ascii=False), scan.source, now, now))
-    for type_ in scan.complete:
-        for r in conn.execute("SELECT id FROM topo_entity WHERE tenant_id=? AND type=? AND source=? AND gone_at IS NULL AND last_seen<?",
-                              (tenant_id, type_, scan.source, now)).fetchall():
+    scopes = [(t, "") for t in scan.complete] + scan.complete_prefix
+    for type_, prefix in scopes:
+        for r in conn.execute("SELECT id FROM topo_entity WHERE tenant_id=? AND type=? AND source=? AND gone_at IS NULL AND id LIKE ?",
+                              (tenant_id, type_, scan.source, prefix.replace("%", "") + "%")).fetchall():
+            if r["id"] in scan.entities:  # so theo tập đã thấy, không theo mốc giờ: hai lần quét có thể cùng một giây
+                continue
             conn.execute("UPDATE topo_entity SET gone_at=? WHERE tenant_id=? AND id=?", (now, tenant_id, r["id"]))
             stats["closed"] += conn.execute("UPDATE topo_edge SET valid_to=? WHERE tenant_id=? AND valid_to IS NULL AND (src=? OR dst=?)",
                                             (now, tenant_id, r["id"], r["id"])).rowcount
@@ -367,12 +399,45 @@ def start_points(conn, tenant_id: str, labels: dict) -> tuple[list[str], list[di
         found += [r["id"] for r in conn.execute("SELECT id FROM topo_entity WHERE tenant_id=? AND type='k8s.pvc' AND id LIKE ?",
                                                 (tenant_id, f"k8s.pvc:%/{ns}/{pvc}"))]
     pod = _safe(labels.get("pod"))
-    if pod and ns and not node:
+    if pod and ns and not found:
+        found += [r["id"] for r in conn.execute("SELECT id FROM topo_entity WHERE tenant_id=? AND type='k8s.pod' AND gone_at IS NULL AND id LIKE ?",
+                                                (tenant_id, f"k8s.pod:%/{ns}/{pod}"))]
+    if pod and ns and not node and not found:
         for row in sources(conn, tenant_id):
             if row["template"] == "k8s":
                 reads.append({"tool": f"{row['name']}.kubectl_read", "args": {"command": f"get pod {pod} -n {ns} -o wide"},
                               "why": "pod không lưu trong topology; cột NODE cho biết node, rồi gọi lại với labels.node"})
     return list(dict.fromkeys(found)), reads
+
+
+def _edges_at(conn, tenant_id: str, src: str, t: datetime, rels=DOWN) -> list:
+    rel_in = f"rel IN ({','.join('?' * len(rels))})"
+    edges = conn.execute(f"SELECT * FROM topo_edge WHERE tenant_id=? AND src=? AND {rel_in} AND valid_from<=? "
+                         "AND (valid_to IS NULL OR valid_to>?) ORDER BY id", (tenant_id, src, *rels, db.iso(t), db.iso(t))).fetchall()
+    if not edges:  # chưa quét tới thời điểm hỏi: dùng cạnh đang mở, trust() đánh dấu gợi ý
+        edges = conn.execute(f"SELECT * FROM topo_edge WHERE tenant_id=? AND src=? AND {rel_in} AND valid_to IS NULL ORDER BY id",
+                             (tenant_id, src, *rels)).fetchall()
+    return edges
+
+
+def _walk(conn, tenant_id: str, starts: list[str], t: datetime, depth: int, ents: dict) -> tuple[list[dict], set, list[dict]]:
+    """Đi xuống tầng dưới từ starts tại t: (cạnh kèm mức tin, thực thể đã qua, lệnh đọc lại cho cạnh gợi ý)."""
+    chain, seen, frontier, reads = [], set(starts), list(starts), []
+    for _ in range(max(1, min(depth, 6))):
+        nxt = []
+        for src in frontier:
+            for e in _edges_at(conn, tenant_id, src, t):
+                ok, why = trust(e, ents[src]["type"] if src in ents else src.split(":", 1)[0], t)
+                chain.append({"from": src, "rel": e["rel"], "to": e["dst"], "how": e["how"], "trust": "tin cậy" if ok else "gợi ý", "why": why})
+                if not ok:
+                    v = _verify(src, ents[src]["source"] if src in ents else None) or _verify(e["dst"], ents[e["dst"]]["source"] if e["dst"] in ents else None)
+                    if v and all(v["args"] != r["args"] for r in reads):
+                        reads.append({**v, "why": f"kiểm chứng {src} {e['rel']} {e['dst']} ({why})"})
+                if e["dst"] not in seen:
+                    seen.add(e["dst"])
+                    nxt.append(e["dst"])
+        frontier = nxt
+    return chain, seen, reads
 
 
 def neighbors(conn, tenant_id: str, entity: str | None = None, labels: dict | None = None, at: str | None = None, depth: int = 4) -> dict:
@@ -383,27 +448,8 @@ def neighbors(conn, tenant_id: str, entity: str | None = None, labels: dict | No
         starts += more
     ents = {r["id"]: r for r in conn.execute("SELECT * FROM topo_entity WHERE tenant_id=?", (tenant_id,))} if starts else {}
     starts = [s for s in starts if s in ents]
-    chain, seen, frontier = [], set(starts), list(starts)
-    for _ in range(max(1, min(depth, 6))):
-        nxt = []
-        for src in frontier:
-            rel_in = f"rel IN ({','.join('?' * len(DOWN))})"
-            edges = conn.execute(f"SELECT * FROM topo_edge WHERE tenant_id=? AND src=? AND {rel_in} AND valid_from<=? "
-                                 "AND (valid_to IS NULL OR valid_to>?) ORDER BY id", (tenant_id, src, *DOWN, db.iso(t), db.iso(t))).fetchall()
-            if not edges:  # chưa quét tới thời điểm hỏi: dùng cạnh đang mở, trust() đánh dấu gợi ý
-                edges = conn.execute(f"SELECT * FROM topo_edge WHERE tenant_id=? AND src=? AND {rel_in} AND valid_to IS NULL ORDER BY id",
-                                     (tenant_id, src, *DOWN)).fetchall()
-            for e in edges:
-                ok, why = trust(e, ents[src]["type"] if src in ents else "", t)
-                chain.append({"from": src, "rel": e["rel"], "to": e["dst"], "how": e["how"], "trust": "tin cậy" if ok else "gợi ý", "why": why})
-                if not ok:
-                    v = _verify(src, ents[src]["source"] if src in ents else None) or _verify(e["dst"], ents[e["dst"]]["source"] if e["dst"] in ents else None)
-                    if v and all(v["args"] != r["args"] for r in reads):
-                        reads.append({**v, "why": f"kiểm chứng {src} {e['rel']} {e['dst']} ({why})"})
-                if e["dst"] not in seen:
-                    seen.add(e["dst"])
-                    nxt.append(e["dst"])
-        frontier = nxt
+    chain, seen, more = _walk(conn, tenant_id, starts, t, depth, ents)
+    reads += [r for r in more if all(r["args"] != x["args"] for x in reads)]
     # Thực thể khác cùng nằm trên host, backend hay volume đã đi qua: lỗi ở tầng dưới thường ảnh hưởng tất cả.
     shared = []
     for eid in seen - set(starts):
@@ -436,3 +482,228 @@ def changes(conn, tenant_id: str, start: str, end: str, limit: int = 30) -> list
         if start <= e["valid_from"] <= end and e["valid_from"] > e["first_seen"]:
             out.append({"at": e["valid_from"], "change": f"{e['src']} {e['rel']} {e['dst']}"})
     return sorted(out, key=lambda x: x["at"], reverse=True)[:limit]
+
+
+# ---------- sự cố: đồ thị phần bị ảnh hưởng, nghi gây lỗi, khoanh vùng ----------
+
+# Tầng vẽ từ trên xuống; nhánh lưu trữ (PVC → PV → volume → backend) song song với nhánh tính toán.
+LAYER = {"k8s.cluster": 0, "k8s.pod": 1, "k8s.node": 2, "k8s.pvc": 2, "os.server": 3, "k8s.pv": 3, "os.volume": 4, "os.hypervisor": 5, "os.backend": 5}
+LAYER_NAMES = ["Cluster", "Pod", "Node, PVC", "Máy ảo, PV", "Volume", "Hạ tầng: host, backend lưu trữ"]
+TYPE_LABEL = {"k8s.cluster": "cluster", "k8s.pod": "pod", "k8s.node": "node", "k8s.pvc": "PVC", "k8s.pv": "PV", "os.server": "máy ảo",
+              "os.volume": "volume", "os.hypervisor": "host", "os.backend": "backend lưu trữ", "os.project": "project"}
+SPECIFIC_SHARE = 0.5  # đề xuất, chưa kiểm trên sự cố thật
+_UP = ("WITH RECURSIVE up(id, d) AS (SELECT ?, 0 UNION SELECT e.src, up.d + 1 FROM topo_edge e JOIN up ON e.dst = up.id "
+       "WHERE e.tenant_id = ? AND e.rel IN ('runs_on','uses') AND e.valid_from <= ? AND (e.valid_to IS NULL OR e.valid_to > ?) AND up.d < 5) "
+       "SELECT DISTINCT t.id, t.type FROM up JOIN topo_entity t ON t.tenant_id = ? AND t.id = up.id WHERE up.d > 0")
+
+
+def _get(conn, tenant_id: str, ids) -> dict:
+    ids = list(dict.fromkeys(ids))
+    out = {}
+    for i in range(0, len(ids), 500):
+        part = ids[i:i + 500]
+        out.update({r["id"]: r for r in conn.execute(f"SELECT * FROM topo_entity WHERE tenant_id=? AND id IN ({','.join('?' * len(part))})",
+                                                     (tenant_id, *part))})
+    return out
+
+
+def above(conn, tenant_id: str, eid: str, t: datetime) -> list[tuple[str, str]]:
+    """Mọi thực thể phụ thuộc (trực tiếp hay gián tiếp, tới 5 tầng) vào eid tại t: (id, type)."""
+    return [(r["id"], r["type"]) for r in conn.execute(_UP, (eid, tenant_id, db.iso(t), db.iso(t), tenant_id))]
+
+
+def specific(conn, tenant_id: str, eid: str, alerted: set[str], alerting: set[str], t: datetime) -> tuple[bool, str, int, int]:
+    """Tầng dưới chung có đáng nghi không: chính nó đang có cảnh báo, hoặc phần lớn thực thể cùng loại với thực thể bị cảnh báo
+    mà phụ thuộc vào nó đang bị cảnh báo. Dùng chung là bình thường với backend hay host lớn, nên không đủ để nghi."""
+    if eid in alerting:
+        return True, "chính nó đang có cảnh báo", 0, 0
+    kinds = {a.split(":", 1)[0] for a in alerted}
+    peers = {i for i, ty in above(conn, tenant_id, eid, t) if ty in kinds}
+    hit = len(peers & alerted)
+    if hit >= 2 and hit / len(peers) >= SPECIFIC_SHARE:
+        return True, f"{hit}/{len(peers)} {'/'.join(TYPE_LABEL.get(k, k) for k in sorted(kinds))} dùng nó đang bị cảnh báo", hit, len(peers)
+    return False, f"dùng chung bởi {len(peers)} {'/'.join(TYPE_LABEL.get(k, k) for k in sorted(kinds))}, {hit} đang bị cảnh báo", hit, len(peers)
+
+
+_KIND = {"node": "k8s.node", "nodes": "k8s.node", "no": "k8s.node", "pv": "k8s.pv", "persistentvolume": "k8s.pv", "pvc": "k8s.pvc",
+         "persistentvolumeclaim": "k8s.pvc", "pod": "k8s.pod", "pods": "k8s.pod", "po": "k8s.pod"}
+
+
+def step_entities(tool: str, args) -> list[str]:
+    """Thực thể mà một bước điều tra đọc tới (để nối mắt xích 5 Whys có căn cứ với topology)."""
+    if not isinstance(args, dict) or "." not in tool:
+        return []
+    conn_name = tool.split(".", 1)[0]
+    path = str(args.get("path") or "")
+    m = re.match(r"^/(servers|volumes)/([A-Za-z0-9-]{1,64})(/|$)", path)
+    if m and m.group(2) != "detail":  # id không có trong topology thì bị bỏ khi tra
+        return [f"os.{'server' if m.group(1) == 'servers' else 'volume'}:{m.group(2)}"]
+    try:
+        words = [w for w in shlex.split(str(args.get("command") or "")) if w != "kubectl"]
+    except ValueError:
+        return []
+    if len(words) < 2 or words[0] not in ("get", "describe", "top"):
+        return []
+    ns = next((words[i + 1] for i, w in enumerate(words[:-1]) if w in ("-n", "--namespace")), None)
+    rest = [w for i, w in enumerate(words[1:], 1) if not w.startswith("-") and words[i - 1] not in ("-n", "--namespace", "-o", "-l", "-c")]
+    kind, names = (rest[0], rest[1:]) if rest and "/" not in rest[0] else (None, rest)
+    out = []
+    for n in names:
+        k, _, name = n.partition("/") if "/" in n else (kind, "", n)
+        typ = _KIND.get((k or "").split(".")[0])
+        if not typ or not _safe(name):
+            continue
+        if typ in ("k8s.node", "k8s.pv"):
+            out.append(f"{typ}:{conn_name}/{name}")
+        elif ns:
+            out.append(f"{typ}:{conn_name}/{ns}/{name}")
+    return out
+
+
+def _alert_entities(conn, tenant_id: str, rows) -> tuple[dict, list]:
+    """{thực thể: [tên cảnh báo]}, và cảnh báo không gắn được (kèm lệnh đọc trực tiếp)."""
+    mapped, unmapped = {}, []
+    for a in rows:
+        labels = json.loads(a["labels"]) if isinstance(a["labels"], str) else a["labels"]
+        found, reads = start_points(conn, tenant_id, labels)
+        for f in found:
+            mapped.setdefault(f, []).append(a["alertname"] or "?")
+        if not found:
+            unmapped.append({"alertname": a["alertname"], "verify": reads[:1]})
+    return mapped, unmapped
+
+
+def suspects(conn, tenant_id: str, inc, starts: list[str], walked: dict[str, set], alerting: set[str], t: datetime) -> dict:
+    """Nghi gây lỗi: (1) thực thể mắt xích 5 Whys có căn cứ đọc tới, sâu nhất trước; (2) tầng dưới chung đặc hiệu của từ 2 thực thể
+    bị cảnh báo. Luôn là "nghi", kèm lý do; không có căn cứ nào thì rỗng."""
+    from .incidents import rootcause
+    whys = rootcause.chain(inc)["whys"]
+    for n, w in reversed(list(enumerate(whys, 1))):
+        ids = [e for st in w.get("steps") or [] for e in step_entities(st["tool"], st.get("args"))]
+        ids = list(_get(conn, tenant_id, ids))
+        if ids:
+            return {"ids": ids, "basis": "5whys", "reason": f"mắt xích 5 Whys số {n} có căn cứ đọc tới: {w['answer'][:160]}"}
+    reach: dict[str, int] = {}
+    for s in starts:
+        for e in walked.get(s, set()) - {s}:
+            reach[e] = reach.get(e, 0) + 1
+    common = sorted((e for e, k in reach.items() if k >= 2), key=lambda e: LAYER.get(e.split(":", 1)[0], 9))
+    alerted, checked = set(starts), []
+    for e in common:
+        ok, why, _, _ = specific(conn, tenant_id, e, alerted, alerting, t)
+        checked.append({"id": e, "specific": ok, "why": why})
+        if ok:
+            return {"ids": [e], "basis": "common", "reason": f"tầng dưới chung của {reach[e]} thực thể bị cảnh báo; {why}", "common": checked}
+    return {"ids": [], "basis": None, "reason": "", "common": checked}
+
+
+def blast(conn, tenant_id: str, eid: str, t: datetime) -> dict:
+    """Thứ phụ thuộc vào eid tại t, đếm theo loại, kèm project của máy ảo: gợi ý khoanh vùng ảnh hưởng cho người đánh giá S1–S4."""
+    up = above(conn, tenant_id, eid, t)
+    counts: dict[str, int] = {}
+    for _, ty in up:
+        counts[ty] = counts.get(ty, 0) + 1
+    servers = [i for i, ty in up if ty == "os.server"] + ([eid] if eid.startswith("os.server:") else [])
+    projects = {r["dst"] for i in range(0, len(servers), 500) for r in conn.execute(
+        f"SELECT DISTINCT dst FROM topo_edge WHERE tenant_id=? AND rel='member_of' AND valid_to IS NULL AND src IN ({','.join('?' * len(servers[i:i + 500]))})",
+        (tenant_id, *servers[i:i + 500]))}
+    return {"entity": eid, "counts": {TYPE_LABEL.get(k, k): v for k, v in sorted(counts.items(), key=lambda x: LAYER.get(x[0], 9))},
+            "projects": len(projects)}
+
+
+def incident_view(conn, tenant_id: str, incident_id: str) -> dict:
+    """Đồ thị theo tầng của phần bị ảnh hưởng trong bức tranh chung: thực thể của cảnh báo và tầng dưới của chúng, phần còn lại gộp
+    thành nhóm có đếm, thực thể khác đang có cảnh báo vẽ riêng. Tính lúc đọc tại lúc cảnh báo bắt đầu."""
+    inc = conn.execute("SELECT * FROM incident WHERE id=? AND tenant_id=?", (incident_id, tenant_id)).fetchone()
+    if inc is None:
+        raise TopologyError("không tìm thấy sự cố")
+    last = last_scan(conn, tenant_id)
+    if last is None:
+        return {"available": False, "reason": "chưa quét topology (cần kết nối k8s hoặc OpenStack dùng chung)"}
+    rows = conn.execute("SELECT * FROM alert_event WHERE incident_id=? ORDER BY status='firing' DESC, starts_at", (incident_id,)).fetchall()
+    t = _ts(min((r["starts_at"] for r in rows if r["starts_at"]), default=None) or inc["created_at"])
+    mine, unmapped = _alert_entities(conn, tenant_id, rows)
+    others, other_inc = {}, {}  # thực thể đang có cảnh báo ở sự cố khác đang mở
+    for r in conn.execute("SELECT a.labels, a.alertname, i.id, i.title FROM alert_event a JOIN incident i ON i.id=a.incident_id WHERE a.tenant_id=? "
+                          "AND a.status='firing' AND i.status='open' AND i.id!=?", (tenant_id, incident_id)):
+        for e in start_points(conn, tenant_id, json.loads(r["labels"]))[0]:
+            others.setdefault(e, []).append(r["alertname"] or "?")
+            other_inc.setdefault(e, {"id": r["id"], "title": r["title"]})
+    starts = list(mine)
+    ents = _get(conn, tenant_id, starts)
+    chain, walked, reads = [], {}, []
+    for s in starts:
+        c, seen, rd = _walk(conn, tenant_id, [s], t, 5, ents)
+        chain += c
+        walked[s] = seen
+        reads += [x for x in rd if all(x["args"] != y["args"] for y in reads)]
+    shown = set(starts).union(*walked.values()) if walked else set()
+    sus = suspects(conn, tenant_id, inc, starts, walked, set(mine) | set(others), t)
+    shown |= set(sus["ids"])
+    edges = {}
+    for e in chain:
+        edges[(e["from"], e["to"])] = {"from": e["from"], "to": e["to"], "rel": e["rel"], "trust": e["trust"], "why": e["why"]}
+    # Bức tranh chung: cluster của node, và những thứ khác cùng dùng các thực thể đang vẽ (gộp thành nhóm, trừ cái đang có cảnh báo).
+    aggregates, other_nodes = [], set()
+    for n in [x for x in list(shown) if x.startswith("k8s.node:")]:
+        cl = f"k8s.cluster:{n.split(':', 1)[1].split('/', 1)[0]}"
+        shown.add(cl)
+        edges[(n, cl)] = {"from": n, "to": cl, "rel": "member_of", "trust": "tin cậy", "why": ""}
+    for cl in [x for x in shown if x.startswith("k8s.cluster:")]:
+        rest = [r["src"] for r in conn.execute("SELECT src FROM topo_edge WHERE tenant_id=? AND dst=? AND rel='member_of' AND valid_to IS NULL", (tenant_id, cl))
+                if r["src"] not in shown]
+        if rest:
+            aggregates.append({"id": f"agg:{cl}:k8s.node", "under": cl, "type": "k8s.node", "count": len(rest)})
+    # Thực thể đang có cảnh báo ở sự cố khác mà tầng dưới gặp phần đang vẽ: vẽ cả đoạn nối, để thấy sự cố lan tới đâu.
+    base = set(shown)
+    for e in list(others)[:20]:
+        if e in base:
+            continue
+        c, seen, _ = _walk(conn, tenant_id, [e], t, 5, _get(conn, tenant_id, [e]))
+        reach = seen & base
+        if not reach:
+            continue
+        changed = True
+        while changed:
+            changed = False
+            for x in c:
+                if x["to"] in reach and x["from"] not in reach:
+                    reach.add(x["from"])
+                    changed = True
+        other_nodes.add(e)
+        shown |= reach
+        for x in c:
+            if x["from"] in reach and x["to"] in reach:
+                edges.setdefault((x["from"], x["to"]), {"from": x["from"], "to": x["to"], "rel": x["rel"], "trust": x["trust"], "why": x["why"]})
+    for low in [x for x in list(shown) if x.split(":", 1)[0] in ("k8s.node", "os.server", "os.volume", "os.hypervisor", "os.backend")]:
+        deps = conn.execute("SELECT src FROM topo_edge WHERE tenant_id=? AND dst=? AND rel IN ('runs_on','uses') AND valid_from<=? "
+                            "AND (valid_to IS NULL OR valid_to>?)", (tenant_id, low, db.iso(t), db.iso(t))).fetchall()
+        by_type: dict[str, int] = {}
+        for d in deps:
+            if d["src"] in shown:
+                continue
+            ty = d["src"].split(":", 1)[0]
+            by_type[ty] = by_type.get(ty, 0) + 1
+        for ty, n in by_type.items():
+            aggregates.append({"id": f"agg:{low}:{ty}", "under": low, "type": ty, "count": n})
+    info = _get(conn, tenant_id, shown)
+    common = {c["id"]: c for c in sus.get("common") or []}
+    nodes = []
+    for eid in shown:
+        ty = eid.split(":", 1)[0]
+        r = info.get(eid)
+        role = ("suspect" if eid in sus["ids"] else "alert" if eid in mine else "other_alert" if eid in other_nodes
+                else "common" if eid in common else "path")
+        nodes.append({"id": eid, "type": ty, "type_label": TYPE_LABEL.get(ty, ty), "layer": LAYER.get(ty, 3), "role": role,
+                      "label": r["name"] if r else eid.split(":", 1)[1].rsplit("/", 1)[-1][:40], "alerts": sorted(set(mine.get(eid, []) + others.get(eid, []))),
+                      "incident": other_inc.get(eid) if role == "other_alert" else None, "gone": bool(r and r["gone_at"]),
+                      "note": common[eid]["why"] if eid in common and role == "common" else ""})
+    for a in aggregates:
+        nodes.append({"id": a["id"], "type": a["type"], "type_label": TYPE_LABEL.get(a["type"], a["type"]), "layer": LAYER.get(a["type"], 3),
+                      "role": "aggregate", "label": f"+{a['count']} {TYPE_LABEL.get(a['type'], a['type'])} khác", "count": a["count"], "alerts": []})
+        edges[(a["id"], a["under"])] = {"from": a["id"], "to": a["under"], "rel": "runs_on", "trust": "nhóm", "why": ""}
+    return {"available": True, "at": db.iso(t), "layers": LAYER_NAMES, "nodes": sorted(nodes, key=lambda n: (n["layer"], n["id"])),
+            "edges": list(edges.values()), "suspect": {k: sus[k] for k in ("ids", "basis", "reason")},
+            "blast": blast(conn, tenant_id, sus["ids"][0], t) if sus["ids"] else None,
+            "unmapped": unmapped, "verify": reads[:8], "last_scan": last["started_at"],
+            "skipped_layers": {f"{src}:{layer}": text for src, r in last["sources"].items() for layer, text in (r.get("layers") or {}).items() if text != "ok"}}

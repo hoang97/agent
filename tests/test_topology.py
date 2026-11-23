@@ -188,3 +188,110 @@ def test_volumes_are_paged_and_partial_listing_never_marks_gone(topo, infra, clo
     assert out["sources"]["os"]["layers"]["volume"].startswith("một phần")
     with db.session() as conn:
         assert conn.execute("SELECT count(*) n FROM topo_entity WHERE tenant_id=? AND type='os.volume' AND gone_at IS NOT NULL", (topo,)).fetchone()["n"] == 0
+
+
+# ---------- đồ thị của sự cố (giai đoạn B1) ----------
+
+def _incident(tenant, iid, alerts, whys=None):
+    """Sự cố đang mở với các cảnh báo [(alertname, labels)], bắt đầu lúc bây giờ."""
+    import json
+    now = db.iso()
+    with db.session() as conn, db.tx(conn):
+        conn.execute("INSERT INTO incident(id,tenant_id,env,title,status,stage,created_at,updated_at,last_alert_at,whys) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                     (iid, tenant, "dev", f"sự cố {iid}", "open", "reported", now, now, now, json.dumps(whys) if whys else None))
+        for n, (name, labels) in enumerate(alerts):
+            conn.execute("INSERT INTO alert_event(id,tenant_id,source,fingerprint,starts_at,alertname,severity,labels,summary,env,first_seen,last_seen,"
+                         "incident_id,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (f"{iid}-{n}", tenant, "am", f"{iid}-{n}", now, name, "warning", json.dumps(labels), "", "dev", now, now, iid, "firing"))
+
+
+def _view(tenant, iid):
+    with db.session() as conn:
+        return topology.incident_view(conn, tenant, iid)
+
+
+@pytest.mark.parametrize("tool, args, ids", [
+    ("os.api_read", {"service": "compute", "path": f"/servers/{U1}"}, [f"os.server:{U1}"]),
+    ("os.api_read", {"service": "block-storage", "path": f"/volumes/{U2}/action"}, [f"os.volume:{U2}"]),
+    ("k8s.kubectl_read", {"command": "describe node master-1"}, ["k8s.node:k8s/master-1"]),
+    ("k8s.kubectl_read", {"command": "kubectl get pod etcd-0 -n kube-system -o wide"}, ["k8s.pod:k8s/kube-system/etcd-0"]),
+    ("k8s.kubectl_read", {"command": "get nodes/worker-1 pv/pv-etcd"}, ["k8s.node:k8s/worker-1", "k8s.pv:k8s/pv-etcd"]),
+    ("k8s.kubectl_read", {"command": "get pods -n web"}, []),
+    ("k8s.kubectl_read", {"command": "logs etcd-0 -n kube-system"}, []),
+])
+def test_step_entities(tool, args, ids):
+    assert topology.step_entities(tool, args) == ids
+
+
+def test_view_highlights_specific_common_host_and_groups_the_rest(topo, infra):
+    infra.os_servers["s9"] = {"id": "s9", "name": "other-vm", "status": "ACTIVE", "OS-EXT-SRV-ATTR:hypervisor_hostname": "compute-07"}
+    _scan(topo)
+    _incident(topo, "i1", [("etcdHighCommitDurations", {"instance": "10.1.0.11:2379"}), ("NodeDiskIOSaturation", {"node": "worker-1"})])
+    v = _view(topo, "i1")
+    roles = {n["id"]: n["role"] for n in v["nodes"]}
+    assert roles["k8s.node:k8s/master-1"] == "alert" and roles["k8s.node:k8s/worker-1"] == "alert"
+    # Hai node bị cảnh báo là đúng hai node k8s trên host: đặc hiệu, nghi gây lỗi.
+    assert v["suspect"]["ids"] == ["os.hypervisor:compute-07"] and v["suspect"]["basis"] == "common" and "2/2 node" in v["suspect"]["reason"]
+    assert roles["os.hypervisor:compute-07"] == "suspect" and roles["k8s.cluster:k8s"] == "path"
+    agg = {n["id"]: n["count"] for n in v["nodes"] if n["role"] == "aggregate"}
+    assert agg == {"agg:os.hypervisor:compute-07:os.server": 1, "agg:os.volume:v1:k8s.pv": 1}  # máy ảo other-vm, PV của volume gộp vào nhóm
+    hint = next(e for e in v["edges"] if e["from"] == "k8s.node:k8s/worker-1")
+    assert hint["trust"] == "gợi ý"  # worker-1 nối máy ảo bằng IP
+    assert v["blast"]["entity"] == "os.hypervisor:compute-07" and v["blast"]["counts"]["máy ảo"] == 3 and v["blast"]["counts"]["node"] == 2
+
+
+def test_common_layer_shared_by_many_is_not_suspect(topo, infra, monkeypatch):
+    _scan(topo)
+    alerted, alerting, t = {"k8s.node:k8s/master-1", "k8s.node:k8s/worker-1"}, set(), db.now()
+    with db.session() as conn:
+        assert topology.specific(conn, topo, "os.hypervisor:compute-07", alerted, alerting, t)[0] is True
+        monkeypatch.setattr(topology, "SPECIFIC_SHARE", 1.01)  # như backend dùng chung bởi nhiều node: không đủ đặc hiệu
+        ok, why, hit, total = topology.specific(conn, topo, "os.hypervisor:compute-07", alerted, alerting, t)
+        assert ok is False and (hit, total) == (2, 2) and "dùng chung bởi 2 node" in why
+        assert topology.specific(conn, topo, "os.hypervisor:compute-07", alerted, {"os.hypervisor:compute-07"}, t)[1] == "chính nó đang có cảnh báo"
+    _incident(topo, "i2", [("A", {"node": "master-1"}), ("B", {"node": "worker-1"})])
+    v = _view(topo, "i2")
+    assert v["suspect"]["ids"] == [] and {n["id"]: n["role"] for n in v["nodes"]}["os.hypervisor:compute-07"] == "common"
+
+
+def test_5_whys_evidence_wins_and_pods_of_incident_namespaces_are_scanned(topo, infra, users):
+    infra.k8s_pods = {"kube-system": [{"NAME": "etcd-0", "NODE": "master-1", "PVC": "data-etcd-0", "PHASE": "Running"}]}
+    whys = {"whys": [{"question": "Tại sao etcd chậm?", "answer": "đĩa của máy ảo master chậm", "refs": ["S1"], "weakness": False,
+                      "steps": [{"tool": "os.api_read", "args": {"service": "block-storage", "path": "/volumes/v1"}}]}], "stop": "no_evidence"}
+    _incident(topo, "i3", [("etcdHighCommitDurations", {"pod": "etcd-0", "namespace": "kube-system"})], whys)
+    out = _scan(topo, "incident")
+    assert out["sources"]["k8s"]["status"] == "ok"
+    v = _view(topo, "i3")
+    roles = {n["id"]: n["role"] for n in v["nodes"]}
+    assert roles["k8s.pod:k8s/kube-system/etcd-0"] == "alert"
+    # Chuỗi tầng dưới của pod: node → máy ảo → host, và PVC → PV → volume → backend.
+    assert {"k8s.node:k8s/master-1", f"os.server:{U1}", "os.hypervisor:compute-07", "k8s.pvc:k8s/kube-system/data-etcd-0", "k8s.pv:k8s/pv-etcd",
+            "os.volume:v1", "os.backend:cinder@ceph-ssd"} <= set(roles)
+    assert v["suspect"] == {"ids": ["os.volume:v1"], "basis": "5whys", "reason": "mắt xích 5 Whys số 1 có căn cứ đọc tới: đĩa của máy ảo master chậm"}
+    pod_edge = next(e for e in v["edges"] if e["from"] == "k8s.pod:k8s/kube-system/etcd-0" and e["rel"] == "runs_on")
+    assert pod_edge["trust"] == "tin cậy"  # vừa quét
+    # Pod bị xoá thì lần quét sau đánh dấu mất (namespace đã quét đủ).
+    infra.k8s_pods["kube-system"] = []
+    _scan(topo, "incident")
+    with db.session() as conn:
+        assert conn.execute("SELECT gone_at FROM topo_entity WHERE tenant_id=? AND id='k8s.pod:k8s/kube-system/etcd-0'", (topo,)).fetchone()["gone_at"]
+    d = users["admin"].get("/api/incidents/i3/topology").json()
+    assert d["available"] and d["suspect"]["basis"] == "5whys" and d["layers"][0] == "Cluster"
+    assert users["admin"].get("/api/incidents/nope/topology").status_code == 404
+
+
+def test_view_shows_other_incidents_and_unmapped_alerts(topo, infra):
+    _scan(topo)
+    _incident(topo, "i4", [("A", {"node": "master-1"}), ("KubePodCrashLooping", {"pod": "web-1", "namespace": "web"})])
+    _incident(topo, "i5", [("B", {"node": "worker-1"})])
+    v = _view(topo, "i4")
+    roles = {n["id"]: n for n in v["nodes"]}
+    assert roles["k8s.node:k8s/worker-1"]["role"] == "other_alert" and roles["k8s.node:k8s/worker-1"]["incident"]["id"] == "i5"
+    assert roles[f"os.server:{U2}"]["role"] == "path"  # đoạn nối worker-1 → máy ảo → host chung
+    assert not any(n["role"] == "aggregate" and n["id"].startswith("agg:os.hypervisor") for n in v["nodes"])
+    assert v["unmapped"][0]["alertname"] == "KubePodCrashLooping" and "get pod web-1 -n web" in v["unmapped"][0]["verify"][0]["args"]["command"]
+
+
+def test_view_without_scan_explains(users):
+    _incident(users["admin"].tenant, "i6", [("A", {"node": "x"})])
+    assert _view(users["admin"].tenant, "i6") == {"available": False, "reason": "chưa quét topology (cần kết nối k8s hoặc OpenStack dùng chung)"}

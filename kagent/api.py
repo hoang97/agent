@@ -1698,6 +1698,15 @@ def incident_stats(days: int = 30, env: str | None = None, t: Tenant = Depends(c
     return incidents.quality.stats(conn, t.tenant_id, days, env or None)
 
 
+@app.get("/api/incidents/{incident_id}/topology")
+def incident_topology(incident_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    from . import topology
+    try:
+        return topology.incident_view(conn, t.tenant_id, incident_id)
+    except topology.TopologyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
 @app.get("/api/incidents/{incident_id}")
 def incident_get(incident_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     return _incident_call(lambda: incidents.get(conn, t.tenant_id, incident_id))

@@ -509,3 +509,23 @@ Theo `TOPOLOGY-PLAN.md` (đã chốt: topology là dữ kiện có thời hạn,
   `providerID`), 21 PV; quét lại 25 giây. Lần đầu chỉ đọc được 1000 volume vì Cinder phân trang, đã thêm marker.
 - **Chưa làm (giai đoạn B):** gom cảnh báo theo tổ tiên chung, khoanh vùng ảnh hưởng trên thẻ Mức độ, màn đồ thị topology.
 
+## Đợt 48 — 2026-11-24: đồ thị topology trên trang sự cố (giai đoạn B1)
+
+- **`topology.incident_view` (`GET /api/incidents/{id}/topology`):** thực thể của cảnh báo tại lúc cảnh báo bắt đầu và chuỗi tầng dưới; cluster
+  của node; thứ khác cùng dùng các thực thể đang vẽ gộp thành nhóm có đếm ("+18 máy ảo khác"); thực thể đang có cảnh báo ở sự cố khác mà
+  tầng dưới gặp phần đang vẽ thì vẽ cả đoạn nối. Tính lúc đọc; trang tải một lần, nút Làm mới tải lại.
+- **Nghi gây lỗi:** (1) thực thể mà mắt xích 5 Whys có căn cứ đọc tới (`step_entities`: `api_read /servers|volumes/<id>`, `get|describe
+  node|pv|pvc|pod`), sâu nhất trước; (2) tầng dưới chung của từ 2 thực thể bị cảnh báo, chỉ khi đặc hiệu: chính nó đang có cảnh báo, hoặc
+  trong số thực thể cùng loại với thực thể bị cảnh báo mà phụ thuộc vào nó, từ một nửa trở lên đang bị cảnh báo. Đếm theo cùng loại chứ
+  không theo "thứ trực tiếp dùng nó": nếu không, máy ảo dưới một node lỗi luôn đặc hiệu vì chỉ có một node dùng nó.
+- **Pod:** lần quét đọc thêm pod của namespace có cảnh báo đang bắn của sự cố đang mở (tối đa 10 namespace); pod bị xoá thì đánh dấu mất
+  theo từng namespace. Cạnh pod → node chỉ tin trong 15 phút sau lần thấy.
+- **Sửa:** đánh dấu thực thể biến mất theo tập đã thấy trong lần quét, không theo `last_seen < now` (hai lần quét cùng một giây thì sót).
+- **Giao diện:** SVG theo tầng (cluster → pod → node, PVC → máy ảo, PV → volume → host, backend), xếp nút để ít cạnh chéo; nghi gây lỗi viền
+  đỏ đậm, bị cảnh báo nền vàng, cảnh báo ở sự cố khác viền vàng đứt, tầng dưới chung không đặc hiệu viền xanh đứt, nhóm gộp nền nhạt; cạnh
+  gợi ý nét đứt. Bấm nút làm nổi tổ tiên và con cháu, không lọc. Ghi rõ cảnh báo không gắn được và tầng bị bỏ qua.
+- **Trên bản sao DB:** 59 đồ thị dựng trong 0,1 giây, nhiều nhất 44 nút (trung vị 9); khi quét pod, 40/59 sự cố gắn được thực thể (trước
+  là 32; phần lớn còn lại là sự cố cũ có pod đã tạo lại tên khác). Chưa sự cố cũ nào có thực thể nghi gây lỗi: chỉ 1 sự cố có 5 Whys, và
+  các tầng dưới chung (backend, host) đều không đặc hiệu.
+- **Chưa kiểm:** chưa xem trên trình duyệt (extension Chrome chưa kết nối).
+

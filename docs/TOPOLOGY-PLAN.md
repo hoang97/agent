@@ -121,7 +121,7 @@ namespace `cmp-document`), sẽ gắn được khi quét pod; 3 không gắn đ�
 chung tầng dưới, nhưng phần dùng chung hầu hết là backend lưu trữ của 268 hoặc 1478 thực thể hay hypervisor của 308 máy ảo: dùng chung
 như vậy là bình thường, không phải dấu hiệu gây lỗi.
 
-### B1. Đồ thị topology trên trang sự cố
+### B1. Đồ thị topology trên trang sự cố (xong, Đợt 48)
 
 - **Phạm vi:** thực thể của cảnh báo (tại lúc cảnh báo bắt đầu) và chuỗi tầng dưới; phần còn lại gộp thành nhóm có đếm ("+18 máy ảo khác
   trên host"), trừ thực thể khác đang có cảnh báo thì vẽ riêng. Bố cục theo tầng từ trên xuống: cluster → node → máy ảo → hypervisor;

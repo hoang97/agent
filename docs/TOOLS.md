@@ -251,7 +251,7 @@ Bật ở **Cài đặt → Cảnh báo** (tenant admin). Nguồn là các kết
    Không bị ép hỏi thì gateway áp ma trận như mọi lệnh. Ô auto mode (ví dụ R3 ở dev) được classifier xét theo `auto_rules`, tức luật tự xử lý do admin viết. Luật này đứng ở chỗ lời người dùng, kèm tên và nhãn của cảnh báo. Classifier không đọc báo cáo, log hay kết quả điều tra, vì những thứ đó viết từ dữ liệu người ngoài ghi được. Luồng này không có agent để thử cách khác, nên classifier chặn thì chuyển ngay thành yêu cầu duyệt. Độ tin của báo cáo chỉ để tham khảo, không còn quyết định tự chạy.
 5. **Xác minh:** lệnh chạy xong (tự động hoặc sau khi duyệt), sau `verify_minutes` kagent xem cảnh báo của sự cố đã hết chưa. Hết thì "đã xử lý"; còn thì "cần người xử lý", và lần sau không tự chạy nữa.
 
-**Topology:** kagent quét k8s và OpenStack của kết nối dùng chung 6 giờ một lần, và quét lại khi có sự cố mới (lần quét gần nhất cách hơn 15 phút); tầng cần quyền admin OpenStack (hypervisor, backend lưu trữ) chỉ dựng khi tài khoản có quyền. Công cụ `data.topology` trả cạnh "tin cậy" hoặc "gợi ý" kèm lệnh đọc lại; xem `docs/TOPOLOGY-PLAN.md`.
+**Topology:** kagent quét k8s và OpenStack của kết nối dùng chung 6 giờ một lần, và quét lại khi có sự cố mới (lần quét gần nhất cách hơn 15 phút); tầng cần quyền admin OpenStack (hypervisor, backend lưu trữ) chỉ dựng khi tài khoản có quyền. Trang sự cố có đồ thị "Topology bị ảnh hưởng" (thực thể bị cảnh báo, tầng dưới, nghi gây lỗi). Công cụ `data.topology` trả cạnh "tin cậy" hoặc "gợi ý" kèm lệnh đọc lại; xem `docs/TOPOLOGY-PLAN.md`.
 
 **Thông báo:** Cài đặt → Cảnh báo có mục webhook (tenant admin): sự cố mới, lệnh chờ duyệt, sự cố cần người được POST JSON có trường `text` kèm link về trang sự cố; chỉ báo việc xảy ra sau lúc bật, mỗi việc một lần.
 

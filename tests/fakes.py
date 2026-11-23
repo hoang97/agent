@@ -61,6 +61,7 @@ class Infra:
         # Topology: hàng của get nodes/pv -o custom-columns theo tên cột; volume của Cinder.
         self.k8s_nodes: list[dict] = []
         self.k8s_pvs: list[dict] = []
+        self.k8s_pods: dict[str, list[dict]] = {}  # namespace → hàng của get pods -o custom-columns
         self.os_volumes = [{"id": "v1", "status": "in-use"}]
         self.hooks: list[dict] = []  # thân JSON webhook nhận được; hook_status giả lập máy nhận lỗi
         self.hook_status = 200
@@ -576,9 +577,9 @@ def kubectl_runner(infra: "Infra"):
                 if not dry:
                     del deps[name]
                 return 0, f"deployment.apps/{name}\n" if as_name else f'deployment.apps "{name}" deleted{suffix}\n', "", False
-            case ["get", "nodes" | "pv", "-o", spec] if spec.startswith("custom-columns="):
+            case ["get", "nodes" | "pv" | "pods", "-o", spec] if spec.startswith("custom-columns="):
                 cols = [c.split(":", 1)[0] for c in spec.removeprefix("custom-columns=").split(",")]
-                rows = infra.k8s_nodes if cmd[1] == "nodes" else infra.k8s_pvs
+                rows = {"nodes": infra.k8s_nodes, "pv": infra.k8s_pvs}.get(cmd[1]) or infra.k8s_pods.get(ns, [])
                 lines = ["   ".join(cols)] + ["   ".join(str(r.get(c) or "<none>") for c in cols) for r in rows]
                 return 0, "\n".join(lines) + "\n", "", False
             case ["get", "pods" | "pod" | "po", *_]:
