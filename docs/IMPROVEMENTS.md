@@ -529,3 +529,9 @@ Theo `TOPOLOGY-PLAN.md` (đã chốt: topology là dữ kiện có thời hạn,
   các tầng dưới chung (backend, host) đều không đặc hiệu.
 - **Chưa kiểm:** chưa xem trên trình duyệt (extension Chrome chưa kết nối).
 
+## Đợt 49 — 2026-11-24: khoanh vùng ảnh hưởng trên thẻ Mức độ (giai đoạn B2)
+
+- Thẻ Mức độ hiện "Khoanh vùng theo topology (gợi ý)" khi đồ thị có thực thể nghi gây lỗi: từ thực thể đó đi ngược lên tối đa 5 tầng tại lúc
+  cảnh báo bắt đầu (`topology.blast`), đếm pod, node, PVC, máy ảo, PV, volume và số project của các máy ảo. Chỉ là gợi ý để người ước lượng
+  ảnh hưởng khi đánh giá S1–S4, không tự đổi mức; không có thực thể nghi gây lỗi thì không hiện.
+

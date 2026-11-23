@@ -137,7 +137,7 @@ như vậy là bình thường, không phải dấu hiệu gây lỗi.
   lưu `k8s.pod` (cạnh pod → node, pod → PVC). Cạnh pod → node vẫn chỉ tin bản đọc trong chính lượt điều tra, như mục Nguyên tắc.
 - **Backend:** `topology.incident_view(incident)` tính lúc đọc, trả kèm `GET /api/incidents/{id}`.
 
-### B2. Khoanh vùng ảnh hưởng trên thẻ Mức độ
+### B2. Khoanh vùng ảnh hưởng trên thẻ Mức độ (xong, Đợt 49)
 
 Từ thực thể nghi gây lỗi đi ngược lên: số máy ảo, node, project bị ảnh hưởng, hiện như gợi ý cho người đánh giá S1–S4. Dùng chung phép
 tính với B1; không có thực thể nghi gây lỗi thì không hiện.

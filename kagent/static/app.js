@@ -399,8 +399,20 @@ const IMPACT_FLAGS = [["data_loss", "Mất dữ liệu"], ["control_plane", "Con
   ["redundancy_lost", "Mất dự phòng (vd. một node etcd chết, quorum còn)"], ["missed_by_alert", "Cảnh báo không phát hiện, khách hàng báo hoặc tự thấy"],
   ["near_miss", "Suýt thành sự cố lớn"], ["spread", "Lan sang service khác, hoặc khó xử lý"]];
 
+// Khoanh vùng từ thực thể nghi gây lỗi (topology.blast): gợi ý cho người đánh giá, không tự đổi mức.
+function blastLine(topo) {
+  const b = topo && topo.available && topo.blast;
+  if (!b) return null;
+  const node = topo.nodes.find((n) => n.id === b.entity);
+  const parts = Object.entries(b.counts).map(([k, n]) => `${n} ${k}`);
+  if (b.projects) parts.push(`${b.projects} project`);
+  return h("div", { class: "small ix-blast" }, h("div", { class: "ix-cause-h" }, "Khoanh vùng theo topology (gợi ý)"),
+    `Nếu ${node ? node.type_label + " " + node.label : b.entity} là nguyên nhân thì có thể ảnh hưởng: ${parts.join(", ") || "không thấy thứ gì phụ thuộc"}.`,
+    h("div", { class: "muted" }, "Theo topology đã quét, chưa kiểm chứng; dùng để ước lượng số khách hàng, project bị ảnh hưởng khi đánh giá mức."));
+}
+
 // Mức S1–S4 và có phải viết postmortem không (incidents/impact.py): người trả lời, kagent áp luật của repo incidents.
-function impactBody(im, id, act) {
+function impactBody(im, id, act, topo) {
   const a = im.answers || {};
   const customers = h("select", { "aria-label": "Ảnh hưởng khách hàng" }, CUSTOMER_CHOICES.map(([v, label]) => h("option", { value: v, selected: (a.customers || "unknown") === v }, label)));
   const flags = IMPACT_FLAGS.map(([k, label]) => [k, h("input", { type: "checkbox", checked: !!a[k] }), label]);
@@ -412,6 +424,7 @@ function impactBody(im, id, act) {
     pm.required ? h("p", { class: "small" }, h("span", { class: "pill warn" }, pm.suggested_only ? "Có thể cần postmortem" : "Cần postmortem"), " ", pm.reasons.join("; "),
       pm.due ? ` · hạn ${hmd(pm.due)}` : "") : h("p", { class: "small muted" }, "Chưa thuộc trường hợp bắt buộc postmortem."),
     a.by && h("p", { class: "small muted" }, `Đánh giá lúc ${hmd(a.at)}`),
+    blastLine(topo),
     h("details", {}, h("summary", { class: "small" }, im.source === "human" ? "Đánh giá lại" : "Đánh giá ảnh hưởng"),
       h("label", { class: "field" }, "Khách hàng bị ảnh hưởng", customers),
       flags.map(([, box, label]) => h("label", { class: "row small" }, box, label)), note,
@@ -619,7 +632,7 @@ async function incidentDetail(main, id) {
 
     // Cột phải.
     const detect = m.first_alert && new Date(m.received) - new Date(m.first_alert);
-    const impactCard = impactBody(d.impact, id, act);
+    const impactCard = impactBody(d.impact, id, act, topo);
     const times = h("section", { class: "card", "aria-labelledby": "ix-t-h" }, h("div", { class: "ix-sec" }, h("h3", { id: "ix-t-h" }, "Mốc thời gian")),
       h("dl", { class: "ix-kv" },
         h("dt", {}, "Bắt đầu"), h("dd", {}, hmd(m.first_alert)),

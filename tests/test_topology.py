@@ -240,6 +240,16 @@ def test_view_highlights_specific_common_host_and_groups_the_rest(topo, infra):
     assert v["blast"]["entity"] == "os.hypervisor:compute-07" and v["blast"]["counts"]["máy ảo"] == 3 and v["blast"]["counts"]["node"] == 2
 
 
+def test_blast_counts_dependents_by_type_and_projects(topo, infra):
+    infra.k8s_pods = {"kube-system": [{"NAME": "etcd-0", "NODE": "master-1", "PVC": "data-etcd-0", "PHASE": "Running"}]}
+    _incident(topo, "ib", [("A", {"pod": "etcd-0", "namespace": "kube-system"})])
+    _scan(topo, "incident")
+    with db.session() as conn:
+        b = topology.blast(conn, topo, "os.backend:cinder@ceph-ssd", db.now())
+        assert b == {"entity": "os.backend:cinder@ceph-ssd", "counts": {"pod": 1, "node": 1, "PVC": 1, "máy ảo": 1, "PV": 1, "volume": 1}, "projects": 1}
+        assert topology.blast(conn, topo, "k8s.pod:k8s/kube-system/etcd-0", db.now())["counts"] == {}
+
+
 def test_common_layer_shared_by_many_is_not_suspect(topo, infra, monkeypatch):
     _scan(topo)
     alerted, alerting, t = {"k8s.node:k8s/master-1", "k8s.node:k8s/worker-1"}, set(), db.now()

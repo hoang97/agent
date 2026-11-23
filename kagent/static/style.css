@@ -531,3 +531,4 @@ input.narrow { width: 70px; }
 .tp-key.other_alert { border-color: var(--warn); border-style: dashed; }
 .tp-key.common { border-color: var(--accent); border-style: dashed; }
 .ix-tp-detail { border-top: 1px solid var(--line); padding-top: 6px; }
+.ix-blast { border-top: 1px solid var(--line); padding-top: 6px; margin-top: 4px; }
