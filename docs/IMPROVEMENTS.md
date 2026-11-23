@@ -412,3 +412,16 @@ lặp lại 2 lần trong 30 ngày là dấu hiệu chưa xử lý.
 - **Đọc lại nguồn cũ:** nguồn sự cố đọc trước khi có bảng căn cứ được đọc lại một lần, cùng nguồn. Trước khi đọc lại (cả khi người xác nhận
   muộn), ứng viên chỉ đến từ nguồn đó chuyển `rejected`: để nguyên thì Curator thấy trùng ý và bỏ KU mới, mức tin không bao giờ đổi.
 - **Chưa làm:** 58 sự cố cũ không có chuỗi nên ở mức 1 cho tới khi điều tra lại.
+
+## Đợt 42 — 2026-11-23: chỉ ra thay đổi gây lỗi
+
+Đối chiếu với tài liệu Cloud Operations (Gartner G00834503, benchmark AIOps, Cloud Monitor 2.0 của Alibaba): change record là bối cảnh
+hàng đầu khi điều tra; AWS và Azure đều có "chỉ ra thay đổi gây lỗi"; cả hai demo của Alibaba kết thúc ở một bản release. Prompt điều
+tra của kagent chỉ nói pod, event, metric, log nên agent hiếm khi xem đã đổi gì.
+- **`data.recent_changes` (R0, local):** lệnh ghi chạy thành công qua kagent (`tool_call_audit` nối `tool_registry`, `action_class != read`)
+  trong `[around - before_minutes, around + after_minutes]`, mặc định 6 giờ trước và 30 phút sau; lọc `env`, `contains`; tối đa 100 dòng.
+  Lệnh lỗi và lệnh đọc không tính. Kết quả ghi rõ chỉ gồm thay đổi qua kagent.
+- **Prompt điều tra:** truyền thời điểm cảnh báo đầu tiên, bắt gọi `data.recent_changes` rồi xem nguồn ngoài đang có kết nối (rollout
+  history, thời điểm tạo ReplicaSet, helm history, deploy và pipeline GitLab, os-instance-actions OpenStack); thay đổi khớp thì nêu
+  cái gì, lúc nào, ai và kiểm chứng; không thấy thì nói đã xem nguồn nào.
+- **Chưa làm:** action log của CMP chưa có kết nối; thay đổi làm tay trên hạ tầng chỉ thấy được qua các nguồn trên.

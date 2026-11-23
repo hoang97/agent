@@ -353,6 +353,17 @@ def test_env_disabled_never_auto(flow, users, monkeypatch):
     assert actions[0]["status"] == "pending" and any("tự xử lý đang tắt ở dev" in r for r in actions[0]["reasons"])
 
 
+def test_investigation_checks_changes_before_the_first_alert(flow, users):
+    iid = _web_incident(users)
+    provider = Reporting(0.5, [])
+    tasks = []
+    provider.run_agent = lambda task, *a, **kw: tasks.append(task) or {"answer": "xong", "tokens": 0}
+    llm.set_provider(provider)
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+    assert "data.recent_changes với around=2026-11-12T08:00:00Z, env=dev" in tasks[0] and "rollout history" in tasks[0]
+
+
 def test_no_safe_action_means_reported(flow, users):
     iid = _web_incident(users)
     with db.session() as conn:

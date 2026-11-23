@@ -130,6 +130,48 @@ def script(p, args):
     return {"result": out["result"], "stdout": out["stdout"]}
 
 
+def _int(args: dict, key: str, default: int, cap: int) -> int:
+    value = args.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)) or not str(value).strip().lstrip("-").isdigit():
+        raise ConnectorError(f"{key} phải là số nguyên")
+    return max(0, min(int(value), cap))
+
+
+def recent_changes(p, args):
+    """Lệnh ghi đã chạy thành công qua kagent quanh một thời điểm, để điều tra đối chiếu sự cố với thay đổi ngay trước đó."""
+    from datetime import datetime, timedelta, timezone
+    raw = str(args.get("around") or "").strip()
+    try:
+        around = datetime.fromisoformat(raw.replace("Z", "+00:00")) if raw else db.now()
+    except ValueError as exc:
+        raise ConnectorError("around phải là thời điểm ISO 8601, ví dụ 2026-11-23T08:15:00Z") from exc
+    if around.tzinfo is None:
+        around = around.replace(tzinfo=timezone.utc)
+    around = around.astimezone(timezone.utc)
+    start = db.iso(around - timedelta(minutes=_int(args, "before_minutes", 360, 10080)))
+    end = db.iso(around + timedelta(minutes=_int(args, "after_minutes", 30, 1440)))
+    limit = max(1, min(_int(args, "limit", 30, 100), 100))
+    sql = ("SELECT a.at, a.tool, a.env, a.decision, a.args, u.username FROM tool_call_audit a "
+           "JOIN tool_registry r ON r.tenant_id=a.tenant_id AND r.tool=a.tool LEFT JOIN app_user u ON u.id=a.user_id "
+           "WHERE a.tenant_id=? AND a.result_status='ok' AND r.action_class!='read' AND a.at>=? AND a.at<=?")
+    params: list = [p["_tenant_id"], start, end]
+    if args.get("env"):
+        sql += " AND a.env=?"
+        params.append(str(args["env"]))
+    if args.get("contains"):
+        sql += " AND (instr(lower(a.tool), ?) OR instr(lower(a.args), ?))"
+        params += [str(args["contains"]).lower()] * 2
+    with db.session() as conn:
+        rows = conn.execute(sql + " ORDER BY a.at DESC LIMIT ?", (*params, limit + 1)).fetchall()
+    changes = [{"at": r["at"], "tool": r["tool"], "env": r["env"], "by": r["username"] or "?",
+                "how": "tự chạy" if r["decision"] == "auto" else "người duyệt", "args": r["args"][:400]} for r in rows[:limit]]
+    out = {"window": {"from": start, "to": end}, "count": len(changes), "changes": changes,
+           "note": "Chỉ gồm lệnh chạy qua kagent; thay đổi làm trực tiếp trên hệ thống (CI/CD, kubectl tay, Horizon) phải xem ở nguồn đó."}
+    if len(rows) > limit:
+        out["truncated"] = True
+    return out
+
+
 def propose_tool(p, args):
     from .. import learned
     with db.session() as conn:

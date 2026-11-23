@@ -86,7 +86,36 @@ def test_builtin_data_connection_exists_for_every_tenant(users):
     with db.session() as conn:
         for t in conn.execute("SELECT id FROM tenant").fetchall():
             tools = {r["tool"]: (r["enabled"], r["risk_tier"]) for r in conn.execute("SELECT tool, enabled, risk_tier FROM tool_registry WHERE tenant_id=? AND template='data'", (t["id"],))}
-            assert tools == {"data.query": (1, "R0"), "data.script": (1, "R4"), "data.propose_tool": (1, "R2")}
+            assert tools == {"data.query": (1, "R0"), "data.script": (1, "R4"), "data.propose_tool": (1, "R2"), "data.recent_changes": (1, "R0")}
+
+
+def _audit(conn, tenant, uid, tool, at, status="ok", decision="auto", env="dev", args=None):
+    conn.execute("INSERT INTO tool_call_audit(tenant_id,episode_id,user_id,tool,env,args_hash,args,decision,result_status,at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                 (tenant, None, uid, tool, env, "h", json.dumps(args or {"command": "x"}), decision, status, at))
+
+
+def test_recent_changes_lists_only_successful_writes_in_window(users):
+    ctx = _ctx(users)
+    with db.session() as conn, db.tx(conn):
+        _audit(conn, ctx.tenant_id, ctx.user_id, "k8s.kubectl_write", "2026-11-12T07:30:00+00:00", args={"command": "set image deployment/web -n web web=v2"})
+        _audit(conn, ctx.tenant_id, ctx.user_id, "k8s.helm_write", "2026-11-12T06:00:00+00:00", decision="approved", env="prod")
+        _audit(conn, ctx.tenant_id, ctx.user_id, "k8s.kubectl_read", "2026-11-12T07:40:00+00:00")  # đọc: không phải thay đổi
+        _audit(conn, ctx.tenant_id, ctx.user_id, "k8s.kubectl_write", "2026-11-12T07:50:00+00:00", status="error")  # chạy lỗi: không đổi gì
+        _audit(conn, ctx.tenant_id, ctx.user_id, "k8s.kubectl_write", "2026-11-11T20:00:00+00:00")  # ngoài cửa sổ 6 giờ
+        _audit(conn, "other-tenant", ctx.user_id, "k8s.kubectl_write", "2026-11-12T07:45:00+00:00")
+    with db.session() as conn:
+        out = gateway.invoke(conn, ctx, "data.recent_changes", {"around": "2026-11-12T08:00:00Z"})["result"]
+        assert out["window"] == {"from": "2026-11-12T02:00:00+00:00", "to": "2026-11-12T08:30:00+00:00"}
+        assert [(c["tool"], c["env"], c["how"], c["by"]) for c in out["changes"]] == [
+            ("k8s.kubectl_write", "dev", "tự chạy", "alice"), ("k8s.helm_write", "prod", "người duyệt", "alice")]
+        assert "set image" in out["changes"][0]["args"]
+        only = gateway.invoke(conn, ctx, "data.recent_changes", {"around": "2026-11-12T08:00:00Z", "env": "prod"})["result"]
+        assert [c["tool"] for c in only["changes"]] == ["k8s.helm_write"]
+        assert gateway.invoke(conn, ctx, "data.recent_changes", {"around": "2026-11-12T08:00:00Z", "contains": "WEB=V2"})["result"]["count"] == 1
+        capped = gateway.invoke(conn, ctx, "data.recent_changes", {"around": "2026-11-12T08:00:00Z", "limit": 1})["result"]
+        assert capped["count"] == 1 and capped["truncated"]
+        bad = gateway.invoke(conn, ctx, "data.recent_changes", {"around": "hôm qua"})
+        assert bad["status"] == "error" and "ISO 8601" in bad["result"]["error"]
 
 
 def test_script_needs_approval_then_runs_in_sandbox(users):

@@ -6,6 +6,22 @@ Cập nhật 2026-11-14. Tham chiếu quy trình của repo `ops/incidents` (inc
 Mục tiêu: hội thoại sự cố là nguồn dữ liệu. Cảnh báo mở hội thoại, hội thoại đề xuất và chạy hành động, mọi bước được lưu vết
 và chờ duyệt khi cần, cuối cùng có một bản tóm tắt ngắn cho lãnh đạo.
 
+## Theo tài liệu Cloud Operations (2026-11-23)
+
+Đối chiếu kagent với kiến trúc tham chiếu Gartner G00834503, benchmark AIOps (AWS, Azure, Google) và Cloud Monitor 2.0 của Alibaba.
+Làm theo thứ tự, mỗi việc một commit; chi tiết ở `IMPROVEMENTS.md`.
+
+| # | Việc | Trạng thái |
+| --- | --- | --- |
+| 1 | Chỉ ra thay đổi gây lỗi: `data.recent_changes`, prompt điều tra đối chiếu thay đổi trước cảnh báo đầu tiên | xong (Đợt 42) |
+| 3 | Đo độ chính xác của điều tra: người chấm nguyên nhân đúng/sai, tỉ lệ đúng, MTTR | chưa |
+| 4 | Link bằng chứng tới công cụ gốc (Grafana Explore, Kibana Discover) dựng từ truy vấn | chưa |
+| 2 | Kênh thông báo sự cố mới và thẻ chờ duyệt (thay việc 8 bên dưới) | chưa |
+| 5 | Mức S1–S4 theo ảnh hưởng (thay việc 6 bên dưới) | chưa |
+| 9 | Topology nhiều tầng (vật lý → hypervisor → VM → node → workload) | chờ data model của nhóm Cloud Operations |
+
+Chưa cần: che dữ liệu nhạy cảm trước khi gửi LLM, nhận phản ánh ngoài Alertmanager (netchat, GNOC), mở công cụ qua MCP.
+
 ## Đã xong
 
 | Việc | Commit |

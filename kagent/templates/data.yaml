@@ -25,6 +25,25 @@ tools:
         max_chars: {type: integer}
       required: [result_id]
 
+  - name: recent_changes
+    description: >-
+      Lệnh ghi (thay đổi hệ thống) đã chạy thành công qua kagent trong khoảng [around - before_minutes, around + after_minutes],
+      mới nhất trước: thời điểm, công cụ, môi trường, ai chạy, tự chạy hay người duyệt, tham số. Dùng khi điều tra sự cố để biết
+      ngay trước lúc lỗi đã đổi gì. around mặc định là bây giờ (ISO 8601), before_minutes mặc định 360; lọc theo env, contains
+      (chuỗi trong tên công cụ hoặc tham số, ví dụ tên namespace, deployment, VM).
+    handler: data:recent_changes
+    action_class: read
+    data_sensitivity: internal
+    local: true
+    input_schema:
+      properties:
+        around: {type: string}
+        before_minutes: {type: integer}
+        after_minutes: {type: integer}
+        env: {type: string}
+        contains: {type: string}
+        limit: {type: integer}
+
   - name: script
     description: >-
       Chạy script Python ngắn trên các kết quả đã lưu khi bộ lọc không đủ (ví dụ trích request_id bằng regex rồi đếm).

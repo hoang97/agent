@@ -16,7 +16,7 @@ Agent chỉ dùng công cụ thật. Mỗi công cụ được tạo từ một 
 | `alertmanager` | list_alerts (gom theo alertname, severity), list_silences (R0), create_silence R3, expire_silence R3 (cả hai có chạy thử) | url, token hoặc username/password, tenant_header |
 | `elasticsearch` (Kibana) | search_logs R1, list_indices R0, delete_index R3 | url Elasticsearch hoặc Kibana (đi qua Console proxy), api_key hoặc username/password, index_pattern |
 | `web` | fetch_page R0 | allowed_domains, max_chars |
-| `data` (nội bộ, tự có ở mọi tenant) | query R0 (lọc kết quả đã lưu theo result_id), script R4 (Python trong sandbox, luôn cần duyệt) | — |
+| `data` (nội bộ, tự có ở mọi tenant) | query R0 (lọc kết quả đã lưu theo result_id), recent_changes R0 (lệnh ghi đã chạy thành công qua kagent quanh một thời điểm), script R4 (Python trong sandbox, luôn cần duyệt) | — |
 | `http_api` | get R1, post R3 | base_url, auth_header, auth_value, allowed_paths |
 | `openstack` | list_services R0, api_read R1, api_write R3, api_admin R4 (xem [OpenStack](#openstack)) | config (clouds.yaml hoặc openrc), cloud, password, region, interface, ca_cert |
 | `gitlab` | list_projects, list_pipelines, get_pipeline, list_deployments, list_commits, list_merge_requests, list_issues (R0); job_log, get_merge_request, get_file, api_read (R1; api_read chặn biến CI, token, khoá, webhook, runner); retry_pipeline, cancel_pipeline, retry_job, play_job, create_note (R3); api_admin R4 | url (gồm cả đường dẫn con nếu GitLab cài dưới /gitlab), token (scope read_api để đọc, api + role Developer để ghi), default_project |
@@ -240,7 +240,7 @@ Bật ở **Cài đặt → Cảnh báo** (tenant admin). Nguồn là các kết
    - **Luật nhãn:** mọi nhãn trong `group_labels` mà hai cảnh báo cùng có phải bằng nhau. Mặc định là `cluster`, `namespace`, nên kết quả không phụ thuộc thứ tự cảnh báo đến.
    - **Quan hệ k8s:** cùng node, hoặc cùng workload (suy từ tên pod hay nhãn deployment/statefulset). Nhãn pod/service/instance của exporter kube-state-metrics bị bỏ qua.
    - **AI:** chỉ dùng khi hai cách trên không quyết được; gộp nếu điểm ≥ `ai_min_score`. Lần Gộp/Tách gần nhất của người dùng được đưa vào làm ví dụ.
-3. **Điều tra:** sau `debounce_seconds`, agent chạy bằng tài khoản `kagent-alerts` (vai trò member) và chỉ được dùng công cụ đọc. Công cụ ghi bị chặn ngay cả khi model tự gọi tên. Kết quả là báo cáo gồm tiêu đề, nguyên nhân, độ tin, bằng chứng và tối đa 2 hành động.
+3. **Điều tra:** sau `debounce_seconds`, agent chạy bằng tài khoản `kagent-alerts` (vai trò member) và chỉ được dùng công cụ đọc. Công cụ ghi bị chặn ngay cả khi model tự gọi tên. Kết quả là báo cáo gồm tiêu đề, nguyên nhân, độ tin, bằng chứng và tối đa 2 hành động. Bước điều tra luôn đối chiếu với thay đổi ngay trước cảnh báo đầu tiên: `data.recent_changes` cho lệnh ghi đã chạy qua kagent, và với kết nối đang có thì rollout history, helm history, deploy GitLab, instance action của OpenStack cho thay đổi làm ngoài kagent.
 4. **Hành động:** đi qua gateway như mọi lệnh khác. Bị ép hỏi khi:
    - tự xử lý đang tắt ở môi trường đó;
    - đã vượt `max_auto_actions_per_hour`;
