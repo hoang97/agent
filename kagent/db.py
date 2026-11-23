@@ -295,6 +295,12 @@ CREATE TABLE IF NOT EXISTS investigation_review (
 );
 CREATE INDEX IF NOT EXISTS ix_review_incident ON investigation_review(incident_id);
 
+-- Tin đã báo ra webhook (incidents/notify.py): khóa new | approval:<id> | needs_human:<lượt>:<lần lặp>; status sending | sent | failed | skipped (có sẵn lúc bật).
+CREATE TABLE IF NOT EXISTS incident_notice (
+  tenant_id TEXT NOT NULL, incident_id TEXT NOT NULL, key TEXT NOT NULL, at TEXT NOT NULL, status TEXT NOT NULL, error TEXT,
+  PRIMARY KEY (tenant_id, incident_id, key)
+);
+
 -- Bằng chứng một loại hoàn tác chạy được: source = revert (hoàn tác thật thành công) | drill (diễn tập ở dev/staging).
 CREATE TABLE IF NOT EXISTS undo_evidence (
   id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT NOT NULL, recipe TEXT NOT NULL, source TEXT NOT NULL, change_id TEXT, at TEXT NOT NULL
@@ -445,6 +451,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         grouping.reset_long_titles(conn)
     if "alert_settings" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
         conn.execute("ALTER TABLE tenant ADD COLUMN alert_settings TEXT NOT NULL DEFAULT '{}'")  # luồng tự xử lý cảnh báo (incidents.py)
+    if "notify" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
+        conn.execute("ALTER TABLE tenant ADD COLUMN notify TEXT")  # webhook thông báo sự cố, mã hóa (incidents/notify.py)
     if "undo_settings" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
         conn.execute("ALTER TABLE tenant ADD COLUMN undo_settings TEXT NOT NULL DEFAULT '{}'")  # undo.py: kiểm tra sau khi chạy, thùng rác, nút dừng
     if "undo" not in {r["name"] for r in conn.execute("PRAGMA table_info(approval_request)")}:

@@ -8,6 +8,8 @@ Lệnh do tài khoản bot "kagent-alerts" của tenant gọi, nên audit, chín
 """
 from __future__ import annotations
 
+import logging
+
 from .. import db
 from .actions import act, dismiss, follow_up, has_pending, migrate, rebuild_events, retry, on_approval, record_chat_action, result_line, strip_dry_run
 from .common import (BOT, first_sentence, who, SEVERITY, SOURCE_TEMPLATES, STAGE_LABEL, STAGES, WAITING_ON_HUMAN, IncidentError, MANIFEST_VERBS, describe, _cmd, _event, _is_write, _later,
@@ -19,8 +21,10 @@ from .ingest import _env_of, _fingerprint, fetch, poll, source_status
 from .investigate import (INVESTIGATE_TASK, _investigate_run, _recover_orphans, _write_tools, ensure_conversation, investigate, queued,
                           reinvestigate, start_investigation)
 from .summary import ACTION_STATUS, MAX_SUMMARIES_PER_DAY, _summary_input, due_summaries, last_activity, start_summary, summarize, summary_view
-from . import export, quality, rootcause, tasks
+from . import export, notify, quality, rootcause, tasks
 from .views import SHOWN_EVENTS, context_block, actions_by_episode, get, list_incidents, timeline, view
+
+log = logging.getLogger("kagent.incidents")
 
 
 
@@ -31,6 +35,10 @@ def tick(conn) -> None:
     for t in conn.execute("SELECT id FROM tenant").fetchall():
         for incident_id, basis in due_summaries(conn, t["id"]):
             start_summary(t["id"], incident_id, basis)
+        try:
+            notify.dispatch(conn, t["id"])  # cả khi luồng cảnh báo tắt: lệnh đã xin duyệt vẫn cần người xem
+        except Exception:
+            log.exception("tenant %s: lỗi khi gửi thông báo", t["id"])
         cfg = settings(conn, t["id"])
         if not cfg["enabled"]:
             if has_pending(conn, t["id"]) or conn.execute("SELECT 1 FROM incident WHERE tenant_id=? AND stage='verifying' LIMIT 1", (t["id"],)).fetchone():

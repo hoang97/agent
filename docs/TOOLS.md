@@ -251,6 +251,8 @@ Bật ở **Cài đặt → Cảnh báo** (tenant admin). Nguồn là các kết
    Không bị ép hỏi thì gateway áp ma trận như mọi lệnh. Ô auto mode (ví dụ R3 ở dev) được classifier xét theo `auto_rules`, tức luật tự xử lý do admin viết. Luật này đứng ở chỗ lời người dùng, kèm tên và nhãn của cảnh báo. Classifier không đọc báo cáo, log hay kết quả điều tra, vì những thứ đó viết từ dữ liệu người ngoài ghi được. Luồng này không có agent để thử cách khác, nên classifier chặn thì chuyển ngay thành yêu cầu duyệt. Độ tin của báo cáo chỉ để tham khảo, không còn quyết định tự chạy.
 5. **Xác minh:** lệnh chạy xong (tự động hoặc sau khi duyệt), sau `verify_minutes` kagent xem cảnh báo của sự cố đã hết chưa. Hết thì "đã xử lý"; còn thì "cần người xử lý", và lần sau không tự chạy nữa.
 
+**Thông báo:** Cài đặt → Cảnh báo có mục webhook (tenant admin): sự cố mới, lệnh chờ duyệt, sự cố cần người được POST JSON có trường `text` kèm link về trang sự cố; chỉ báo việc xảy ra sau lúc bật, mỗi việc một lần.
+
 Màn **Sự cố** gồm danh sách (lọc theo trạng thái, tự làm mới 15 giây, dải số liệu 30 ngày: tỉ lệ nhận định đúng, MTTR, mức xử lý) và trang chi tiết: nguyên nhân, bằng chứng, các lệnh đã đọc, cảnh báo kèm lý do được gộp (nút Tách), hành động kèm lý do không tự chạy (nút Duyệt/Từ chối), chấm nhận định của lượt điều tra (Đúng / Đúng một phần / Sai), dòng thời gian, nút Gộp/Đóng/Điều tra lại.
 
 ## Thêm một template mới

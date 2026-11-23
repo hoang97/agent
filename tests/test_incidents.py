@@ -1205,3 +1205,61 @@ def test_export_drafts_issue_and_postmortem_without_guessing(flow, users, infra)
     assert "| không có alert cho pod chưa sẵn sàng | phát hiện |" in pm and "| Lỗ hổng monitoring | không có alert cho pod chưa sẵn sàng |" in pm
     assert "Biện pháp tạm thời còn giữ:** TODO: còn giữ" in pm  # restart là giảm nhẹ
     assert "**Tác nhân kích hoạt:** TODO" in pm and "Số khách hàng" not in pm  # không đoán ảnh hưởng khách hàng
+
+
+# ---------- thông báo qua webhook ----------
+
+def _notify(conn, users):
+    return incidents.notify.dispatch(conn, tenant(users), background=False)
+
+
+def test_notify_settings_hide_url_need_admin_and_check_target(flow, users, infra):
+    assert users["alice"].get("/api/notify-settings").status_code == 403
+    assert flow.put("/api/notify-settings", json={"enabled": True}).status_code == 400  # chưa có URL
+    assert flow.put("/api/notify-settings", json={"enabled": True, "url": "https://internal.test/hook"}).status_code == 400  # mạng nội bộ
+    assert flow.put("/api/notify-settings", json={"enabled": True, "url": "https://hook.test/x?token=abc", "events": ["bogus"]}).status_code == 400
+    out = flow.put("/api/notify-settings", json={"enabled": True, "url": "https://hook.test/x?token=abc"}).json()
+    assert out["url_set"] and out["url_hint"] == "https://hook.test/…" and "abc" not in json.dumps(flow.get("/api/notify-settings").json())
+    assert out["public_url"] == "http://testserver" and out["since"]
+    # Lưu lại không kèm URL thì giữ URL cũ và mốc since.
+    again = flow.put("/api/notify-settings", json={"events": ["new"]}).json()
+    assert again["url_set"] and again["since"] == out["since"] and again["events"] == ["new"]
+    assert flow.post("/api/notify-settings/test").json() == {"ok": True} and infra.hooks[-1]["event"] == "test"
+    infra.hook_status = 500
+    assert "500" in flow.post("/api/notify-settings/test").json()["detail"]
+
+
+def test_notify_new_incident_once_only_after_enabling(flow, users, infra):
+    poll(users)  # sự cố có trước khi bật: không báo
+    flow.put("/api/notify-settings", json={"enabled": True, "url": "https://hook.test/x"})
+    with db.session() as conn:
+        assert _notify(conn, users) == 0
+    infra.am_alerts.append(am({"alertname": "DiskFull", "severity": "critical", "namespace": "db"}, "f9"))
+    poll(users)
+    with db.session() as conn:
+        assert _notify(conn, users) == 1 and _notify(conn, users) == 0  # không gửi trùng
+    hook = infra.hooks[-1]
+    assert hook["event"] == "new" and "DiskFull" in hook["text"] and "[kagent · dev]" in hook["text"]
+    assert hook["incident"]["url"] == f"http://testserver/#/t/{tenant(users)}/incidents/{hook['incident']['id']}"
+    assert flow.get("/api/notify-settings").json()["recent"][0]["status"] == "sent"
+
+
+def test_notify_pending_approval_and_needs_human(flow, users, infra, monkeypatch):
+    flow.put("/api/notify-settings", json={"enabled": True, "url": "https://hook.test/x", "events": ["approval", "needs_human"]})
+    iid = _web_incident(users)
+    llm.set_provider(Reporting(0.9, [RESTART], verdict=False))  # auto mode chặn: thành yêu cầu duyệt
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+        assert _notify(conn, users) == 1
+    hook = infra.hooks[-1]
+    assert hook["event"] == "approval" and hook["action"]["tool"] == "k8s.kubectl_write" and "rollout restart" in hook["text"]
+    with db.session() as conn:
+        conn.execute("UPDATE incident SET stage='needs_human', updated_at=? WHERE id=?", (db.iso(), iid))
+        assert _notify(conn, users) == 1 and _notify(conn, users) == 0
+        assert infra.hooks[-1]["event"] == "needs_human"
+        # Gửi lỗi: ghi lỗi, không thử lại; lượt điều tra mới cần người thì báo lại.
+        infra.hook_status = 502
+        conn.execute("UPDATE incident SET investigations=investigations+1, updated_at=? WHERE id=?", (db.iso(), iid))
+        assert _notify(conn, users) == 1 and _notify(conn, users) == 0
+    assert flow.get("/api/notify-settings").json()["recent"][0] == {**flow.get("/api/notify-settings").json()["recent"][0],
+                                                                     "status": "failed", "error": "webhook trả mã 502"}

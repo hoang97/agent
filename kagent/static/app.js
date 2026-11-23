@@ -680,6 +680,33 @@ async function alertSettingsView(main) {
       oninput: (e) => { cfg.summary.idle_minutes = Number(e.target.value); } })),
     info.can_manage ? h("div", { class: "row" }, h("button", { type: "button", onclick: save }, "Lưu"), h("button", { type: "button", class: "ghost", onclick: pollNow }, "Lấy cảnh báo ngay"))
       : h("div", { class: "small muted" }, "Chỉ tenant admin được đổi cài đặt này.")));
+  if (info.can_manage) addKids(main, await notifyCard());
+}
+
+const NOTICE_TONE = { sent: "ok", failed: "bad", sending: "", skipped: "" };
+
+// Webhook báo sự cố mới, lệnh chờ duyệt, sự cố cần người (incidents/notify.py). URL đã lưu không trả về: để trống là giữ.
+async function notifyCard() {
+  const info = await api("GET", "/api/notify-settings");
+  const cfg = { ...info.settings };
+  const url = h("input", { class: "wide", placeholder: cfg.url_set ? `Đã lưu (${cfg.url_hint}); để trống là giữ` : "https://chat.example.com/hooks/…", "aria-label": "URL webhook" });
+  const pub = h("input", { class: "wide", value: cfg.public_url, placeholder: "Mặc định là địa chỉ đang mở kagent", "aria-label": "Địa chỉ kagent trong link" });
+  const events = Object.entries(info.events).map(([k, label]) => h("label", { class: "row small" },
+    h("input", { type: "checkbox", checked: cfg.events.includes(k), onchange: (e) => { cfg.events = e.target.checked ? [...cfg.events, k] : cfg.events.filter((x) => x !== k); } }), label));
+  const body = () => ({ enabled: cfg.enabled, events: cfg.events, allow_private: cfg.allow_private, public_url: pub.value.trim(), ...(url.value.trim() ? { url: url.value.trim() } : {}) });
+  const save = guard(async () => { await api("PUT", "/api/notify-settings", body()); toast("Đã lưu webhook"); renderShell(); });
+  const test = guard(async () => { await api("PUT", "/api/notify-settings", body()); await api("POST", "/api/notify-settings/test"); toast("Đã gửi tin thử"); renderShell(); });
+  return h("div", { class: "card" }, h("h3", {}, "Thông báo qua webhook"),
+    h("p", { class: "small" }, "kagent POST JSON có trường text (Slack, Mattermost và webhook vào của ứng dụng chat nhận thẳng) khi có các sự kiện dưới đây, kèm link về trang sự cố. Tin chỉ gồm tiêu đề, môi trường, mức cảnh báo và lệnh chờ duyệt; không gửi log hay kết quả điều tra. Chỉ báo việc xảy ra sau lúc bật."),
+    h("label", { class: "row small" }, h("input", { type: "checkbox", checked: cfg.enabled, onchange: (e) => { cfg.enabled = e.target.checked; } }), "Bật thông báo"),
+    h("label", { class: "field" }, "URL webhook", url), events,
+    h("label", { class: "field" }, "Địa chỉ kagent dùng trong link", pub),
+    h("label", { class: "row small" }, h("input", { type: "checkbox", checked: cfg.allow_private, disabled: !info.is_org_admin && !cfg.allow_private,
+      onchange: (e) => { cfg.allow_private = e.target.checked; } }), "Cho gửi vào địa chỉ mạng nội bộ (cần org admin bật)"),
+    h("div", { class: "row" }, h("button", { type: "button", onclick: save }, "Lưu"), h("button", { type: "button", class: "ghost", onclick: test }, "Lưu và gửi tin thử")),
+    info.recent.length > 0 && h("details", {}, h("summary", { class: "small" }, "Tin gửi gần đây"),
+      h("ul", { class: "small" }, info.recent.filter((n) => n.status !== "skipped").map((n) => h("li", {}, h("span", { class: "pill " + NOTICE_TONE[n.status] }, n.status), ` ${hmd(n.at)} · ${n.title || n.incident_id} · ${n.key.split(":")[0]}`,
+        n.error ? ` · ${n.error}` : "")))));
 }
 
 VIEWS.chat = chatView;

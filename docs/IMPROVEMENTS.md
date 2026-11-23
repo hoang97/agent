@@ -454,3 +454,19 @@ contextual linking. Trước đây bằng chứng chỉ là kết quả lưu tro
 - **Trên dữ liệu thật:** 476/532 bước Prometheus của các lượt điều tra có link (phần còn lại là list_alerts, list_targets…); 40 bước
   Elasticsearch chưa có vì kết nối trỏ vào Elasticsearch, cần điền `ui_url`. Action log của CMP chưa có kết nối nên chưa có link.
 
+## Đợt 45 — 2026-11-23: thông báo qua webhook
+
+Thẻ duyệt của sự cố hết hạn vì không ai xem (việc 8 của kế hoạch sự cố); Gartner xếp Notification & Collaboration vào Incident Management.
+Đã chốt dùng webhook chung thay vì gắn vào một dịch vụ cụ thể.
+- **`incidents/notify.py`:** vòng nền quét ba loại việc chưa báo: sự cố mới (`new`), lệnh của sự cố chờ duyệt (`approval:<id>`), sự cố cần
+  người (`needs_human:<lượt điều tra>:<lần lặp>`, nên lượt mới hay lần lặp mới thì báo lại). Quét thay vì móc vào từng chỗ đổi trạng thái
+  để không sót ca nào, kể cả sau khi khởi động lại. Bảng `incident_notice` giữ khóa đã báo; ghi khóa trước rồi mới gửi ở luồng nền,
+  lỗi thì ghi `failed` và không thử lại; tối đa 10 tin mỗi tenant mỗi vòng. Chạy cả khi luồng cảnh báo tắt, vì lệnh đã xin duyệt vẫn cần người xem.
+- **Bật lần đầu không xả lịch sử:** lúc bật, việc đang có sẵn được ghi `skipped`; không dựa vào so mốc giờ vì giờ chỉ chính xác tới giây.
+- **Thân tin:** JSON có `text` (Slack, Mattermost và webhook vào của ứng dụng chat nhận thẳng), kèm `event`, `incident` (id, tiêu đề, môi
+  trường, mức, link `#/t/<tenant>/incidents/<id>`) và `action` (công cụ, lệnh, giờ hết hạn duyệt). Không gửi log hay kết quả điều tra.
+- **Cài đặt (Cài đặt → Cảnh báo, tenant admin; `GET/PUT /api/notify-settings`, `POST /api/notify-settings/test`):** cả khối mã hóa trong
+  cột `tenant.notify` vì URL webhook thường chứa token; API chỉ trả scheme và máy chủ. Địa chỉ mạng nội bộ cần org admin bật, như kết nối.
+  Địa chỉ kagent trong link mặc định là địa chỉ đang mở trang lúc lưu.
+- **Chưa làm:** chưa thử với webhook thật của netchat; nút duyệt ngay trong tin chat (cần bot trung gian gọi lại API kagent).
+

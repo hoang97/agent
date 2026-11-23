@@ -1856,6 +1856,29 @@ def alert_settings_put(body: dict, t: Tenant = Depends(current_tenant), conn=Dep
     return cfg
 
 
+@app.get("/api/notify-settings")
+def notify_get(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_admin()
+    return {"settings": incidents.notify.view(incidents.notify.load(conn, t.tenant_id)), "events": incidents.notify.EVENTS,
+            "recent": incidents.notify.recent(conn, t.tenant_id), "is_org_admin": t.principal.is_org_admin}
+
+
+@app.put("/api/notify-settings")
+def notify_put(body: dict, request: Request, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_admin()
+    with db.tx(conn):
+        out = _incident_call(lambda: incidents.notify.save(conn, t.tenant_id, body, is_org_admin=t.principal.is_org_admin,
+                                                           public_url=str(request.base_url).rstrip("/")))
+    log.info("tenant %s: %s đổi webhook thông báo (bật=%s, sự kiện=%s)", t.tenant_id, t.user_id, out["enabled"], out["events"])
+    return out
+
+
+@app.post("/api/notify-settings/test")
+def notify_test(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_admin()
+    return _incident_call(lambda: incidents.notify.test(conn, t.tenant_id))
+
+
 @app.post("/api/alert-settings/poll")
 def alert_poll_now(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     t.require_admin()

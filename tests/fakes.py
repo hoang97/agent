@@ -23,7 +23,7 @@ GITLAB_TOKEN = "glpat-test"
 PUBLIC_IP = "93.184.216.34"
 HOSTS = {"k8s.test": PUBLIC_IP, "grafana.test": PUBLIC_IP, "es.test": PUBLIC_IP, "kibana.test": PUBLIC_IP, "example.test": PUBLIC_IP, "db.test": PUBLIC_IP,
          "prom.test": PUBLIC_IP, "am.test": PUBLIC_IP, "keystone.test": PUBLIC_IP, "nova.test": PUBLIC_IP, "neutron.test": PUBLIC_IP,
-         "cinder.test": PUBLIC_IP, "gitlab.test": PUBLIC_IP,
+         "cinder.test": PUBLIC_IP, "gitlab.test": PUBLIC_IP, "hook.test": PUBLIC_IP,
          "internal.test": "10.0.0.5", "metadata.test": "169.254.169.254", "loop.test": "127.0.0.1"}
 
 
@@ -58,6 +58,8 @@ class Infra:
         self.os_calls: list[tuple[str, str, object]] = []
         self.gl_notes: dict[int, dict] = {}
         self.gl_calls: list[tuple[str, str]] = []
+        self.hooks: list[dict] = []  # thân JSON webhook nhận được; hook_status giả lập máy nhận lỗi
+        self.hook_status = 200
         self.os_servers = {"s1": {"id": "s1", "name": "web-1", "status": "ACTIVE"}, "s2": {"id": "s2", "name": "db-1", "status": "ERROR"}}
         self.am_alerts = [{"labels": {"alertname": "HighCPU", "severity": "warning", "namespace": "payments"}, "status": {"state": "active", "silencedBy": []},
                            "startsAt": "2026-11-11T00:00:00Z", "annotations": {"summary": "CPU cao"}, "fingerprint": "f1"},
@@ -105,6 +107,9 @@ class Infra:
             return self.openstack(request)
         if host == "gitlab.test":
             return self.gitlab(request)
+        if host == "hook.test":
+            self.hooks.append(json.loads(request.content))
+            return httpx.Response(self.hook_status, text="ok")
         if host == "example.test":
             if request.url.path == "/moved":
                 return httpx.Response(302, headers={"location": "http://internal.test/admin"})
