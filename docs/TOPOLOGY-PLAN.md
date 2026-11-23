@@ -1,6 +1,6 @@
 # Topology nhiều tầng (bản phác, chờ góp ý)
 
-Bản 2026-11-24, chưa làm code. Đã chốt: topology là dữ kiện có thời hạn, mức tin theo từng cạnh (mục Nguyên tắc), và 5 điểm ở mục Đã chốt. Mục 9 trong kế hoạch theo tài liệu Cloud Operations (`INCIDENTS-PLAN.md`). Cần khớp với data model
+Bản 2026-11-24. Giai đoạn A đã làm (`IMPROVEMENTS.md` Đợt 47). Đã chốt: topology là dữ kiện có thời hạn, mức tin theo từng cạnh (mục Nguyên tắc), và 5 điểm ở mục Đã chốt. Mục 9 trong kế hoạch theo tài liệu Cloud Operations (`INCIDENTS-PLAN.md`). Cần khớp với data model
 nhóm Cloud Operations đang làm trước khi chốt; các quyết định ở mục **Đã chốt**, phần chưa quyết ở **Còn mở**.
 
 ## Vì sao cần
@@ -63,12 +63,12 @@ Thực thể không mang mức tin; mức tin nằm ở cạnh.
 | `member_of` | node → cluster, pod → workload (Deployment/StatefulSet), VM → project |
 | `depends_on` | workload → service khác (từ Service/Endpoint, khai tay hoặc trace sau này) |
 
-Mỗi cạnh có `source`, `how`: `api` (đọc thẳng, ví dụ `spec.nodeName`), `match` (suy ra bằng khoá chung, ví dụ `providerID` của node
-khớp UUID máy ảo), `manual`; và khoảng hiệu lực `valid_from`, `valid_to` (NULL = đang đúng), `last_seen`. Quét lại thấy cạnh đổi thì đóng
+Mỗi cạnh có `source`, `how`: `api` (tham chiếu thẳng trong dữ liệu API: `providerID` của node trỏ UUID máy ảo, `volumeHandle` của PV,
+volume gắn vào máy ảo), `match` (suy ra, ví dụ trùng IP nội bộ; luôn là gợi ý), `manual`; và khoảng hiệu lực `valid_from`, `valid_to` (NULL = đang đúng), `last_seen`. Quét lại thấy cạnh đổi thì đóng
 cạnh cũ (`valid_to`) và mở cạnh mới, không ghi đè, để trả lời được "lúc cảnh báo bắn, pod chạy trên node nào". Cạnh `match` hiện kèm cách
 khớp để người kiểm được.
 
-**Ánh xạ cảnh báo → thực thể** (`alert_entity`): từ nhãn `instance`, `node`, `pod`, `namespace`, `persistentvolumeclaim`, `device`
+**Ánh xạ cảnh báo → thực thể** (tính lúc đọc, không lưu bảng): từ nhãn `instance`, `node`, `pod`, `namespace`, `persistentvolumeclaim`, `device`
 của cảnh báo. 104/133 cảnh báo có `instance`, 66 có `pod`, nên phần lớn cảnh báo gắn được ít nhất một thực thể.
 
 ## Tầng và nguồn

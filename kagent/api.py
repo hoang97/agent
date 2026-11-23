@@ -1874,6 +1874,23 @@ def alert_settings_put(body: dict, t: Tenant = Depends(current_tenant), conn=Dep
     return cfg
 
 
+@app.get("/api/topology/status")
+def topology_status(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    from . import topology
+    counts = {r["type"]: r["n"] for r in conn.execute("SELECT type, count(*) n FROM topo_entity WHERE tenant_id=? AND gone_at IS NULL GROUP BY type",
+                                                      (t.tenant_id,))}
+    return {"last_scan": topology.last_scan(conn, t.tenant_id), "running": topology.running(t.tenant_id), "entities": counts,
+            "sources": [r["name"] for r in topology.sources(conn, t.tenant_id)], "full_hours": topology.FULL_HOURS,
+            "incident_minutes": topology.INCIDENT_MINUTES, "can_manage": t.is_admin}
+
+
+@app.post("/api/topology/scan")
+def topology_scan(t: Tenant = Depends(current_tenant)):
+    from . import topology
+    t.require_admin()
+    return {"started": topology.start(t.tenant_id, "manual")}
+
+
 @app.get("/api/notify-settings")
 def notify_get(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     t.require_admin()

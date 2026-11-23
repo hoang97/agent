@@ -486,3 +486,26 @@ bộ; lỗi control plane là ảnh hưởng khách hàng; mất dữ liệu lu�
 - **Chưa làm (khoảng trống):** chưa có mapping khách hàng ↔ project (module CRM trên CMP trong biên bản họp), nên chưa tự điền được số
   khách hàng bị ảnh hưởng; có mapping thì gợi ý theo project của tài nguyên trong cảnh báo thay vì theo mức cảnh báo.
 
+## Đợt 47 — 2026-11-24: topology nhiều tầng, giai đoạn A
+
+Theo `TOPOLOGY-PLAN.md` (đã chốt: topology là dữ kiện có thời hạn, mức tin theo cạnh; tên kiểu và khoá là tạm, đổi theo data model chung).
+- **`kagent/topology.py`, bảng `topo_entity`, `topo_edge`, `topo_scan`:** quét k8s (cluster, node, PV, PVC) và OpenStack (máy ảo, volume,
+  project; hypervisor và backend lưu trữ khi tài khoản có quyền admin, không có thì ghi tầng bị bỏ qua) bằng công cụ đọc đang bật của kết
+  nối dùng chung, tài khoản bot, audit `decision='system'`. Gọi connector trực tiếp như lúc lấy cảnh báo, không qua classifier.
+- **Cạnh có thời hạn:** đổi thì đóng cạnh cũ (`valid_to`) và mở cạnh mới; thực thể không còn trong danh sách đầy đủ thì `gone_at` và đóng
+  cạnh. Danh sách bị cắt (kubectl cắt đầu ra, quá 20 trang Nova/Cinder) thì không đánh dấu gì biến mất.
+- **Cách nối:** node → máy ảo theo `providerID`, PV → volume theo `volumeHandle` của Cinder CSI: tham chiếu thẳng nên `how='api'`; node
+  không có `providerID` thì nối theo IP nội bộ trùng (`match`, luôn là gợi ý).
+- **Mức tin (`trust`):** cạnh tin cậy tại t khi khoảng hiệu lực bao trùm t và lần thấy gần nhất cách t không quá ngưỡng theo loại cạnh
+  (`TRUST_HOURS`, đề xuất chờ người vận hành xác nhận); còn lại là gợi ý kèm lệnh đọc trực tiếp trong `verify`.
+- **Công cụ `data.topology` (R0, local):** từ nhãn cảnh báo (`node`, `instance`, `persistentvolumeclaim`+`namespace`; `pod` thì trả lệnh
+  `get pod -o wide`) đi xuống các tầng dưới tại `at`, kèm thực thể dùng chung host/backend/máy ảo và tầng bị bỏ qua. Tên do người đặt
+  (máy ảo, volume) không khớp mẫu an toàn thì thay bằng id, để chữ tự do không vào context. Ánh xạ cảnh báo → thực thể tính lúc đọc,
+  không lưu bảng `alert_entity` như bản phác.
+- **`data.recent_changes`** có thêm `topology_changes` (cạnh đổi trong khoảng, không tính lần đầu thấy). Prompt điều tra gọi `data.topology` trước.
+- **Lịch quét:** 6 giờ một lần; sự cố mở không sớm hơn lần quét gần nhất mà lần đó đã cách hơn 15 phút thì quét lại một lần. Cài đặt → Cảnh
+  báo có thẻ Topology (nguồn, tầng bị bỏ qua, số thực thể, Quét ngay).
+- **Quét thử trên bản sao DB (tenant devtest):** 696 máy ảo, 4266 volume, 6 hypervisor, 9 backend, 7 node (cả 7 nối máy ảo bằng
+  `providerID`), 21 PV; quét lại 25 giây. Lần đầu chỉ đọc được 1000 volume vì Cinder phân trang, đã thêm marker.
+- **Chưa làm (giai đoạn B):** gom cảnh báo theo tổ tiên chung, khoanh vùng ảnh hưởng trên thẻ Mức độ, màn đồ thị topology.
+

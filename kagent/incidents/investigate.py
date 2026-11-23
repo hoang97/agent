@@ -30,6 +30,8 @@ def ensure_conversation(conn, tenant_id: str, incident_id: str, user: str) -> st
 
 INVESTIGATE_TASK = """Điều tra sự cố từ các cảnh báo dưới đây. Chỉ dùng công cụ đọc (kubectl_read, Prometheus, log...) để tìm
 nguyên nhân gốc: trạng thái pod/deployment/node, sự kiện, metric liên quan quanh thời điểm cảnh báo bắt đầu, log lỗi.
+Trước hết gọi data.topology với labels của cảnh báo và at={started} để biết các tầng bên dưới (node, máy ảo, host, volume, backend
+lưu trữ) và thực thể dùng chung tầng đó; cạnh "gợi ý" phải đọc lại theo verify trước khi dùng làm bằng chứng.
 Luôn đối chiếu với thay đổi ngay trước lúc lỗi:
 - data.recent_changes với around={started}, env={env}: lệnh ghi đã chạy qua kagent;
 - thay đổi làm ngoài kagent, với kết nối đang có: rollout history và thời điểm tạo ReplicaSet của workload liên quan, helm history

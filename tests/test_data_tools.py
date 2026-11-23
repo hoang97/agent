@@ -86,7 +86,7 @@ def test_builtin_data_connection_exists_for_every_tenant(users):
     with db.session() as conn:
         for t in conn.execute("SELECT id FROM tenant").fetchall():
             tools = {r["tool"]: (r["enabled"], r["risk_tier"]) for r in conn.execute("SELECT tool, enabled, risk_tier FROM tool_registry WHERE tenant_id=? AND template='data'", (t["id"],))}
-            assert tools == {"data.query": (1, "R0"), "data.script": (1, "R4"), "data.propose_tool": (1, "R2"), "data.recent_changes": (1, "R0")}
+            assert tools == {"data.query": (1, "R0"), "data.script": (1, "R4"), "data.propose_tool": (1, "R2"), "data.recent_changes": (1, "R0"), "data.topology": (1, "R0")}
 
 
 def _audit(conn, tenant, uid, tool, at, status="ok", decision="auto", env="dev", args=None):

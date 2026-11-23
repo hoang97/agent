@@ -301,6 +301,24 @@ CREATE TABLE IF NOT EXISTS incident_notice (
   PRIMARY KEY (tenant_id, incident_id, key)
 );
 
+-- Topology nhiều tầng (topology.py): thực thể, cạnh có khoảng hiệu lực (valid_to NULL = đang đúng), lần quét.
+-- how: api (tham chiếu thẳng trong dữ liệu API) | match (suy từ IP trùng) | manual. Tên kiểu và khoá là tạm, chờ data model chung.
+CREATE TABLE IF NOT EXISTS topo_entity (
+  tenant_id TEXT NOT NULL, id TEXT NOT NULL, type TEXT NOT NULL, name TEXT NOT NULL, attrs TEXT NOT NULL DEFAULT '{}', source TEXT NOT NULL,
+  first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, gone_at TEXT, PRIMARY KEY (tenant_id, id)
+);
+CREATE INDEX IF NOT EXISTS ix_topo_entity_type ON topo_entity(tenant_id, type);
+CREATE TABLE IF NOT EXISTS topo_edge (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT NOT NULL, src TEXT NOT NULL, rel TEXT NOT NULL, dst TEXT NOT NULL, how TEXT NOT NULL,
+  source TEXT NOT NULL, valid_from TEXT NOT NULL, valid_to TEXT, last_seen TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_topo_edge_src ON topo_edge(tenant_id, src, valid_to);
+CREATE INDEX IF NOT EXISTS ix_topo_edge_dst ON topo_edge(tenant_id, dst, valid_to);
+CREATE TABLE IF NOT EXISTS topo_scan (
+  tenant_id TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, reason TEXT NOT NULL, result TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_topo_scan ON topo_scan(tenant_id, started_at);
+
 -- Bằng chứng một loại hoàn tác chạy được: source = revert (hoàn tác thật thành công) | drill (diễn tập ở dev/staging).
 CREATE TABLE IF NOT EXISTS undo_evidence (
   id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT NOT NULL, recipe TEXT NOT NULL, source TEXT NOT NULL, change_id TEXT, at TEXT NOT NULL

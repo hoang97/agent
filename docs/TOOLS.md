@@ -16,7 +16,7 @@ Agent chỉ dùng công cụ thật. Mỗi công cụ được tạo từ một 
 | `alertmanager` | list_alerts (gom theo alertname, severity), list_silences (R0), create_silence R3, expire_silence R3 (cả hai có chạy thử) | url, token hoặc username/password, tenant_header |
 | `elasticsearch` (Kibana) | search_logs R1, list_indices R0, delete_index R3 | url Elasticsearch hoặc Kibana (đi qua Console proxy), api_key hoặc username/password, index_pattern, ui_url (địa chỉ Kibana) |
 | `web` | fetch_page R0 | allowed_domains, max_chars |
-| `data` (nội bộ, tự có ở mọi tenant) | query R0 (lọc kết quả đã lưu theo result_id), recent_changes R0 (lệnh ghi đã chạy thành công qua kagent quanh một thời điểm), script R4 (Python trong sandbox, luôn cần duyệt) | — |
+| `data` (nội bộ, tự có ở mọi tenant) | query R0 (lọc kết quả đã lưu theo result_id), recent_changes R0 (lệnh ghi đã chạy thành công qua kagent và thay đổi topology quanh một thời điểm), topology R0 (các tầng dưới của thực thể trong cảnh báo, mức tin theo cạnh), script R4 (Python trong sandbox, luôn cần duyệt) | — |
 | `http_api` | get R1, post R3 | base_url, auth_header, auth_value, allowed_paths |
 | `openstack` | list_services R0, api_read R1, api_write R3, api_admin R4 (xem [OpenStack](#openstack)) | config (clouds.yaml hoặc openrc), cloud, password, region, interface, ca_cert |
 | `gitlab` | list_projects, list_pipelines, get_pipeline, list_deployments, list_commits, list_merge_requests, list_issues (R0); job_log, get_merge_request, get_file, api_read (R1; api_read chặn biến CI, token, khoá, webhook, runner); retry_pipeline, cancel_pipeline, retry_job, play_job, create_note (R3); api_admin R4 | url (gồm cả đường dẫn con nếu GitLab cài dưới /gitlab), token (scope read_api để đọc, api + role Developer để ghi), default_project |
@@ -250,6 +250,8 @@ Bật ở **Cài đặt → Cảnh báo** (tenant admin). Nguồn là các kết
 
    Không bị ép hỏi thì gateway áp ma trận như mọi lệnh. Ô auto mode (ví dụ R3 ở dev) được classifier xét theo `auto_rules`, tức luật tự xử lý do admin viết. Luật này đứng ở chỗ lời người dùng, kèm tên và nhãn của cảnh báo. Classifier không đọc báo cáo, log hay kết quả điều tra, vì những thứ đó viết từ dữ liệu người ngoài ghi được. Luồng này không có agent để thử cách khác, nên classifier chặn thì chuyển ngay thành yêu cầu duyệt. Độ tin của báo cáo chỉ để tham khảo, không còn quyết định tự chạy.
 5. **Xác minh:** lệnh chạy xong (tự động hoặc sau khi duyệt), sau `verify_minutes` kagent xem cảnh báo của sự cố đã hết chưa. Hết thì "đã xử lý"; còn thì "cần người xử lý", và lần sau không tự chạy nữa.
+
+**Topology:** kagent quét k8s và OpenStack của kết nối dùng chung 6 giờ một lần, và quét lại khi có sự cố mới (lần quét gần nhất cách hơn 15 phút); tầng cần quyền admin OpenStack (hypervisor, backend lưu trữ) chỉ dựng khi tài khoản có quyền. Công cụ `data.topology` trả cạnh "tin cậy" hoặc "gợi ý" kèm lệnh đọc lại; xem `docs/TOPOLOGY-PLAN.md`.
 
 **Thông báo:** Cài đặt → Cảnh báo có mục webhook (tenant admin): sự cố mới, lệnh chờ duyệt, sự cố cần người được POST JSON có trường `text` kèm link về trang sự cố; chỉ báo việc xảy ra sau lúc bật, mỗi việc một lần.
 

@@ -711,6 +711,27 @@ async function alertSettingsView(main) {
     info.can_manage ? h("div", { class: "row" }, h("button", { type: "button", onclick: save }, "Lưu"), h("button", { type: "button", class: "ghost", onclick: pollNow }, "Lấy cảnh báo ngay"))
       : h("div", { class: "small muted" }, "Chỉ tenant admin được đổi cài đặt này.")));
   if (info.can_manage) addKids(main, await notifyCard());
+  addKids(main, await topologyCard());
+}
+
+const TOPO_TYPES = { "k8s.cluster": "cluster", "k8s.node": "node k8s", "k8s.pv": "PV", "k8s.pvc": "PVC", "os.server": "máy ảo", "os.volume": "volume",
+  "os.project": "project", "os.hypervisor": "hypervisor", "os.backend": "backend lưu trữ" };
+
+// Trạng thái quét topology (topology.py): nguồn, tầng bị bỏ qua và vì sao, số thực thể; màn đồ thị là giai đoạn B.
+async function topologyCard() {
+  const st = await api("GET", "/api/topology/status");
+  const last = st.last_scan;
+  const scanNow = guard(async () => { const r = await api("POST", "/api/topology/scan"); toast(r.started ? "Đã bắt đầu quét" : "Đang quét"); });
+  return h("div", { class: "card" }, h("h3", {}, "Topology"),
+    h("p", { class: "small" }, `kagent quét k8s và OpenStack của các kết nối dùng chung ${st.full_hours} giờ một lần, và quét lại khi có sự cố mới mà lần quét gần nhất đã cách hơn ${st.incident_minutes} phút. Topology đã lưu chỉ là gợi ý cho điều tra: cạnh cũ hoặc suy từ IP phải được đọc lại trực tiếp trước khi dùng làm bằng chứng.`),
+    !st.sources.length ? h("p", { class: "small muted" }, "Chưa có kết nối k8s hoặc OpenStack dùng chung.")
+      : h("div", {}, h("p", { class: "small" }, last ? `Quét gần nhất ${hmd(last.started_at)} (${last.reason})${st.running ? " · đang quét" : ""}` : "Chưa quét lần nào."),
+        last && h("ul", { class: "small" }, Object.entries(last.sources).map(([name, r]) => h("li", {}, h("strong", {}, name), " ",
+          r.status === "error" ? h("span", { class: "warn-text" }, r.error)
+            : Object.entries(r.layers || {}).map(([layer, text]) => h("span", { class: "pill " + (text === "ok" ? "ok" : "warn"), title: text }, `${layer}: ${text === "ok" ? "ok" : text.split(":")[0]}`)),
+          r.status !== "error" && Object.entries(r.layers || {}).filter(([, text]) => text !== "ok").map(([layer, text]) => h("div", { class: "small muted" }, `${layer}: ${text}`))))),
+        Object.keys(st.entities).length > 0 && h("p", { class: "small" }, Object.entries(st.entities).map(([k, n]) => `${n} ${TOPO_TYPES[k] || k}`).join(" · ")),
+        st.can_manage && h("button", { type: "button", class: "ghost small-btn", onclick: scanNow }, "Quét ngay")));
 }
 
 const NOTICE_TONE = { sent: "ok", failed: "bad", sending: "", skipped: "" };

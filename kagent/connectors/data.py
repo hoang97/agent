@@ -165,11 +165,31 @@ def recent_changes(p, args):
         rows = conn.execute(sql + " ORDER BY a.at DESC LIMIT ?", (*params, limit + 1)).fetchall()
     changes = [{"at": r["at"], "tool": r["tool"], "env": r["env"], "by": r["username"] or "?",
                 "how": "tự chạy" if r["decision"] == "auto" else "người duyệt", "args": r["args"][:400]} for r in rows[:limit]]
-    out = {"window": {"from": start, "to": end}, "count": len(changes), "changes": changes,
-           "note": "Chỉ gồm lệnh chạy qua kagent; thay đổi làm trực tiếp trên hệ thống (CI/CD, kubectl tay, Horizon) phải xem ở nguồn đó."}
+    from .. import topology as topo
+    with db.session() as conn:
+        moved = topo.changes(conn, p["_tenant_id"], start, end)
+    out = {"window": {"from": start, "to": end}, "count": len(changes), "changes": changes, "topology_changes": moved,
+           "note": "Gồm lệnh chạy qua kagent và thay đổi topology thấy giữa các lần quét; thay đổi làm trực tiếp trên hệ thống "
+                   "(CI/CD, kubectl tay, Horizon) phải xem ở nguồn đó."}
     if len(rows) > limit:
         out["truncated"] = True
     return out
+
+
+def topology(p, args):
+    from .. import topology as topo
+    labels = args.get("labels")
+    if labels is not None and not isinstance(labels, dict):
+        raise ConnectorError("labels phải là object nhãn của cảnh báo")
+    entity = str(args["entity"]).strip() if args.get("entity") else None
+    if not labels and not entity:
+        raise ConnectorError("cần labels hoặc entity")
+    try:
+        with db.session() as conn:
+            return topo.neighbors(conn, p["_tenant_id"], entity=entity, labels=labels or None, at=args.get("at") or None,
+                                  depth=_int(args, "depth", 4, 6))
+    except ValueError as exc:
+        raise ConnectorError("at phải là thời điểm ISO 8601") from exc
 
 
 def propose_tool(p, args):

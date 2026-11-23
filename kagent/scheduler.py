@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import threading
 
-from . import compiler, db, dedup, gateway, incidents, learning, lint, results, sources, undo
+from . import compiler, db, dedup, gateway, incidents, learning, lint, results, sources, topology, undo
 from .config import settings
 
 log = logging.getLogger("kagent.scheduler")
@@ -32,6 +32,7 @@ def alert_tick() -> None:
     with db.session() as conn:
         incidents.tick(conn)
         undo.tick(conn)  # cùng nhịp với cảnh báo: kiểm tra sau khi chạy dựa vào cảnh báo mới vừa lấy về
+        topology.tick(conn)  # cùng nhịp: sự cố mới mở là lý do quét lại (luồng riêng)
 
 
 class Scheduler:

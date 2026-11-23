@@ -58,6 +58,10 @@ class Infra:
         self.os_calls: list[tuple[str, str, object]] = []
         self.gl_notes: dict[int, dict] = {}
         self.gl_calls: list[tuple[str, str]] = []
+        # Topology: hàng của get nodes/pv -o custom-columns theo tên cột; volume của Cinder.
+        self.k8s_nodes: list[dict] = []
+        self.k8s_pvs: list[dict] = []
+        self.os_volumes = [{"id": "v1", "status": "in-use"}]
         self.hooks: list[dict] = []  # thân JSON webhook nhận được; hook_status giả lập máy nhận lỗi
         self.hook_status = 200
         self.os_servers = {"s1": {"id": "s1", "name": "web-1", "status": "ACTIVE"}, "s2": {"id": "s2", "name": "db-1", "status": "ERROR"}}
@@ -217,7 +221,12 @@ class Infra:
         if path == "/v2.0/ports":
             return self._json({"ports": [{"id": "pt1", "device_id": "s1", "status": "ACTIVE"}]})
         if path == "/v3/p1/volumes/detail":
-            return self._json({"volumes": [{"id": "v1", "status": "in-use"}], "microversion": r.headers.get("openstack-api-version")})
+            vols = self.os_volumes
+            if r.url.params.get("marker"):
+                vols = vols[[v["id"] for v in vols].index(r.url.params["marker"]) + 1:]
+            if r.url.params.get("limit"):
+                vols = vols[:int(r.url.params["limit"])]
+            return self._json({"volumes": vols, "microversion": r.headers.get("openstack-api-version")})
         return self._json({"itemNotFound": {"message": "not found"}}, 404)
 
     # --- Kubernetes ---
@@ -567,6 +576,11 @@ def kubectl_runner(infra: "Infra"):
                 if not dry:
                     del deps[name]
                 return 0, f"deployment.apps/{name}\n" if as_name else f'deployment.apps "{name}" deleted{suffix}\n', "", False
+            case ["get", "nodes" | "pv", "-o", spec] if spec.startswith("custom-columns="):
+                cols = [c.split(":", 1)[0] for c in spec.removeprefix("custom-columns=").split(",")]
+                rows = infra.k8s_nodes if cmd[1] == "nodes" else infra.k8s_pvs
+                lines = ["   ".join(cols)] + ["   ".join(str(r.get(c) or "<none>") for c in cols) for r in rows]
+                return 0, "\n".join(lines) + "\n", "", False
             case ["get", "pods" | "pod" | "po", *_]:
                 rows = [f"{d}-{i}   1/1     Running   0          1d" for d, n in deps.items() for i in range(n)]
                 return 0, "NAME    READY   STATUS    RESTARTS   AGE\n" + "\n".join(rows) + "\n", "", False

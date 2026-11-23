@@ -44,6 +44,23 @@ tools:
         contains: {type: string}
         limit: {type: integer}
 
+  - name: topology
+    description: >-
+      Topology đã quét (k8s, OpenStack): đi từ thực thể của cảnh báo xuống các tầng dưới (node → máy ảo → host, volume → backend lưu trữ)
+      và thực thể khác dùng chung tầng dưới đó. Truyền labels của cảnh báo (node, instance, pod, namespace, persistentvolumeclaim) hoặc entity.
+      at là thời điểm cần hỏi (mặc định bây giờ; khi điều tra dùng lúc cảnh báo bắt đầu). Mỗi cạnh có trust: "tin cậy" hoặc "gợi ý";
+      cạnh gợi ý phải đọc lại bằng lệnh trong verify trước khi dùng làm căn cứ.
+    handler: data:topology
+    action_class: read
+    data_sensitivity: internal
+    local: true
+    input_schema:
+      properties:
+        labels: {type: object}
+        entity: {type: string}
+        at: {type: string}
+        depth: {type: integer}
+
   - name: script
     description: >-
       Chạy script Python ngắn trên các kết quả đã lưu khi bộ lọc không đủ (ví dụ trích request_id bằng regex rồi đếm).
