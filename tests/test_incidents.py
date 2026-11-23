@@ -300,7 +300,7 @@ def test_confident_action_runs_then_verified(flow, users, infra, monkeypatch):
     assert "Được khởi động lại" in judged["user_intent"][0] and "HighCPU" in judged["user_intent"][1] and "image lỗi" not in json.dumps(judged)
     inc = flow.get(f"/api/incidents/{iid}").json()
     assert inc["stage"] == "verifying", inc["actions"][0]["reasons"]
-    assert inc["steps"] == [{"tool": "k8s.kubectl_read", "args": {"command": "get pods -n default"}, "status": "ok", "untrusted": False}]
+    assert inc["steps"] == [{"tool": "k8s.kubectl_read", "args": {"command": "get pods -n default"}, "status": "ok", "untrusted": False, "link": None}]
     assert inc["title"] == "web CrashLoop sau deploy" and inc["confidence"] == 0.9
     assert inc["actions"][0]["status"] == "ok" and inc["actions"][0]["auto"] and "restarted" in inc["actions"][0]["result"]
     assert inc["steps"] and all(s["tool"] != "k8s.kubectl_write" for s in inc["steps"])  # điều tra chỉ đọc
@@ -1122,6 +1122,24 @@ def test_stats_mttr_from_first_alert_and_levels(flow, users, infra):
     assert st["levels"]["1"] == 2 and st["accuracy"] is None and st["reviews"]["total"] == 0
     assert flow.get("/api/incidents/stats?env=prod").json()["incidents"] == 0
     assert flow.get("/api/incidents/stats?days=0").status_code == 400
+
+
+def test_incident_page_links_steps_and_whys_to_source_tool(flow, users, infra):
+    iid = _web_incident(users)
+
+    class Querying(FiveWhys):
+        def run_agent(self, task, context, tool_list, call_tool, **kw):
+            call_tool("grafana.prometheus_query", {"expr": "rate(cpu[5m])"})
+            call_tool("k8s.kubectl_read", {"command": "get pods -n web"})
+            return {"answer": "xong", "tokens": 0}
+
+    llm.set_provider(Querying([{**TECH, "refs": ["S1", "S2"]}]))
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+    d = flow.get(f"/api/incidents/{iid}").json()
+    linked = [s for s in d["steps"] if s["link"]]
+    assert [s["tool"] for s in linked] == ["grafana.prometheus_query"] and "/explore?" in linked[0]["link"]["url"]
+    assert [x["label"] for x in d["rootcause"]["whys"][0]["links"]] == ["Mở trong Grafana Explore"]
 
 
 def test_same_cause_recurrence_downgrades_old_incident_and_blames_lessons(flow, users, infra):

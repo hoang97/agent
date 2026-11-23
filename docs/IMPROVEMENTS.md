@@ -441,3 +441,16 @@ có). kagent có xác nhận chuỗi 5 Whys nhưng chưa tổng hợp thành t�
 - **Số đầu tiên (tenant devtest, 30 ngày tới 23/11):** 59 sự cố, 47 đã điều tra (68 lượt), MTTR trung vị 11,7 phút (trung bình 190 phút vì
   vài ca kéo dài nhiều ngày), có nhận định sau trung vị 4,7 phút, cả 59 ở mức 1, chưa lượt nào được chấm.
 
+## Đợt 44 — 2026-11-23: link bằng chứng tới công cụ gốc
+
+Biên bản MVP Cloud Operations yêu cầu "show ra các bằng chứng, link query của kibana, action log, victoria metrics"; Gartner gọi là
+contextual linking. Trước đây bằng chứng chỉ là kết quả lưu trong kagent, người muốn tự xem phải gõ lại truy vấn.
+- **`kagent/links.py`:** từ (công cụ, tham số đã chạy, giờ bắt đầu lượt) dựng link: Prometheus `/graph?g0.expr=…` (khoảng = `minutes` + 10
+  phút sau mốc, hoặc `time` của truy vấn tức thời), Grafana Explore (`left` gồm datasource và PromQL, khoảng theo `range_minutes`),
+  Kibana Discover (`_g` thời gian, `_a` query Lucene, mã hoá rison). Bước không có giờ riêng nên mốc là lúc bắt đầu lượt điều tra.
+- **`ui_url` của kết nối** (Prometheus, Grafana, Elasticsearch): địa chỉ trình duyệt khi url là địa chỉ nội bộ; chỉ nhận http/https.
+  Elasticsearch chỉ có link khi địa chỉ là Kibana.
+- **Trang sự cố:** mục "lệnh đọc và bằng chứng" liệt kê các bước mở được trên công cụ gốc; mắt xích 5 Whys có link của các bước nó trích.
+- **Trên dữ liệu thật:** 476/532 bước Prometheus của các lượt điều tra có link (phần còn lại là list_alerts, list_targets…); 40 bước
+  Elasticsearch chưa có vì kết nối trỏ vào Elasticsearch, cần điền `ui_url`. Action log của CMP chưa có kết nối nên chưa có link.
+

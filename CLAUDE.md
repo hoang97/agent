@@ -37,6 +37,7 @@ Thu hẹp thêm bằng `-k` hoặc `--lf`.
 | `entities.py` | `test_entities.py` |
 | `api.py` | `test_api.py test_session_state.py` |
 | `incidents/*` | `test_incidents.py` |
+| `links.py` | `test_links.py test_incidents.py` |
 | `proxy.py`, `net.py` | `test_proxy.py` |
 | chỉ `static/*.js`, `*.css` | không cần pytest: `node --check`, rồi xem trên trình duyệt |
 

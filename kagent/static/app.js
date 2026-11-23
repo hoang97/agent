@@ -380,7 +380,8 @@ function rootCauseBody(rc, id, act, openIncident) {
     rc.recurred && h("p", { class: "small" }, "Nguyên nhân lặp lại ở ", openIncident(rc.recurred)),
     rc.whys.length > 0 && h("div", {}, h("div", { class: "ix-cause-h" }, "5 Whys"),
       h("ol", { class: "ix-whys" }, rc.whys.map((w) => h("li", {}, h("div", { class: "small muted" }, w.question), h("div", {}, inlineMd(w.answer), " ", tag(w),
-        w.weakness && h("span", { class: "pill ok" }, "điểm yếu sửa được")))))),
+        w.weakness && h("span", { class: "pill ok" }, "điểm yếu sửa được")),
+        (w.links || []).length > 0 && h("div", { class: "small" }, w.links.map((l) => srcLink(l))))))),
     rc.whys.length > 0 && rc.stop === "no_evidence" && h("p", { class: "small" }, "Chuỗi dừng vì hết căn cứ", rc.next_question ? `; cần người trả lời: ${rc.next_question}` : "."),
     rc.factors.length > 0 && h("div", {}, h("div", { class: "ix-cause-h" }, "Yếu tố góp phần"),
       h("ul", {}, rc.factors.map((f) => h("li", {}, `${f.label}: `, inlineMd(f.text), " ", !f.grounded && h("span", { class: "pill warn" }, "giả thuyết"))))),
@@ -388,6 +389,9 @@ function rootCauseBody(rc, id, act, openIncident) {
     rc.confirmed_at && h("p", { class: "small" }, `${rc.confirmed_by || "?"} xác nhận lúc ${hmd(rc.confirmed_at)}`),
     form);
 }
+
+// Link tới Prometheus, Grafana Explore, Kibana Discover dựng từ tham số đã chạy (links.py); mở tab mới, không gửi referrer.
+const srcLink = (l) => h("a", { href: l.url, target: "_blank", rel: "noopener noreferrer", class: "ix-src" }, l.label + " ↗");
 
 const REVIEW_TONE = { correct: "ok", partial: "warn", wrong: "bad" };
 
@@ -613,6 +617,9 @@ async function incidentDetail(main, id) {
         reviewBody(d.review, id, act),
         h("details", {}, h("summary", {}, `${c.steps} lệnh đọc và bằng chứng`),
           c.evidence.length ? h("ul", { class: "small" }, c.evidence.map((e) => h("li", {}, e))) : h("p", { class: "small" }, "Không có bằng chứng được ghi."),
+          d.steps.some((st) => st.link) && h("div", {}, h("div", { class: "ix-cause-h" }, "Mở lại truy vấn trên công cụ gốc"),
+            h("ul", { class: "small ix-links" }, d.steps.filter((st) => st.link).map((st) => h("li", {}, srcLink(st.link), " ",
+              h("code", { title: JSON.stringify(st.args) }, (st.args.expr || st.args.query || st.tool).slice(0, 120)))))),
           d.conversation_id && h("a", { href: "#", class: "small", onclick: (e) => { e.preventDefault(); go("chat", d.conversation_id); } }, "Từng lệnh và câu trả lời đầy đủ ở hội thoại điều tra"))]
         : !busyNow && h("p", { class: "small muted" }, "Chưa điều tra."));
 

@@ -503,3 +503,5 @@ input.narrow { width: 70px; }
 .undo-drift ul { margin: 4px 0; padding-left: 18px; }
 .stop-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .stop-bar.paused { background: var(--bad-bg); border-color: var(--bad); }
+.ix-src { margin-right: 10px; white-space: nowrap; }
+.ix-links li { margin: 2px 0; overflow-wrap: anywhere; }

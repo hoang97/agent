@@ -10,6 +10,7 @@ fields:
   - {name: username, type: string, description: Tài khoản basic auth nếu không dùng token}
   - {name: password, type: secret, description: Mật khẩu basic auth}
   - {name: tenant_header, type: string, description: "Giá trị header X-Scope-OrgID cho Mimir/Cortex đa tenant"}
+  - {name: ui_url, type: url, description: "Địa chỉ giao diện web để mở lại truy vấn (mặc định là url); để trống nếu url mở được trên trình duyệt"}
   - {name: verify_tls, type: boolean, default: true}
   - {name: ca_cert, type: text, description: Chứng chỉ CA dạng PEM nếu dùng CA riêng}
   - {name: proxy, type: string, default: auto, description: "auto = theo file PAC ở Cài đặt → Proxy; none = đi thẳng; hoặc http://host:port"}

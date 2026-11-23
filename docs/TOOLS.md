@@ -11,10 +11,10 @@ Agent chỉ dùng công cụ thật. Mỗi công cụ được tạo từ một 
 | Template | Công cụ (mức rủi ro) | Tham số chính |
 | --- | --- | --- |
 | `k8s` Kubernetes | kubectl_read R1, kubectl_write R3 (có chạy thử), kubectl_admin R4 (xem [Quyền Kubernetes](#quyền-kubernetes-và-công-cụ-kubectl)); helm_read R1 (kèm helm diff, helm drift), helm_write R3 (chạy thử bằng helm diff), helm_admin R4 (xem [Helm](#helm)) | kubeconfig (+ context) hoặc api_url + token của tài khoản quản trị, ca_cert, namespace (mặc định của kubectl). Kubeconfig phải nhúng sẵn chứng chỉ (`kubectl config view --raw --minify --flatten`); dùng token hoặc chứng chỉ client, không hỗ trợ exec/auth-provider; api_url, token điền tay được ưu tiên hơn kubeconfig |
-| `grafana` | search_dashboards, list_datasources, prometheus_query, list_alerts (R0), create_silence R3 | url, token service account, default_datasource_uid |
-| `prometheus` (cả Mimir, Thanos, VictoriaMetrics) | query, query_range, list_alerts, list_rules, list_targets, label_values, metric_metadata (R0). query_range trả min/max/avg/last và vài điểm mẫu thay vì toàn bộ chuỗi | url, token hoặc username/password, tenant_header (X-Scope-OrgID) |
+| `grafana` | search_dashboards, list_datasources, prometheus_query, list_alerts (R0), create_silence R3 | url, token service account, default_datasource_uid, ui_url |
+| `prometheus` (cả Mimir, Thanos, VictoriaMetrics) | query, query_range, list_alerts, list_rules, list_targets, label_values, metric_metadata (R0). query_range trả min/max/avg/last và vài điểm mẫu thay vì toàn bộ chuỗi | url, token hoặc username/password, tenant_header (X-Scope-OrgID), ui_url |
 | `alertmanager` | list_alerts (gom theo alertname, severity), list_silences (R0), create_silence R3, expire_silence R3 (cả hai có chạy thử) | url, token hoặc username/password, tenant_header |
-| `elasticsearch` (Kibana) | search_logs R1, list_indices R0, delete_index R3 | url Elasticsearch hoặc Kibana (đi qua Console proxy), api_key hoặc username/password, index_pattern |
+| `elasticsearch` (Kibana) | search_logs R1, list_indices R0, delete_index R3 | url Elasticsearch hoặc Kibana (đi qua Console proxy), api_key hoặc username/password, index_pattern, ui_url (địa chỉ Kibana) |
 | `web` | fetch_page R0 | allowed_domains, max_chars |
 | `data` (nội bộ, tự có ở mọi tenant) | query R0 (lọc kết quả đã lưu theo result_id), recent_changes R0 (lệnh ghi đã chạy thành công qua kagent quanh một thời điểm), script R4 (Python trong sandbox, luôn cần duyệt) | — |
 | `http_api` | get R1, post R3 | base_url, auth_header, auth_value, allowed_paths |
@@ -23,6 +23,8 @@ Agent chỉ dùng công cụ thật. Mỗi công cụ được tạo từ một 
 | `postgres`, `mysql` | query R1 (chỉ đọc, 15 giây, 200 dòng), execute R3 (có chạy thử rồi rollback) | host, port, database, user, password |
 
 `python -m kagent.tools` in danh sách template, công cụ và mức rủi ro.
+
+`ui_url` (tuỳ chọn) là địa chỉ mở trên trình duyệt, dùng khi url là địa chỉ nội bộ chỉ kagent gọi được. Trang sự cố dùng nó để dựng link mở lại bước truy vấn của agent (`kagent/links.py`): Prometheus `/graph`, Grafana Explore (datasource và PromQL của bước), Kibana Discover (query Lucene và khoảng thời gian). Elasticsearch không có giao diện, nên chỉ có link khi `ui_url` là Kibana hoặc url là Kibana (cổng 5601 hay tên có chữ kibana). Link không mang token: người mở phải đăng nhập công cụ đó.
 
 ## Ai được làm gì
 

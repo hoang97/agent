@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 
-from .. import db
+from .. import db, links
 from . import actions, quality, rootcause, tasks
 from .common import BOT, STAGE_LABEL, IncidentError, _cmd, first_sentence, _worse, _is_write, _label, _method_label, _running, _shown_stage, describe, who
 from .config import settings
@@ -210,10 +210,11 @@ def get(conn, tenant_id: str, incident_id: str) -> dict:
             a["approval_status"] = req["status"] if req else None
     d["steps"] = []
     if d["episode_id"]:
-        ep = conn.execute("SELECT trace, output FROM episode WHERE id=?", (d["episode_id"],)).fetchone()
+        ep = conn.execute("SELECT trace, output, started_at FROM episode WHERE id=?", (d["episode_id"],)).fetchone()
         if ep:
             d["investigation"] = ep["output"]
-            d["steps"] = [{"tool": s["tool"], "args": s.get("args"), "status": s["status"], "untrusted": bool(s.get("untrusted"))}
+            d["steps"] = [{"tool": s["tool"], "args": s.get("args"), "status": s["status"], "untrusted": bool(s.get("untrusted")),
+                           "link": links.source_link(conn, tenant_id, s["tool"], s.get("args"), ep["started_at"]) if s["status"] == "ok" else None}
                           for s in json.loads(ep["trace"]) if s["type"] == "tool_call"]
     d["waiting"] = waiting(conn, d)
     d["state"] = state_of(d, any(w["kind"] == "approval" for w in d["waiting"]))
@@ -227,8 +228,12 @@ def get(conn, tenant_id: str, incident_id: str) -> dict:
     d["cause"] = {"text": d["cause"] or d["root_cause"], "at": d["cause_at"], "round": d["investigations"], "confidence": d["confidence"],
                   "evidence": d["evidence"], "steps": len(d["steps"]), "parts": cause_parts(d["cause"] or d["root_cause"])} if d["episode_id"] else None
     c = rootcause.chain(r)
+    started = conn.execute("SELECT started_at FROM episode WHERE id=?", (d["cause_episode"],)).fetchone() if d["cause_episode"] else None
+    step_links = lambda steps: [x for x in (links.source_link(conn, tenant_id, st["tool"], st.get("args"), started["started_at"] if started else None)
+                                            for st in steps or []) if x]
     d["rootcause"] = {**rootcause.level(conn, r), "whys": [{k: w.get(k) for k in ("question", "answer", "refs", "weakness", "by_user")}
-                                                          | {"grounded": bool(w.get("steps")) or "CB" in (w.get("refs") or [])} for w in c["whys"]],
+                                                          | {"grounded": bool(w.get("steps")) or "CB" in (w.get("refs") or []),
+                                                             "links": step_links(w.get("steps"))} for w in c["whys"]],
                       "stop": c["stop"], "next_question": c["next_question"],
                       "factors": [{"type": f["type"], "label": rootcause.FACTOR_LABEL[f["type"]], "text": f["text"], "grounded": bool(f.get("steps"))}
                                   for f in c["factors"]],

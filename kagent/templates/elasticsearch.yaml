@@ -8,6 +8,7 @@ fields:
   - {name: username, type: string, description: Tên tài khoản nếu không dùng API key}
   - {name: password, type: secret, description: Mật khẩu của tài khoản}
   - {name: index_pattern, type: string, default: "logs-*", description: Mẫu index mặc định khi tìm log}
+  - {name: ui_url, type: url, description: "Địa chỉ Kibana mở trên trình duyệt, để mở lại tìm kiếm trong Discover (url là Kibana thì để trống)"}
   - {name: verify_tls, type: boolean, default: true}
   - {name: ca_cert, type: text, description: Chứng chỉ CA dạng PEM nếu dùng CA riêng}
   - {name: proxy, type: string, default: auto, description: "auto = theo file PAC ở Cài đặt → Proxy; none = đi thẳng; hoặc http://host:port"}
