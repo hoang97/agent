@@ -377,6 +377,8 @@ def _verify(eid: str, source: str | None) -> dict | None:
 
 def start_points(conn, tenant_id: str, labels: dict) -> tuple[list[str], list[dict]]:
     """Thực thể ứng với nhãn cảnh báo; pod không lưu nên trả lệnh đọc trực tiếp để tìm node của pod."""
+    from .incidents.grouping import target_labels
+    labels = target_labels(labels)  # nhãn pod/instance của exporter (kube-state-metrics) là của exporter, không phải đối tượng lỗi
     found, reads = [], []
     node = _safe(labels.get("node"))
     inst = str(labels.get("instance") or "")
@@ -707,3 +709,67 @@ def incident_view(conn, tenant_id: str, incident_id: str) -> dict:
             "blast": blast(conn, tenant_id, sus["ids"][0], t) if sus["ids"] else None,
             "unmapped": unmapped, "verify": reads[:8], "last_scan": last["started_at"],
             "skipped_layers": {f"{src}:{layer}": text for src, r in last["sources"].items() for layer, text in (r.get("layers") or {}).items() if text != "ok"}}
+
+
+# ---------- gom cảnh báo theo tầng dưới chung (giai đoạn B3) ----------
+
+def _alert_reach(conn, tenant_id: str, labels: dict, at: str | None, cache: dict) -> list[tuple[str, list, set]]:
+    key = (json.dumps(labels, sort_keys=True), at)
+    if key not in cache:
+        t = _ts(at) or db.now()
+        out = []
+        for s in start_points(conn, tenant_id, labels)[0]:
+            chain, seen, _ = _walk(conn, tenant_id, [s], t, 5, _get(conn, tenant_id, [s]))
+            out.append((s, chain, seen))
+        cache[key] = out
+    return cache[key]
+
+
+def _path_trusted(chain: list[dict], start: str, target: str) -> bool:
+    """Mọi cạnh trên các đường từ start xuống target đều tin cậy."""
+    reach, changed = {target}, True
+    while changed:
+        changed = False
+        for e in chain:
+            if e["to"] in reach and e["from"] not in reach:
+                reach.add(e["from"])
+                changed = True
+    return start in reach and all(e["trust"] == "tin cậy" for e in chain if e["from"] in reach and e["to"] in reach)
+
+
+def _name(conn, tenant_id: str, eid: str) -> str:
+    r = _get(conn, tenant_id, [eid]).get(eid)
+    return f"{TYPE_LABEL.get(eid.split(':', 1)[0], '')} {r['name'] if r else eid.split(':', 1)[1]}".strip()
+
+
+def infra_match(conn, tenant_id: str, a: tuple[dict, str | None], others: list[tuple[dict, str | None]], cache: dict | None = None) -> tuple[bool, str] | None:
+    """Cảnh báo a và một trong các cảnh báo others có cùng thực thể, hoặc cùng tầng dưới đặc hiệu: (mọi cạnh tin cậy, lý do).
+    Tầng dưới chung không đặc hiệu (backend, host dùng chung bởi nhiều thực thể cùng loại) không tính, kẻo gộp cả cụm."""
+    cache = {} if cache is None else cache
+    if "scanned" not in cache:
+        cache["scanned"] = last_scan(conn, tenant_id) is not None
+    if not cache["scanned"]:
+        return None
+    ra = _alert_reach(conn, tenant_id, a[0], a[1], cache)
+    if not ra:
+        return None
+    rbs = [_alert_reach(conn, tenant_id, b[0], b[1], cache) for b in others]
+    alerted = {s for s, _, _ in ra} | {s for rb in rbs for s, _, _ in rb}
+    t = _ts(a[1]) or db.now()
+    hint = None
+    for sa, ca, seen_a in ra:
+        for rb in rbs:
+            for sb, cb, seen_b in rb:
+                if sa == sb:
+                    return True, f"cùng {_name(conn, tenant_id, sa)}"
+                for low in sorted((seen_a & seen_b) - {sa, sb}, key=lambda e: LAYER.get(e.split(":", 1)[0], 9)):
+                    ok, why, _, _ = specific(conn, tenant_id, low, alerted, set(), t)
+                    if not ok:
+                        continue
+                    trusted = _path_trusted(ca, sa, low) and _path_trusted(cb, sb, low)
+                    reason = f"{_name(conn, tenant_id, sa)} → {_name(conn, tenant_id, low)} ← {_name(conn, tenant_id, sb)} ({why})"
+                    if trusted:
+                        return True, reason
+                    hint = hint or (False, reason + "; có cạnh gợi ý, cần kiểm chứng")
+                    break
+    return hint

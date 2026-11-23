@@ -241,6 +241,7 @@ Bật ở **Cài đặt → Cảnh báo** (tenant admin). Nguồn là các kết
 2. **Gom nhóm**, xét trong khung `window_minutes` (mặc định 10 phút) và cùng môi trường:
    - **Luật nhãn:** mọi nhãn trong `group_labels` mà hai cảnh báo cùng có phải bằng nhau. Mặc định là `cluster`, `namespace`, nên kết quả không phụ thuộc thứ tự cảnh báo đến.
    - **Quan hệ k8s:** cùng node, hoặc cùng workload (suy từ tên pod hay nhãn deployment/statefulset). Nhãn pod/service/instance của exporter kube-state-metrics bị bỏ qua.
+   - **Tầng dưới chung (topology):** cùng thực thể, hoặc cùng host/backend/máy ảo mà phần lớn thực thể cùng loại dùng nó đang bị cảnh báo; chỉ tự gom khi mọi cạnh trên đường nối tin cậy, có cạnh gợi ý thì thành gợi ý gộp.
    - **AI:** chỉ dùng khi hai cách trên không quyết được; gộp nếu điểm ≥ `ai_min_score`. Lần Gộp/Tách gần nhất của người dùng được đưa vào làm ví dụ.
 3. **Điều tra:** sau `debounce_seconds`, agent chạy bằng tài khoản `kagent-alerts` (vai trò member) và chỉ được dùng công cụ đọc. Công cụ ghi bị chặn ngay cả khi model tự gọi tên. Kết quả là báo cáo gồm tiêu đề, nguyên nhân, độ tin, bằng chứng và tối đa 2 hành động. Bước điều tra luôn đối chiếu với thay đổi ngay trước cảnh báo đầu tiên: `data.recent_changes` cho lệnh ghi đã chạy qua kagent, và với kết nối đang có thì rollout history, helm history, deploy GitLab, instance action của OpenStack cho thay đổi làm ngoài kagent.
 4. **Hành động:** đi qua gateway như mọi lệnh khác. Bị ép hỏi khi:

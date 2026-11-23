@@ -142,7 +142,7 @@ như vậy là bình thường, không phải dấu hiệu gây lỗi.
 Từ thực thể nghi gây lỗi đi ngược lên: số máy ảo, node, project bị ảnh hưởng, hiện như gợi ý cho người đánh giá S1–S4. Dùng chung phép
 tính với B1; không có thực thể nghi gây lỗi thì không hiện.
 
-### B3. Gom cảnh báo theo tầng dưới chung
+### B3. Gom cảnh báo theo tầng dưới chung (xong, Đợt 50)
 
 Luật "cùng host", "cùng backend" ở bước quan hệ, trước AI, với cùng điều kiện đặc hiệu như B1 (không thì mọi cảnh báo trên backend lớn đều
 bị gộp). Tự gộp khi mọi cạnh trên đường nối tin cậy tại lúc hai cảnh báo bắn; có cạnh gợi ý thì chỉ thành gợi ý gộp. Lý do gộp ghi đường

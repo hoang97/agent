@@ -84,6 +84,8 @@ def assign(conn, tenant_id: str, alert_id: str, cfg: dict | None = None) -> str:
                 found = (inc["id"], m)
         if found and found[1][0] == "rule":
             break
+    if found is None and candidates:
+        found = _infra_match(conn, tenant_id, labels, a["starts_at"], candidates)
     if found is None and cfg["ai_grouping"] and candidates:
         incidents = [{"id": i["id"], "title": i["title"], "alerts": [_brief(r) for r in conn.execute(
             "SELECT * FROM alert_event WHERE incident_id=? ORDER BY starts_at LIMIT 8", (i["id"],)).fetchall()]} for i in candidates[:5]]
@@ -101,6 +103,18 @@ def assign(conn, tenant_id: str, alert_id: str, cfg: dict | None = None) -> str:
         reopen = found is not None
     with db.tx(conn):
         return _attach(conn, tenant_id, a, labels, found, cfg, reopen)
+
+
+def _infra_match(conn, tenant_id: str, labels: dict, at: str | None, incidents_, cache: dict | None = None) -> tuple | None:
+    """Sự cố đầu tiên có cảnh báo cùng tầng dưới đặc hiệu theo topology, chỉ khi mọi cạnh trên đường nối tin cậy."""
+    from .. import topology
+    cache = {} if cache is None else cache
+    for inc in incidents_:
+        others = [(json.loads(r["labels"]), r["starts_at"]) for r in conn.execute("SELECT labels, starts_at FROM alert_event WHERE incident_id=?", (inc["id"],))]
+        m = topology.infra_match(conn, tenant_id, (labels, at), others, cache)
+        if m and m[0]:
+            return inc["id"], ("infra", 0.85, m[1])
+    return None
 
 
 def _rule_match(conn, labels: dict, cfg: dict, incidents_) -> tuple | None:
@@ -214,7 +228,8 @@ def auto_merge(conn, tenant_id: str, cfg: dict | None = None) -> int:
     """
     cfg = cfg or settings(conn, tenant_id)
     rows = conn.execute("SELECT * FROM incident WHERE tenant_id=? AND status='open' ORDER BY created_at", (tenant_id,)).fetchall()
-    alerts = {r["id"]: conn.execute("SELECT labels, join_method FROM alert_event WHERE incident_id=?", (r["id"],)).fetchall() for r in rows}
+    alerts = {r["id"]: conn.execute("SELECT labels, join_method, starts_at FROM alert_event WHERE incident_id=?", (r["id"],)).fetchall() for r in rows}
+    cache: dict = {}
     merged, user = set(), None
     for j, src in enumerate(rows):
         if (src["id"] in _running or src["stage"] in ("investigating", "awaiting_approval", "verifying")
@@ -226,6 +241,11 @@ def auto_merge(conn, tenant_id: str, cfg: dict | None = None) -> int:
                 continue
             found = next((m for a in alerts[src["id"]] for b in alerts[dst["id"]]
                           if (m := match(json.loads(a["labels"]), json.loads(b["labels"]), cfg["group_labels"]))), None)
+            if found is None:
+                from .. import topology
+                others = [(json.loads(b["labels"]), b["starts_at"]) for b in alerts[dst["id"]]]
+                found = next((("infra", 0.85, m[1]) for a in alerts[src["id"]]
+                              if (m := topology.infra_match(conn, tenant_id, (json.loads(a["labels"]), a["starts_at"]), others, cache)) and m[0]), None)
             if found:
                 user = user or bot_user(conn, tenant_id)
                 with db.tx(conn):
@@ -285,6 +305,9 @@ def suggestions(conn, tenant_id: str) -> list[dict]:
     rows = conn.execute("SELECT * FROM incident WHERE tenant_id=? AND status='open' ORDER BY created_at", (tenant_id,)).fetchall()
     manual = {r["id"] for r in rows if conn.execute("SELECT 1 FROM alert_event WHERE incident_id=? AND join_method='manual'", (r["id"],)).fetchone()}
     labels = {r["id"]: _labels(conn, r["id"]) for r in rows}
+    timed = {r["id"]: [(json.loads(a["labels"]), a["starts_at"]) for a in conn.execute("SELECT labels, starts_at FROM alert_event WHERE incident_id=?", (r["id"],))]
+             for r in rows}
+    cache: dict = {}
     out = []
     for j, src in enumerate(rows):
         if src["id"] in manual:
@@ -293,6 +316,10 @@ def suggestions(conn, tenant_id: str) -> list[dict]:
             if dst["env"] != src["env"] or dst["id"] in manual:
                 continue
             m = _first_match(labels[src["id"]], labels[dst["id"]], keys)
+            if m is None:  # theo topology: cạnh gợi ý thì chỉ thành gợi ý ở đây, không tự gộp
+                from .. import topology
+                hit = next((x for a in timed[src["id"]] if (x := topology.infra_match(conn, tenant_id, a, timed[dst["id"]], cache))), None)
+                m = ("infra", 0.85, hit[1]) if hit else None
             if m:
                 out.append({"from": {"id": src["id"], "title": src["title"], "created_at": src["created_at"]},
                             "into": {"id": dst["id"], "title": dst["title"], "created_at": dst["created_at"]}, "reason": m[2]})

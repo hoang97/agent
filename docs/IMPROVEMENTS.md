@@ -535,3 +535,14 @@ Theo `TOPOLOGY-PLAN.md` (đã chốt: topology là dữ kiện có thời hạn,
   cảnh báo bắt đầu (`topology.blast`), đếm pod, node, PVC, máy ảo, PV, volume và số project của các máy ảo. Chỉ là gợi ý để người ước lượng
   ảnh hưởng khi đánh giá S1–S4, không tự đổi mức; không có thực thể nghi gây lỗi thì không hiện.
 
+## Đợt 50 — 2026-11-24: gom cảnh báo theo tầng dưới chung (giai đoạn B3)
+
+- **`topology.infra_match`:** cảnh báo mới và cảnh báo của một sự cố trỏ về cùng thực thể, hoặc cùng tầng dưới đặc hiệu (cùng điều kiện với
+  đồ thị B1: tầng dưới dùng chung bởi nhiều thực thể cùng loại thì không tính). Trả kèm cờ mọi cạnh trên đường nối có tin cậy không.
+- **Nơi dùng (`incidents/grouping.py`, cách gộp `infra` "tầng dưới chung"):** `assign` sau luật nhãn và quan hệ k8s, trước AI; `auto_merge`
+  cho sự cố đang mở; cả hai chỉ khi mọi cạnh tin cậy tại lúc cảnh báo bắn. Có cạnh gợi ý thì chỉ hiện ở `suggestions` (gợi ý gộp trên danh
+  sách) với ghi chú "cần kiểm chứng". Kết quả đi xuống của từng cảnh báo được nhớ trong một lần gọi vì hai hàm sau chạy mỗi 15 giây.
+- **Sửa:** `start_points` lọc nhãn của exporter (kube-state-metrics) như luật k8s; trước đó cảnh báo KSM gắn vào node chạy KSM.
+- **Trên bản sao DB:** 77 cặp sự cố mở chồng thời gian, luật cũ gộp được 12; luật mới không gộp thêm cặp nào, vì không host hay backend
+  nào đủ đặc hiệu. Luật thận trọng như mong muốn; giá trị thật sẽ thấy khi có sự cố trên một host hay volume dùng riêng.
+

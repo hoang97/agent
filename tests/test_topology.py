@@ -305,3 +305,69 @@ def test_view_shows_other_incidents_and_unmapped_alerts(topo, infra):
 def test_view_without_scan_explains(users):
     _incident(users["admin"].tenant, "i6", [("A", {"node": "x"})])
     assert _view(users["admin"].tenant, "i6") == {"available": False, "reason": "chưa quét topology (cần kết nối k8s hoặc OpenStack dùng chung)"}
+
+
+# ---------- gom cảnh báo theo tầng dưới chung (giai đoạn B3) ----------
+
+def _new_alert(tenant, aid, labels):
+    import json
+    now = db.iso()
+    with db.session() as conn, db.tx(conn):
+        conn.execute("INSERT INTO alert_event(id,tenant_id,source,fingerprint,starts_at,alertname,severity,labels,summary,env,first_seen,last_seen,status) "
+                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (aid, tenant, "am", aid, now, "NodeDiskIOSaturation", "warning", json.dumps(labels), "", "dev", now, now, "firing"))
+
+
+def _assign(tenant, aid):
+    from kagent import incidents
+    with db.session() as conn:
+        cfg = {**incidents.settings(conn, tenant), "ai_grouping": False}
+        iid = incidents.assign(conn, tenant, aid, cfg)
+        return iid, dict(conn.execute("SELECT join_method, join_reason FROM alert_event WHERE id=?", (aid,)).fetchone())
+
+
+def test_alert_joins_incident_on_same_specific_host_when_all_edges_trusted(topo, infra):
+    infra.k8s_nodes[1]["PROVIDER"] = f"openstack:///{U2}"  # worker-1 nối máy ảo bằng providerID: cạnh tin cậy
+    _scan(topo)
+    _incident(topo, "h1", [("etcdHighCommitDurations", {"node": "master-1"})])
+    _new_alert(topo, "a-w1", {"node": "worker-1"})
+    iid, row = _assign(topo, "a-w1")
+    assert iid == "h1" and row["join_method"] == "infra"
+    assert row["join_reason"] == "node worker-1 → host compute-07 ← node master-1 (2/2 node dùng nó đang bị cảnh báo)"
+
+
+def test_hint_edge_never_auto_groups_but_is_suggested(topo, infra):
+    from kagent import incidents
+    _scan(topo)  # worker-1 chỉ nối máy ảo bằng IP: cạnh gợi ý
+    _incident(topo, "h2", [("etcdHighCommitDurations", {"node": "master-1"})])
+    _new_alert(topo, "a-w2", {"node": "worker-1"})
+    iid, row = _assign(topo, "a-w2")
+    assert iid != "h2" and row["join_method"] == "root"
+    with db.session() as conn:
+        assert incidents.auto_merge(conn, topo) == 0
+        sug = incidents.suggestions(conn, topo)
+    assert sug[0]["into"]["id"] == "h2" and sug[0]["from"]["id"] == iid and "cần kiểm chứng" in sug[0]["reason"]
+
+
+def test_auto_merge_open_incidents_sharing_a_specific_host(topo, infra):
+    from kagent import incidents
+    infra.k8s_nodes[1]["PROVIDER"] = f"openstack:///{U2}"
+    _scan(topo)
+    _incident(topo, "h3", [("A", {"node": "master-1"})])
+    _incident(topo, "h4", [("B", {"node": "worker-1"})])
+    with db.session() as conn:
+        assert incidents.auto_merge(conn, topo) == 1
+        assert conn.execute("SELECT count(*) n FROM alert_event WHERE incident_id='h3'").fetchone()["n"] == 2
+
+
+def test_backend_shared_by_many_never_groups(topo, infra):
+    # Thêm 3 node không cảnh báo cùng host: 2/5 node trên host bị cảnh báo, không đặc hiệu.
+    for i in range(3):
+        sid = f"11111111-2222-3333-4444-55555555556{i}"
+        infra.os_servers[sid] = {"id": sid, "name": f"w{i}", "status": "ACTIVE", "OS-EXT-SRV-ATTR:hypervisor_hostname": "compute-07"}
+        infra.k8s_nodes.append({"NAME": f"extra-{i}", "PROVIDER": f"openstack:///{sid}", "IP": None, "READY": "True"})
+    infra.k8s_nodes[1]["PROVIDER"] = f"openstack:///{U2}"
+    _scan(topo)
+    _incident(topo, "h5", [("A", {"node": "master-1"})])
+    _new_alert(topo, "a-w5", {"node": "worker-1"})
+    iid, row = _assign(topo, "a-w5")
+    assert iid != "h5" and row["join_method"] == "root"
