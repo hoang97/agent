@@ -6,3 +6,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 data/
+
+# tài liệu nội bộ, không đưa lên repo
+private-docs/
