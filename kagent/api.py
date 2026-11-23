@@ -1801,6 +1801,24 @@ def incident_review(incident_id: str, body: IncidentReview, t: Tenant = Depends(
         return _incident_call(lambda: incidents.quality.review(conn, t.tenant_id, incident_id, t.user_id, body.verdict, body.note))
 
 
+class IncidentImpact(BaseModel):
+    customers: str
+    data_loss: bool = False
+    control_plane: bool = False
+    redundancy_lost: bool = False
+    missed_by_alert: bool = False
+    near_miss: bool = False
+    spread: bool = False
+    note: str = Field(default="", max_length=300)
+
+
+@app.post("/api/incidents/{incident_id}/impact")
+def incident_impact(incident_id: str, body: IncidentImpact, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_writer()
+    with db.tx(conn):
+        return _incident_call(lambda: incidents.impact.save(conn, t.tenant_id, incident_id, t.user_id, body.model_dump()))
+
+
 class TaskDone(BaseModel):
     done: bool = True
 

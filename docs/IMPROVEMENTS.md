@@ -470,3 +470,19 @@ Thẻ duyệt của sự cố hết hạn vì không ai xem (việc 8 của kế
   Địa chỉ kagent trong link mặc định là địa chỉ đang mở trang lúc lưu.
 - **Chưa làm:** chưa thử với webhook thật của netchat; nút duyệt ngay trong tin chat (cần bot trung gian gọi lại API kagent).
 
+## Đợt 46 — 2026-11-24: mức S1–S4 theo ảnh hưởng, điều kiện postmortem
+
+Severity trước đây lấy thẳng từ nhãn cảnh báo; bản nháp export để TODO ở môi trường thật. Quy trình repo incidents chấm mức theo ảnh hưởng
+khách hàng (S1 nhiều khách hàng hoặc mất dữ liệu, S2 vài khách hàng hoặc một tính năng, S3 chưa ảnh hưởng nhưng mất dự phòng, S4 chỉ nội
+bộ; lỗi control plane là ảnh hưởng khách hàng; mất dữ liệu luôn S1; chưa chắc chọn mức cao hơn). Gartner gọi là Prioritization Scoring.
+- **`incidents/impact.py`:** người trả lời trên trang sự cố (khách hàng bị ảnh hưởng: chưa biết / nội bộ / chưa ảnh hưởng / vài / nhiều;
+  mất dữ liệu; control plane; mất dự phòng; cảnh báo không phát hiện; suýt thành sự cố lớn; lan sang service khác), lưu ở `incident.impact`;
+  mức và điều kiện postmortem tính lúc đọc. Chưa có người trả lời thì chỉ là gợi ý (dev/staging S4; môi trường thật: critical S2, còn lại
+  S3), hiện là `S2?`. Dùng form thay vì `ask_user` của agent vì đây là điều agent không quan sát được.
+- **Postmortem bắt buộc khi:** S1/S2, cảnh báo không phát hiện, suýt thành sự cố lớn, lan sang service khác, hoặc S3 lặp lại ≥ 2 lần trong
+  30 ngày (ca này + số lần mở lại/gộp + sự cố cùng nhóm). Hạn 5 ngày làm việc từ lúc phục hồi.
+- **Nơi dùng:** badge S1–S4 ở danh sách và đầu trang sự cố (badge mức cảnh báo vẫn giữ), thẻ "Mức độ", sự kiện `impact_assessed`, bản
+  nháp export (severity, "Ảnh hưởng khách hàng", "Cần postmortem. Lý do"), thông báo webhook.
+- **Chưa làm (khoảng trống):** chưa có mapping khách hàng ↔ project (module CRM trên CMP trong biên bản họp), nên chưa tự điền được số
+  khách hàng bị ảnh hưởng; có mapping thì gợi ý theo project của tài nguyên trong cảnh báo thay vì theo mức cảnh báo.
+

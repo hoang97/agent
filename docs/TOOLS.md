@@ -253,7 +253,7 @@ Bật ở **Cài đặt → Cảnh báo** (tenant admin). Nguồn là các kết
 
 **Thông báo:** Cài đặt → Cảnh báo có mục webhook (tenant admin): sự cố mới, lệnh chờ duyệt, sự cố cần người được POST JSON có trường `text` kèm link về trang sự cố; chỉ báo việc xảy ra sau lúc bật, mỗi việc một lần.
 
-Màn **Sự cố** gồm danh sách (lọc theo trạng thái, tự làm mới 15 giây, dải số liệu 30 ngày: tỉ lệ nhận định đúng, MTTR, mức xử lý) và trang chi tiết: nguyên nhân, bằng chứng, các lệnh đã đọc, cảnh báo kèm lý do được gộp (nút Tách), hành động kèm lý do không tự chạy (nút Duyệt/Từ chối), chấm nhận định của lượt điều tra (Đúng / Đúng một phần / Sai), dòng thời gian, nút Gộp/Đóng/Điều tra lại.
+Màn **Sự cố** gồm danh sách (lọc theo trạng thái, tự làm mới 15 giây, dải số liệu 30 ngày: tỉ lệ nhận định đúng, MTTR, mức xử lý) và trang chi tiết: nguyên nhân, bằng chứng, các lệnh đã đọc, cảnh báo kèm lý do được gộp (nút Tách), hành động kèm lý do không tự chạy (nút Duyệt/Từ chối), chấm nhận định của lượt điều tra (Đúng / Đúng một phần / Sai), thẻ Mức độ (đánh giá ảnh hưởng → S1–S4 và có cần postmortem), dòng thời gian, nút Gộp/Đóng/Điều tra lại.
 
 ## Thêm một template mới
 

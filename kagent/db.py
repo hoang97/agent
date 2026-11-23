@@ -451,6 +451,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         grouping.reset_long_titles(conn)
     if "alert_settings" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
         conn.execute("ALTER TABLE tenant ADD COLUMN alert_settings TEXT NOT NULL DEFAULT '{}'")  # luồng tự xử lý cảnh báo (incidents.py)
+    if "impact" not in incident_cols:
+        conn.execute("ALTER TABLE incident ADD COLUMN impact TEXT")  # câu trả lời đánh giá ảnh hưởng của người (incidents/impact.py)
     if "notify" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:
         conn.execute("ALTER TABLE tenant ADD COLUMN notify TEXT")  # webhook thông báo sự cố, mã hóa (incidents/notify.py)
     if "undo_settings" not in {r["name"] for r in conn.execute("PRAGMA table_info(tenant)")}:

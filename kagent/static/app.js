@@ -260,7 +260,10 @@ function ago(iso) {
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
   return s < 60 ? `${Math.round(s)} giây trước` : s < 3600 ? `${Math.round(s / 60)} phút trước` : s < 86400 ? `${Math.round(s / 3600)} giờ trước` : fmtTime(iso);
 }
-function sevBadge(sev) { return h("span", { class: "badge " + (SEV_CLASS[sev] || "") }, sev || "không rõ"); }
+function sevBadge(sev) { return h("span", { class: "badge " + (SEV_CLASS[sev] || ""), title: "Mức của cảnh báo" }, sev || "không rõ"); }
+const S_CLASS = { S1: "bad", S2: "bad", S3: "warn", S4: "" };
+// Mức sự cố S1–S4 theo ảnh hưởng khách hàng (incidents/impact.py); chưa có người đánh giá thì là gợi ý.
+function sBadge(x) { return x && h("span", { class: "badge " + (x.source === "human" ? S_CLASS[x.sev] : ""), title: x.source === "human" ? "Mức sự cố, người đã đánh giá" : "Mức gợi ý, chưa đánh giá ảnh hưởng" }, x.source === "human" ? x.sev : `${x.sev}?`); }
 function actionText(a) { return a.args && a.args.command ? `${a.tool.split(".").pop()} ${a.args.command}` : `${a.tool} ${JSON.stringify(a.args || {})}`; }
 // Tự làm mới khi còn đứng ở màn này; mỗi lần render tạo token mới nên vòng cũ tự dừng.
 let incidentTimer = 0;
@@ -298,7 +301,7 @@ async function incidentList(main) {
         h("span", { class: "ix-stripe " + tone }),
         h("div", { class: "ix-t" }, h("strong", {}, i.title), i.line && h("p", {}, i.line),
           h("span", { class: "small" }, [i.env, i.sources.join(", "), `cảnh báo mới nhất ${ago(i.last_alert_at)}`].filter(Boolean).join(" · "))),
-        h("div", { class: "ix-state" }, h("span", { class: "pill " + tone }, i.investigating ? "Đang điều tra" : i.state.label), sevBadge(i.severity),
+        h("div", { class: "ix-state" }, h("span", { class: "pill " + tone }, i.investigating ? "Đang điều tra" : i.state.label), sBadge(i.sev), sevBadge(i.severity),
           i.repeats > 0 && h("span", { class: "pill" }, `Lặp lại ${i.repeats} lần`)),
         h("div", { class: "ix-when" }, age, h("br"), `${i.firing}/${i.alerts} đang bắn`));
     };
@@ -388,6 +391,32 @@ function rootCauseBody(rc, id, act, openIncident) {
     rc.prevent.length > 0 && h("div", {}, h("div", { class: "ix-cause-h" }, "Việc phòng ngừa"), h("ul", {}, rc.prevent.map((t) => h("li", {}, t)))),
     rc.confirmed_at && h("p", { class: "small" }, `${rc.confirmed_by || "?"} xác nhận lúc ${hmd(rc.confirmed_at)}`),
     form);
+}
+
+const CUSTOMER_CHOICES = [["unknown", "Chưa biết"], ["internal", "Chỉ nội bộ (CI, alert sai…)"], ["none", "Chưa ảnh hưởng khách hàng"],
+  ["few", "Vài khách hàng hoặc một tính năng"], ["many", "Nhiều khách hàng"]];
+const IMPACT_FLAGS = [["data_loss", "Mất dữ liệu"], ["control_plane", "Control plane khách hàng không gọi được (API server, console…)"],
+  ["redundancy_lost", "Mất dự phòng (vd. một node etcd chết, quorum còn)"], ["missed_by_alert", "Cảnh báo không phát hiện, khách hàng báo hoặc tự thấy"],
+  ["near_miss", "Suýt thành sự cố lớn"], ["spread", "Lan sang service khác, hoặc khó xử lý"]];
+
+// Mức S1–S4 và có phải viết postmortem không (incidents/impact.py): người trả lời, kagent áp luật của repo incidents.
+function impactBody(im, id, act) {
+  const a = im.answers || {};
+  const customers = h("select", { "aria-label": "Ảnh hưởng khách hàng" }, CUSTOMER_CHOICES.map(([v, label]) => h("option", { value: v, selected: (a.customers || "unknown") === v }, label)));
+  const flags = IMPACT_FLAGS.map(([k, label]) => [k, h("input", { type: "checkbox", checked: !!a[k] }), label]);
+  const note = h("input", { value: a.note || "", maxlength: "300", placeholder: "Ghi chú: khách hàng, project bị ảnh hưởng (tuỳ chọn)", "aria-label": "Ghi chú ảnh hưởng" });
+  const pm = im.postmortem;
+  return h("section", { class: "card", "aria-labelledby": "ix-i-h" }, h("div", { class: "ix-sec" }, h("h3", { id: "ix-i-h" }, "Mức độ")),
+    h("div", { class: "row" }, sBadge(im), h("span", { class: "small" }, `${im.label} · ${im.reason}`)),
+    im.source !== "human" && h("p", { class: "small muted" }, "Mức gợi ý: kagent không biết khách hàng nào bị ảnh hưởng. Chưa chắc thì chọn mức cao hơn, hạ sau."),
+    pm.required ? h("p", { class: "small" }, h("span", { class: "pill warn" }, pm.suggested_only ? "Có thể cần postmortem" : "Cần postmortem"), " ", pm.reasons.join("; "),
+      pm.due ? ` · hạn ${hmd(pm.due)}` : "") : h("p", { class: "small muted" }, "Chưa thuộc trường hợp bắt buộc postmortem."),
+    a.by && h("p", { class: "small muted" }, `Đánh giá lúc ${hmd(a.at)}`),
+    h("details", {}, h("summary", { class: "small" }, im.source === "human" ? "Đánh giá lại" : "Đánh giá ảnh hưởng"),
+      h("label", { class: "field" }, "Khách hàng bị ảnh hưởng", customers),
+      flags.map(([, box, label]) => h("label", { class: "row small" }, box, label)), note,
+      h("button", { type: "button", class: "small-btn", onclick: act(() => api("POST", `/api/incidents/${id}/impact`, {
+        customers: customers.value, note: note.value.trim(), ...Object.fromEntries(flags.map(([k, box]) => [k, box.checked])) }), "Đã lưu đánh giá") }, "Lưu")));
 }
 
 // Link tới Prometheus, Grafana Explore, Kibana Discover dựng từ tham số đã chạy (links.py); mở tab mới, không gửi referrer.
@@ -494,7 +523,7 @@ async function incidentDetail(main, id) {
       h("div", {}, h("button", { type: "button", class: "ghost small-btn", onclick: () => go("incidents") }, "← Danh sách")),
       h("div", { class: "ix-top" },
         h("div", {}, h("span", { class: "ix-eyebrow" }, ["Sự cố", d.env, where].filter(Boolean).join(" · ")), h("h1", {}, d.title),
-          h("div", { class: "row" }, h("span", { class: "pill " + tone }, d.state.label), sevBadge(d.severity), h("span", { class: "pill" }, age),
+          h("div", { class: "row" }, h("span", { class: "pill " + tone }, d.state.label), sBadge(d.impact), sevBadge(d.severity), h("span", { class: "pill" }, age),
             h("span", { class: "pill " + (firing ? "warn" : "ok") }, `${firing}/${d.alerts.length} cảnh báo đang bắn`),
             d.repeats > 0 && h("span", { class: "pill", title: "Số lần mở lại sau khi hết, hoặc nhận sự cố khác gộp vào" }, `Lặp lại ${d.repeats} lần`)),
           d.merged_from.length > 0 && h("div", { class: "small" }, `Gộp từ ${d.merged_from.length} sự cố: `,
@@ -588,6 +617,7 @@ async function incidentDetail(main, id) {
 
     // Cột phải.
     const detect = m.first_alert && new Date(m.received) - new Date(m.first_alert);
+    const impactCard = impactBody(d.impact, id, act);
     const times = h("section", { class: "card", "aria-labelledby": "ix-t-h" }, h("div", { class: "ix-sec" }, h("h3", { id: "ix-t-h" }, "Mốc thời gian")),
       h("dl", { class: "ix-kv" },
         h("dt", {}, "Bắt đầu"), h("dd", {}, hmd(m.first_alert)),
@@ -633,7 +663,7 @@ async function incidentDetail(main, id) {
       !rel.open.length && !rel.history_count && h("p", { class: "small muted" }, `Không có sự cố cùng nhóm trong ${rel.days} ngày.`));
     const recap = d.summary && summaryCard(d.summary, id);
     setKids(box);
-    appendKids(box, [head, exported, wait, h("div", { class: "ix-grid" }, h("div", { class: "ix-col" }, recap, events), h("aside", { class: "ix-col", "aria-label": "Thông tin sự cố" }, times, alerts, cause, related))]);
+    appendKids(box, [head, exported, wait, h("div", { class: "ix-grid" }, h("div", { class: "ix-col" }, recap, events), h("aside", { class: "ix-col", "aria-label": "Thông tin sự cố" }, times, impactCard, alerts, cause, related))]);
     if (!menuOpen && d.status === "open" && (busyNow || ["new", "awaiting_approval", "verifying"].includes(d.stage))) refreshLater(8000, token, load);
   }
   await load();

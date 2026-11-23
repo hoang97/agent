@@ -78,8 +78,10 @@ def _payload(event: str, inc, cfg: dict, extra: dict | None = None) -> dict:
     url = _link(cfg, inc)
     head = f"[kagent · {inc['env']}] {EVENTS[event].capitalize()}: {inc['title']}"
     lines = [head]
-    if inc["severity"]:
-        lines.append(f"Mức cảnh báo: {inc['severity']}")
+    from .impact import answers, grade
+    sev = grade(answers(inc))[0] if answers(inc) else None
+    if sev or inc["severity"]:
+        lines.append(" · ".join(x for x in (f"Mức sự cố: {sev}" if sev else "", f"mức cảnh báo: {inc['severity']}" if inc["severity"] else "") if x))
     if extra and extra.get("tool"):
         lines.append(f"Lệnh: {extra['tool']} {extra.get('command', '')}".rstrip() + (f" (hết hạn {extra['expires_at']})" if extra.get("expires_at") else ""))
     if extra and extra.get("reason"):

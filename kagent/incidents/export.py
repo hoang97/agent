@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from . import rootcause, tasks
+from . import impact, rootcause, tasks
 from .common import IncidentError, _label
 from .present import headline
 
@@ -42,10 +42,20 @@ def _same_cause(conn, inc) -> list[dict]:
     return [dict(r) for r in rows if r]
 
 
-def _severity(inc) -> tuple[str, str]:
-    if inc["env"] in ("dev", "staging", "test"):
-        return "S4", f"môi trường {inc['env']}, chỉ ảnh hưởng nội bộ"
-    return "TODO", "đánh giá ảnh hưởng khách hàng theo README mục 3 (kagent không biết ảnh hưởng khách hàng)"
+def _severity(im: dict) -> tuple[str, str]:
+    """Mức người đã đánh giá; chưa đánh giá thì gợi ý ở dev/staging, còn lại để TODO vì kagent không biết ảnh hưởng khách hàng."""
+    if im["source"] == "human" or im["sev"] == "S4":
+        return im["sev"], im["reason"]
+    return "TODO", f"chưa đánh giá ảnh hưởng (gợi ý {im['sev']}: {im['reason']}); đánh giá ở trang sự cố hoặc theo README mục 3"
+
+
+def _customers(im: dict) -> str:
+    a = im["answers"]
+    if not a:
+        return "Chưa xác định"
+    parts = [impact.CUSTOMERS[a["customers"]]] + [t for k, t in (("data_loss", "mất dữ liệu"), ("control_plane", "control plane không gọi được"),
+                                                                  ("redundancy_lost", "mất dự phòng")) if a.get(k)]
+    return ", ".join(parts) + (f" ({a['note']})" if a.get("note") else "")
 
 
 def draft(conn, tenant_id: str, incident_id: str) -> dict:
@@ -62,7 +72,8 @@ def draft(conn, tenant_id: str, incident_id: str) -> dict:
     c = rootcause.chain(inc)
     lv = rootcause.level(conn, inc)
     same = _same_cause(conn, inc)
-    sev, sev_reason = _severity(inc)
+    im = impact.assess(conn, inc)
+    sev, sev_reason = _severity(im)
     events = timeline(conn, dict(inc), alerts)
     acted = [r for r in conn.execute("SELECT * FROM incident_action WHERE incident_id=? AND status IN ('ok','error') AND superseded_by IS NULL "
                                      "ORDER BY coalesce(ran_at, proposed_at)", (incident_id,)).fetchall()]
@@ -71,7 +82,10 @@ def draft(conn, tenant_id: str, incident_id: str) -> dict:
 
     # Issue: Phần A và comment nhật ký "<hành động> → <kết quả>" (bot của repo dựng nhật ký postmortem từ comment).
     title = f"[<SERVICE>] {inc['title']} tại {where}"
-    need_pm = "S3 có cùng nguyên nhân lặp lại trong 30 ngày" if same else None
+    pm_reasons = list(im["postmortem"]["reasons"]) if im["source"] == "human" else []
+    if same and not any(r.startswith("S3 lặp lại") for r in pm_reasons):
+        pm_reasons.append("có sự cố cùng nguyên nhân trong 30 ngày")
+    need_pm = "; ".join(pm_reasons) or None
     body = "\n".join([
         "## Phần A: Thông tin incident", "",
         "| Mục | Nội dung |", "| --- | --- |",
@@ -79,7 +93,7 @@ def draft(conn, tenant_id: str, incident_id: str) -> dict:
         "| Service gây sự cố | TODO: trùng label service:: |",
         "| Service khác bị ảnh hưởng | |",
         f"| Vị trí | {_cell(where)} |",
-        "| Ảnh hưởng khách hàng | Chưa xác định |",
+        f"| Ảnh hưởng khách hàng | {_cell(_customers(im))} |",
         f"| Cách phát hiện | alert: {_cell(', '.join(names)[:200])} |",
         "| Người xử lý chính | @TODO |",
         "| Link liên quan | TODO |", "",

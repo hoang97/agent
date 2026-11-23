@@ -1207,6 +1207,60 @@ def test_export_drafts_issue_and_postmortem_without_guessing(flow, users, infra)
     assert "**Tác nhân kích hoạt:** TODO" in pm and "Số khách hàng" not in pm  # không đoán ảnh hưởng khách hàng
 
 
+# ---------- mức S1–S4 theo ảnh hưởng ----------
+
+@pytest.mark.parametrize("answers, sev", [
+    ({"customers": "few", "data_loss": True}, "S1"),  # mất dữ liệu luôn là S1
+    ({"customers": "many"}, "S1"),
+    ({"customers": "few"}, "S2"),
+    ({"customers": "none", "control_plane": True}, "S2"),  # lỗi control plane là ảnh hưởng khách hàng
+    ({"customers": "unknown"}, "S2"),  # không chắc: chọn mức cao hơn
+    ({"customers": "none", "redundancy_lost": True}, "S3"),
+    ({"customers": "internal"}, "S4"),
+    ({"customers": "none"}, "S4"),
+])
+def test_grade_follows_incident_repo_rules(answers, sev):
+    assert incidents.impact.grade(answers)[0] == sev
+
+
+def test_suggested_level_until_a_human_assesses(flow, users, infra):
+    iid = _web_incident(users)
+    d = flow.get(f"/api/incidents/{iid}").json()
+    assert d["impact"]["sev"] == "S4" and d["impact"]["source"] == "suggested" and not d["impact"]["postmortem"]["required"]
+    with db.session() as conn:
+        conn.execute("UPDATE incident SET env='prod', severity='critical' WHERE id=?", (iid,))
+    d = flow.get(f"/api/incidents/{iid}").json()
+    assert d["impact"]["sev"] == "S2" and d["impact"]["postmortem"] == {"required": True, "reasons": ["mức S2"], "due": None, "suggested_only": True}
+    assert flow.get(f"/api/incidents/{iid}/export").json()["issue"]["severity"] == "TODO"  # gợi ý ở prod không thành mức chính thức
+
+
+def test_assess_impact_sets_level_postmortem_and_export(flow, users, infra):
+    iid = _web_incident(users)
+    assert flow.post(f"/api/incidents/{iid}/impact", json={"customers": "lots"}).status_code == 400
+    with db.session() as conn:
+        conn.execute("UPDATE incident SET env='prod', status='resolved', resolved_at='2026-11-20T10:00:00+00:00' WHERE id=?", (iid,))  # thứ sáu
+    out = flow.post(f"/api/incidents/{iid}/impact", json={"customers": "none", "control_plane": True, "missed_by_alert": True,
+                                                          "note": "API server cluster VKE của 1 khách hàng"}).json()
+    assert out["sev"] == "S2" and out["source"] == "human"
+    assert out["postmortem"]["reasons"] == ["mức S2", "cảnh báo không phát hiện sự cố"]
+    assert out["postmortem"]["due"] == "2026-11-27T10:00:00+00:00"  # 5 ngày làm việc, bỏ thứ bảy và chủ nhật
+    d = flow.get(f"/api/incidents/{iid}").json()
+    assert any(e["kind"] == "impact_assessed" and "S2" in e["text"] for e in d["timeline"])
+    assert next(i for i in flow.get("/api/incidents?status=all").json()["items"] if i["id"] == iid)["sev"] == {"sev": "S2", "source": "human"}
+    issue = flow.get(f"/api/incidents/{iid}/export").json()["issue"]
+    assert issue["severity"] == "S2" and "control plane không gọi được (API server cluster VKE của 1 khách hàng)" in issue["body"]
+    assert "- [x] Cần postmortem. Lý do: mức S2; cảnh báo không phát hiện sự cố" in issue["body"]
+
+
+def test_s3_needs_postmortem_when_it_recurs_within_30_days(flow, users, infra):
+    iid = _web_incident(users)
+    flow.post(f"/api/incidents/{iid}/impact", json={"customers": "none", "redundancy_lost": True})
+    assert flow.get(f"/api/incidents/{iid}").json()["impact"]["postmortem"]["required"] is False
+    with db.session() as conn:
+        conn.execute("UPDATE incident SET repeats=1 WHERE id=?", (iid,))
+    assert flow.get(f"/api/incidents/{iid}").json()["impact"]["postmortem"]["reasons"] == ["S3 lặp lại 2 lần trong 30 ngày"]
+
+
 # ---------- thông báo qua webhook ----------
 
 def _notify(conn, users):

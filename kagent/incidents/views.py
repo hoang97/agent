@@ -5,7 +5,7 @@ import json
 import re
 
 from .. import db, links
-from . import actions, quality, rootcause, tasks
+from . import actions, impact, quality, rootcause, tasks
 from .common import BOT, STAGE_LABEL, IncidentError, _cmd, first_sentence, _worse, _is_write, _label, _method_label, _running, _shown_stage, describe, who
 from .config import settings
 from .grouping import merged_from, related
@@ -45,6 +45,7 @@ def list_incidents(conn, tenant_id: str, status: str = "open", limit: int = 100)
                     "stage_label": STAGE_LABEL.get(d["stage"], d["stage"]), "state": state, "line": line, "first_alert": counts["first"],
                     "alerts": counts["n"], "firing": counts["f"] or 0,
                     "sources": (counts["s"] or "").split(",") if counts["s"] else [], "investigating": d["investigating"],
+                    "sev": (lambda im: {k: im[k] for k in ("sev", "source")})(impact.assess(conn, r)),
                     "last_action": {k: last_action.get(k) for k in ("tool", "args", "status", "risk_tier", "auto", "verified")} if last_action else None})
     return out
 
@@ -54,7 +55,8 @@ def list_incidents(conn, tenant_id: str, status: str = "open", limit: int = 100)
 SHOWN_EVENTS = ("investigated", "verified", "resolved", "reopened", "closed", "task_added", "task_done", "task_reopened", "ran", "failed",
                 "change_checked", "change_check_failed", "reverted", "revert_failed",  # kiểm tra sau khi chạy và hoàn tác (undo.py)
                 "rc_confirmed", "rc_unconfirmed", "rc_recurred", "rc_same_cause",  # 5 Whys (rootcause.py)
-                "reviewed")  # chấm nhận định (quality.py)
+                "reviewed",  # chấm nhận định (quality.py)
+                "impact_assessed")  # đánh giá ảnh hưởng S1–S4 (impact.py)
 
 
 INVESTIGATED = re.compile(r"^(?P<steps>\d+) lệnh đọc → (?P<cause>.*) \(độ tin (?P<conf>[\d.]+)\)$", re.S)  # câu do investigate.py ghi
@@ -240,6 +242,7 @@ def get(conn, tenant_id: str, incident_id: str) -> dict:
                       "confirmed_by": _username(conn, d["rc_confirmed_by"]), "confirmed_at": d["rc_confirmed_at"],
                       "prevent": [t["text"] for t in tasks.current(conn, incident_id) if t["source"] == "prevent"]}
     d["review"] = quality.current(conn, d["cause_episode"]) if d["cause"] else None
+    d["impact"] = impact.assess(conn, r)
     return d
 
 
