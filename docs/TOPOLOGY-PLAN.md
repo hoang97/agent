@@ -110,12 +110,56 @@ của cảnh báo. 104/133 cảnh báo có `instance`, 66 có `pod`, nên phần
 5. **Tri thức:** tên thực thể của KU nối được với thực thể thật (`entities.py` hiện chỉ chuẩn hoá tên), để KU về "backend lưu trữ X" hiện ra khi
    sự cố chạm vào VM dùng backend đó.
 
+## Giai đoạn B (kế hoạch, chưa code)
+
+Đã chốt 2026-11-24: (1) cảnh báo chỉ có nhãn pod thì quét thêm pod của các namespace trong cảnh báo khi có sự cố; (2) không đổi prompt điều
+tra, phần nghi gây lỗi suy từ dữ liệu đã có; (3) gom theo tầng dưới chung tự động khi mọi cạnh trên đường nối đều tin cậy. Thứ tự tầng của
+đồ thị viết thẳng trong code, không thêm bảng cấu hình; khi có data model chung thì sửa code.
+
+**Đo trên bản sao DB (59 sự cố của tenant devtest, theo topology hiện tại):** 32 sự cố gắn được thực thể; 24 chỉ có nhãn pod (chủ yếu
+namespace `cmp-document`), sẽ gắn được khi quét pod; 3 không gắn được. 1/59 sự cố có chuỗi 5 Whys. 24 sự cố có từ 2 thực thể trở lên dùng
+chung tầng dưới, nhưng phần dùng chung hầu hết là backend lưu trữ của 268 hoặc 1478 thực thể hay hypervisor của 308 máy ảo: dùng chung
+như vậy là bình thường, không phải dấu hiệu gây lỗi.
+
+### B1. Đồ thị topology trên trang sự cố
+
+- **Phạm vi:** thực thể của cảnh báo (tại lúc cảnh báo bắt đầu) và chuỗi tầng dưới; phần còn lại gộp thành nhóm có đếm ("+18 máy ảo khác
+  trên host"), trừ thực thể khác đang có cảnh báo thì vẽ riêng. Bố cục theo tầng từ trên xuống: cluster → node → máy ảo → hypervisor;
+  nhánh lưu trữ PVC → PV → volume → backend. SVG tĩnh theo tầng, không dùng bố cục lực.
+- **Làm nổi:** nghi gây lỗi (nổi nhất) > đang bị cảnh báo > đường nối, nhóm gộp. Cạnh tin cậy nét liền, gợi ý nét đứt kèm lý do. Bấm
+  thực thể thì làm nổi đường nối, không lọc; hiện tên, loại, cảnh báo, lệnh đọc lại. Ghi rõ cảnh báo không gắn được và tầng bị bỏ qua.
+- **Nghi gây lỗi, luôn ghi là "nghi" kèm lý do:**
+  1. thực thể mà mắt xích 5 Whys có căn cứ đã đọc (`api_read /servers/<id>`, `/volumes/<id>`, `describe node X`...), ưu tiên mắt xích sâu nhất;
+  2. không có thì tầng dưới chung của từ 2 thực thể bị cảnh báo trở lên, **chỉ khi đặc hiệu**: chính nó đang có cảnh báo, hoặc phần lớn
+     (từ một nửa trở lên) những thứ trực tiếp dùng nó đang bị ảnh hưởng. Không đặc hiệu thì vẽ là "tầng dưới chung, dùng bởi N" mà không
+     làm nổi.
+- **Pod:** khi sự cố mở, lần quét do sự cố (mục lịch quét) đọc thêm `get pods -n <ns> -o custom-columns=...` cho namespace của cảnh báo,
+  lưu `k8s.pod` (cạnh pod → node, pod → PVC). Cạnh pod → node vẫn chỉ tin bản đọc trong chính lượt điều tra, như mục Nguyên tắc.
+- **Backend:** `topology.incident_view(incident)` tính lúc đọc, trả kèm `GET /api/incidents/{id}`.
+
+### B2. Khoanh vùng ảnh hưởng trên thẻ Mức độ
+
+Từ thực thể nghi gây lỗi đi ngược lên: số máy ảo, node, project bị ảnh hưởng, hiện như gợi ý cho người đánh giá S1–S4. Dùng chung phép
+tính với B1; không có thực thể nghi gây lỗi thì không hiện.
+
+### B3. Gom cảnh báo theo tầng dưới chung
+
+Luật "cùng host", "cùng backend" ở bước quan hệ, trước AI, với cùng điều kiện đặc hiệu như B1 (không thì mọi cảnh báo trên backend lớn đều
+bị gộp). Tự gộp khi mọi cạnh trên đường nối tin cậy tại lúc hai cảnh báo bắn; có cạnh gợi ý thì chỉ thành gợi ý gộp. Lý do gộp ghi đường
+nối (`node a → host h ← node b`).
+
+### B4. Màn Topology riêng (để sau)
+
+Tìm thực thể bất kỳ, xem đồ thị quanh nó tại một thời điểm; dùng lại cách vẽ của B1.
+
+Thứ tự: B1 → B2 → B3, mỗi việc một commit. Đo lại sau B1: tỉ lệ sự cố gắn được thực thể (hiện 32/59).
+
 ## Các giai đoạn đề xuất
 
 | Giai đoạn | Nội dung | Phụ thuộc |
 | --- | --- | --- |
 | A | Bảng `entity`, `entity_edge` (có khoảng hiệu lực), `alert_entity`; quét định kỳ node, PV, server, volume, và hypervisor, backend lưu trữ khi tài khoản OpenStack có quyền admin; cạnh node ↔ VM, PV ↔ volume; công cụ `topology.neighbors` đọc trực tiếp và mức tin theo cạnh; thay đổi cạnh vào `recent_changes` | chỉ kết nối đã có |
-| B | Gom cảnh báo theo tổ tiên chung; blast radius trên thẻ Mức độ; màn Topology | A |
+| B | Đồ thị trên trang sự cố, khoanh vùng ảnh hưởng, gom theo tầng dưới chung, màn Topology (chi tiết ở mục Giai đoạn B) | A |
 | C | Host vật lý (DCIM hoặc khai tay), quan hệ dịch vụ | DCIM, data model chung |
 | D | Khách hàng ↔ project, gợi ý S1–S4 theo thực thể | module CRM |
 
