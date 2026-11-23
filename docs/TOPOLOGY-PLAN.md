@@ -1,7 +1,7 @@
 # Topology nhiều tầng (bản phác, chờ góp ý)
 
-Bản nháp 2026-11-24, chưa làm code. Đã chốt: topology là dữ kiện có thời hạn, mức tin theo từng cạnh (mục Nguyên tắc). Mục 9 trong kế hoạch theo tài liệu Cloud Operations (`INCIDENTS-PLAN.md`). Cần khớp với data model
-nhóm Cloud Operations đang làm trước khi chốt; chỗ nào còn phải quyết ghi ở mục **Câu hỏi mở**.
+Bản 2026-11-24, chưa làm code. Đã chốt: topology là dữ kiện có thời hạn, mức tin theo từng cạnh (mục Nguyên tắc), và 5 điểm ở mục Đã chốt. Mục 9 trong kế hoạch theo tài liệu Cloud Operations (`INCIDENTS-PLAN.md`). Cần khớp với data model
+nhóm Cloud Operations đang làm trước khi chốt; các quyết định ở mục **Đã chốt**, phần chưa quyết ở **Còn mở**.
 
 ## Vì sao cần
 
@@ -86,8 +86,11 @@ của cảnh báo. 104/133 cảnh báo có `instance`, 66 có `pod`, nên phần
 
 - **Đọc trực tiếp lúc điều tra là mặc định:** `topology.neighbors` gọi API qua gateway với tài khoản bot (quyền, audit, giới hạn kết nối vẫn
   áp dụng), kết quả là bước `S<n>` bình thường nên trích làm căn cứ được, đồng thời cập nhật cạnh đã lưu.
-- **Quét định kỳ chỉ phần ít đổi và rẻ** (node, VM, volume, PV; mặc định 15 phút) để có lịch sử cạnh và phát hiện thay đổi; pod và
-  workload đọc lúc cần. Không thêm agent hay collector mới.
+- **Quét định kỳ chỉ phần ít đổi và rẻ** (node, VM, volume, PV) để có lịch sử cạnh và phát hiện thay đổi; pod và workload đọc lúc cần.
+  Không có sự cố thì 6 giờ quét một lần. Khi có sự cố mở mà lần quét gần nhất đã cách hơn 15 phút thì quét lại một lần cho sự cố đó.
+  Không thêm agent hay collector mới.
+- **Best effort theo quyền:** tài khoản OpenStack có quyền admin thì dựng cả tầng hạ tầng (hypervisor, host của VM, backend của volume);
+  không có quyền thì bỏ qua tầng đó, vẫn dựng các tầng còn lại. Màn Topology ghi rõ tầng nào bị bỏ qua và vì sao (thiếu quyền, chưa có nguồn).
 - **Khai tay** cho tầng chưa có nguồn (host vật lý, quan hệ dịch vụ): form ở màn Topology và nhập CSV/YAML.
 - Kết quả quét không đưa vào LLM; chỉ code đọc trường có cấu trúc (như `trusted_view`), nên chữ tự do trong tên hay mô tả không lái được gì.
 
@@ -111,21 +114,24 @@ của cảnh báo. 104/133 cảnh báo có `instance`, 66 có `pod`, nên phần
 
 | Giai đoạn | Nội dung | Phụ thuộc |
 | --- | --- | --- |
-| A | Bảng `entity`, `entity_edge` (có khoảng hiệu lực), `alert_entity`; quét định kỳ node, PV, server, volume; cạnh node ↔ VM, PV ↔ volume; công cụ `topology.neighbors` đọc trực tiếp và mức tin theo cạnh; thay đổi cạnh vào `recent_changes` | chỉ kết nối đã có |
+| A | Bảng `entity`, `entity_edge` (có khoảng hiệu lực), `alert_entity`; quét định kỳ node, PV, server, volume, và hypervisor, backend lưu trữ khi tài khoản OpenStack có quyền admin; cạnh node ↔ VM, PV ↔ volume; công cụ `topology.neighbors` đọc trực tiếp và mức tin theo cạnh; thay đổi cạnh vào `recent_changes` | chỉ kết nối đã có |
 | B | Gom cảnh báo theo tổ tiên chung; blast radius trên thẻ Mức độ; màn Topology | A |
-| C | Hypervisor và backend lưu trữ (cần quyền admin OpenStack), host vật lý (DCIM hoặc khai tay), quan hệ dịch vụ | quyền, DCIM, data model chung |
+| C | Host vật lý (DCIM hoặc khai tay), quan hệ dịch vụ | DCIM, data model chung |
 | D | Khách hàng ↔ project, gợi ý S1–S4 theo thực thể | module CRM |
 
 Đo trước và sau giai đoạn A: số lần gọi API mỗi lượt điều tra cho cảnh báo etcd/disk (hiện khoảng 3–5), thời gian tới nhận định đầu tiên
 (trung vị 4,7 phút), tỉ lệ nhận định đúng (số chấm từ Đợt 43).
 
-## Câu hỏi mở
+## Đã chốt (2026-11-24)
 
-1. **Khớp với data model chung:** dùng tên kiểu thực thể và khoá theo data model nhóm Cloud Operations, hay kagent giữ mô hình riêng và
-   xuất/nhập qua một định dạng chung? Đề xuất: kagent dùng cùng tên kiểu và khoá, để sau này đọc topology từ hệ thống chung thay cho tự quét.
-2. **Nguồn sự thật:** khi có hệ thống topology/CMDB chung, kagent chỉ đọc từ đó hay vẫn tự quét để bổ sung? Tự quét nhanh hơn nhưng có thể lệch.
-3. **Quyền OpenStack admin** để thấy host của VM và backend của volume: cấp cho tài khoản kagent, hay để tầng này cho nguồn khác (DCIM)?
-4. **Chu kỳ quét và ngưỡng tin theo loại cạnh:** 15 phút cho node, PV, server, volume có chấp nhận được không; ngưỡng cụ thể cho từng loại
-   cạnh (đề xuất ở mục Nguyên tắc) cần người vận hành từng tầng xác nhận.
-5. **Phạm vi:** chỉ hạ tầng nội bộ (Private Cloud) trước, hay cả tài nguyên của khách hàng trên Public Cloud? Tài nguyên khách hàng kéo theo
-   yêu cầu về dữ liệu cá nhân và phân quyền theo tenant.
+1. **Data model chung:** kagent sửa theo data model của nhóm Cloud Operations (tên kiểu thực thể, khoá, quan hệ), không giữ mô hình riêng.
+   Khi data model chưa công bố, tên kiểu và khoá trong bản này là tạm, đổi theo data model chung khi có.
+2. **Nguồn:** kagent tiếp tục tự quét. Đọc từ hệ thống topology/CMDB chung chưa làm khi hệ thống đó chưa có.
+3. **Quyền OpenStack admin:** best effort. Có quyền thì dựng cả tầng hạ tầng, không có thì bỏ qua tầng đó, các tầng khác vẫn dựng.
+4. **Chu kỳ quét:** 6 giờ một lần khi không có sự cố; có sự cố mà lần quét gần nhất cách hơn 15 phút thì quét lại một lần.
+5. **Phạm vi:** tạm thời chỉ hạ tầng nội bộ (Private Cloud), chưa đụng tài nguyên của khách hàng trên Public Cloud.
+
+## Còn mở
+
+- Ngưỡng tin theo loại cạnh (mục Nguyên tắc) là đề xuất, cần người vận hành từng tầng xác nhận.
+- Danh sách kiểu thực thể và khoá chờ data model chung.
