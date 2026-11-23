@@ -288,6 +288,13 @@ CREATE TABLE IF NOT EXISTS change_record (
 CREATE INDEX IF NOT EXISTS ix_change_status ON change_record(tenant_id, status);
 CREATE INDEX IF NOT EXISTS ix_change_approval ON change_record(approval_id);
 
+-- Người chấm nhận định của một lượt điều tra sự cố (incidents/quality.py). source: manual | confirm (suy từ lúc xác nhận 5 Whys).
+CREATE TABLE IF NOT EXISTS investigation_review (
+  episode_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, incident_id TEXT NOT NULL,
+  verdict TEXT NOT NULL CHECK (verdict IN ('correct','partial','wrong')), note TEXT, source TEXT NOT NULL, by_user TEXT NOT NULL, at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_review_incident ON investigation_review(incident_id);
+
 -- Bằng chứng một loại hoàn tác chạy được: source = revert (hoàn tác thật thành công) | drill (diễn tập ở dev/staging).
 CREATE TABLE IF NOT EXISTS undo_evidence (
   id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT NOT NULL, recipe TEXT NOT NULL, source TEXT NOT NULL, change_id TEXT, at TEXT NOT NULL

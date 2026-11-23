@@ -5,7 +5,7 @@ import json
 import re
 
 from .. import db
-from . import actions, rootcause, tasks
+from . import actions, quality, rootcause, tasks
 from .common import BOT, STAGE_LABEL, IncidentError, _cmd, first_sentence, _worse, _is_write, _label, _method_label, _running, _shown_stage, describe, who
 from .config import settings
 from .grouping import merged_from, related
@@ -53,7 +53,8 @@ def list_incidents(conn, tenant_id: str, status: str = "open", limit: int = 100)
 # Sự kiện ẩn vẫn ghi: mốc cho bản tóm tắt, và "Đang chờ" đọc no_action/quota/error/stopped.
 SHOWN_EVENTS = ("investigated", "verified", "resolved", "reopened", "closed", "task_added", "task_done", "task_reopened", "ran", "failed",
                 "change_checked", "change_check_failed", "reverted", "revert_failed",  # kiểm tra sau khi chạy và hoàn tác (undo.py)
-                "rc_confirmed", "rc_unconfirmed", "rc_recurred", "rc_same_cause")  # 5 Whys (rootcause.py)
+                "rc_confirmed", "rc_unconfirmed", "rc_recurred", "rc_same_cause",  # 5 Whys (rootcause.py)
+                "reviewed")  # chấm nhận định (quality.py)
 
 
 INVESTIGATED = re.compile(r"^(?P<steps>\d+) lệnh đọc → (?P<cause>.*) \(độ tin (?P<conf>[\d.]+)\)$", re.S)  # câu do investigate.py ghi
@@ -233,6 +234,7 @@ def get(conn, tenant_id: str, incident_id: str) -> dict:
                                   for f in c["factors"]],
                       "confirmed_by": _username(conn, d["rc_confirmed_by"]), "confirmed_at": d["rc_confirmed_at"],
                       "prevent": [t["text"] for t in tasks.current(conn, incident_id) if t["source"] == "prevent"]}
+    d["review"] = quality.current(conn, d["cause_episode"]) if d["cause"] else None
     return d
 
 

@@ -425,3 +425,19 @@ tra của kagent chỉ nói pod, event, metric, log nên agent hiếm khi xem đ
   history, thời điểm tạo ReplicaSet, helm history, deploy và pipeline GitLab, os-instance-actions OpenStack); thay đổi khớp thì nêu
   cái gì, lúc nào, ai và kiểm chứng; không thấy thì nói đã xem nguồn nào.
 - **Chưa làm:** action log của CMP chưa có kết nối; thay đổi làm tay trên hạ tầng chỉ thấy được qua các nguồn trên.
+
+## Đợt 43 — 2026-11-23: đo độ chính xác của điều tra, MTTR
+
+Gartner khuyên thử AI trên dữ liệu của chính mình và theo dõi MTTR; benchmark AIOps có mục "đo AI trả lời đúng bao nhiêu" (AWS, Azure
+có). kagent có xác nhận chuỗi 5 Whys nhưng chưa tổng hợp thành tỉ lệ.
+- **Chấm theo lượt (`incidents/quality.py`, bảng `investigation_review`):** khoá là episode của lượt điều tra, vì lượt sau có thể đúng khi lượt
+  trước sai; lượt mới thì chưa chấm. Thẻ Nguyên nhân có nút Đúng / Đúng một phần / Sai kèm ghi chú (`POST /api/incidents/{id}/review`),
+  ghi sự kiện `reviewed` lên dòng sự kiện.
+- **Suy từ lúc xác nhận 5 Whys:** giữ mọi mắt xích của agent là đúng, giữ một phần là đúng một phần, bỏ hết là sai (`source='confirm'`).
+  Chấm tay thắng và không bị xác nhận sau đó ghi đè.
+- **Số liệu (`GET /api/incidents/stats?days=30&env=`):** tỉ lệ đúng (và tính cả đúng một phần), số lượt đã chấm trên số lượt điều tra,
+  MTTR (cảnh báo đầu tiên → mọi cảnh báo hết), thời gian từ lúc nhận sự cố tới nhận định đầu tiên, phân bố mức 0–3, 10 lượt bị chấm sai
+  gần nhất. Dải số liệu 30 ngày hiện ở đầu danh sách sự cố.
+- **Số đầu tiên (tenant devtest, 30 ngày tới 23/11):** 59 sự cố, 47 đã điều tra (68 lượt), MTTR trung vị 11,7 phút (trung bình 190 phút vì
+  vài ca kéo dài nhiều ngày), có nhận định sau trung vị 4,7 phút, cả 59 ở mức 1, chưa lượt nào được chấm.
+

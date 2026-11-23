@@ -14,7 +14,7 @@ Làm theo thứ tự, mỗi việc một commit; chi tiết ở `IMPROVEMENTS.md
 | # | Việc | Trạng thái |
 | --- | --- | --- |
 | 1 | Chỉ ra thay đổi gây lỗi: `data.recent_changes`, prompt điều tra đối chiếu thay đổi trước cảnh báo đầu tiên | xong (Đợt 42) |
-| 3 | Đo độ chính xác của điều tra: người chấm nguyên nhân đúng/sai, tỉ lệ đúng, MTTR | chưa |
+| 3 | Đo độ chính xác của điều tra: người chấm nguyên nhân đúng/sai, tỉ lệ đúng, MTTR | xong (Đợt 43) |
 | 4 | Link bằng chứng tới công cụ gốc (Grafana Explore, Kibana Discover) dựng từ truy vấn | chưa |
 | 2 | Kênh thông báo sự cố mới và thẻ chờ duyệt (thay việc 8 bên dưới) | chưa |
 | 5 | Mức S1–S4 theo ảnh hưởng (thay việc 6 bên dưới) | chưa |

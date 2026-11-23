@@ -275,8 +275,10 @@ async function incidentList(main) {
   let status = store.get("incidents:filter", "attention");
   const box = h("div", { class: "ix" });
   addKids(main, box);
+  let stats = null;
   async function load() {
-    const data = await api("GET", `/api/incidents?status=${status}`);
+    const [data, st] = await Promise.all([api("GET", `/api/incidents?status=${status}`), stats || api("GET", "/api/incidents/stats?days=30")]);
+    stats = st;
     const tabs = h("div", { class: "row ix-tabs", role: "group", "aria-label": "Lọc sự cố" }, LIST_FILTERS.map(([k, label]) =>
       h("button", { type: "button", class: "chip" + (status === k ? " on" : ""), "aria-pressed": String(status === k),
         onclick: () => { status = k; store.set("incidents:filter", k); load(); } }, `${label}${data.counts[k] !== undefined ? ` (${data.counts[k]})` : ""}`)),
@@ -310,7 +312,7 @@ async function incidentList(main) {
         h("button", { type: "button", class: "small-btn", onclick: guard(async () => { await api("POST", `/api/incidents/${g.from.id}/merge`, { into: g.into.id }); toast("Đã gộp"); await load(); }) }, "Gộp vào sự cố gốc"))));
     const empty = { attention: "Không có sự cố nào cần người xử lý.", open: "Không có sự cố đang mở." }[status] || "Không có sự cố.";
     setKids(box);
-    appendKids(box, [tabs, statusLine, suggest, data.items.length ? h("section", { class: "card ix-list", "aria-label": "Sự cố" }, data.items.map(row)) : h("div", { class: "card muted" }, empty)]);
+    appendKids(box, [tabs, statusLine, stats.incidents > 0 && statsCard(stats), suggest, data.items.length ? h("section", { class: "card ix-list", "aria-label": "Sự cố" }, data.items.map(row)) : h("div", { class: "card muted" }, empty)]);
     refreshLater(15000, token, load);
   }
   await load();
@@ -385,6 +387,40 @@ function rootCauseBody(rc, id, act, openIncident) {
     rc.prevent.length > 0 && h("div", {}, h("div", { class: "ix-cause-h" }, "Việc phòng ngừa"), h("ul", {}, rc.prevent.map((t) => h("li", {}, t)))),
     rc.confirmed_at && h("p", { class: "small" }, `${rc.confirmed_by || "?"} xác nhận lúc ${hmd(rc.confirmed_at)}`),
     form);
+}
+
+const REVIEW_TONE = { correct: "ok", partial: "warn", wrong: "bad" };
+
+// Chấm nhận định của lượt điều tra hiện tại (incidents/quality.py); lượt mới được chấm riêng.
+function reviewBody(rv, id, act) {
+  const note = h("input", { placeholder: "Ghi chú: sai ở đâu, nguyên nhân thật là gì (tuỳ chọn)", maxlength: "500", "aria-label": "Ghi chú khi chấm" });
+  const send = (verdict) => act(() => api("POST", `/api/incidents/${id}/review`, { verdict, note: note.value.trim() }), "Đã ghi nhận");
+  return h("div", { class: "ix-review" },
+    h("div", { class: "row" }, h("span", { class: "small" }, "Nhận định của kagent ở lượt này:"),
+      rv ? h("span", { class: "pill " + REVIEW_TONE[rv.verdict], title: rv.note || "" }, rv.label) : h("span", { class: "small muted" }, "chưa chấm"),
+      rv && h("span", { class: "small muted" }, `${rv.by || "?"} · ${hmd(rv.at)}${rv.source === "confirm" ? " · suy từ lúc xác nhận chuỗi" : ""}`)),
+    h("details", {}, h("summary", { class: "small" }, rv ? "Chấm lại" : "Chấm đúng hay sai"), note,
+      h("div", { class: "row" }, [["correct", "Đúng"], ["partial", "Đúng một phần"], ["wrong", "Sai"]].map(([v, label]) =>
+        h("button", { type: "button", class: "ghost small-btn", onclick: send(v) }, label)))));
+}
+
+const pct = (x) => x === null || x === undefined ? "—" : `${Math.round(x * 100)}%`;
+const mins = (m) => m === null || m === undefined ? "—" : span(m * 60000);
+
+// Số liệu 30 ngày: tỉ lệ nhận định đúng, MTTR, thời gian tới khi có nhận định, mức xử lý (incidents/quality.py).
+function statsCard(st) {
+  const r = st.reviews;
+  return h("section", { class: "card ix-stats", "aria-label": `Số liệu ${st.days} ngày` },
+    h("div", { class: "row" }, h("strong", {}, `${st.days} ngày`),
+      h("span", {}, `${st.incidents} sự cố, ${st.investigated} đã điều tra`),
+      h("span", { title: "Tỉ lệ lượt điều tra được chấm đúng trên số lượt đã chấm" },
+        `Nhận định đúng: ${pct(st.accuracy)}`, r.total ? ` (tính cả đúng một phần ${pct(st.accuracy_partial)}; đã chấm ${r.total}/${st.rounds} lượt)` : " (chưa chấm lượt nào)"),
+      h("span", { title: "Trung vị thời gian từ cảnh báo đầu tiên tới khi mọi cảnh báo hết" }, `MTTR: ${mins(st.mttr_minutes.median)}`),
+      h("span", { title: "Trung vị thời gian từ lúc nhận sự cố tới khi có nhận định đầu tiên" }, `Có nhận định sau: ${mins(st.first_insight_minutes.median)}`),
+      h("span", {}, "Mức 0–3: " + [0, 1, 2, 3].map((n) => st.levels[n]).join(" / "))),
+    st.wrong.length > 0 && h("details", {}, h("summary", { class: "small" }, `${st.wrong.length} lượt bị chấm sai`),
+      h("ul", { class: "small" }, st.wrong.map((w) => h("li", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("incidents", undefined, w.id); } }, w.title),
+        w.note ? ` · ${w.note}` : "")))));
 }
 
 async function copyText(text, area) {
@@ -574,6 +610,7 @@ async function incidentDetail(main, id) {
       busyNow ? busy(d.queued === "slot" ? "Đang chờ tới lượt điều tra…" : "Agent đang điều tra bằng các lệnh chỉ đọc…") : null,
       c ? [c.parts ? causeBody(c.parts) : h("p", {}, "Chưa rõ nguyên nhân."),
         rootCauseBody(d.rootcause, id, act, (r) => h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("incidents", undefined, r.id); } }, r.title)),
+        reviewBody(d.review, id, act),
         h("details", {}, h("summary", {}, `${c.steps} lệnh đọc và bằng chứng`),
           c.evidence.length ? h("ul", { class: "small" }, c.evidence.map((e) => h("li", {}, e))) : h("p", { class: "small" }, "Không có bằng chứng được ghi."),
           d.conversation_id && h("a", { href: "#", class: "small", onclick: (e) => { e.preventDefault(); go("chat", d.conversation_id); } }, "Từng lệnh và câu trả lời đầy đủ ở hội thoại điều tra"))]

@@ -1080,6 +1080,50 @@ def test_confirm_with_weakness_and_prevention_reaches_level_3(flow, users, infra
     assert flow.get(f"/api/incidents/{iid}").json()["rootcause"]["confirmed"] is False
 
 
+def test_review_per_round_and_confirm_infers_verdict(flow, users, infra):
+    iid = _web_incident(users)
+    assert flow.post(f"/api/incidents/{iid}/review", json={"verdict": "correct"}).status_code == 400  # chưa điều tra
+    llm.set_provider(FiveWhys([TECH, {**WEAK, "weakness": False}]))
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+    assert flow.post(f"/api/incidents/{iid}/review", json={"verdict": "maybe"}).status_code == 400
+    # Xác nhận mà bỏ một trong hai mắt xích của agent: đúng một phần.
+    flow.post(f"/api/incidents/{iid}/rootcause/confirm", json={"whys": [{"question": TECH["question"], "answer": TECH["answer"]}], "prevent": ""})
+    rv = flow.get(f"/api/incidents/{iid}").json()["review"]
+    assert rv["verdict"] == "partial" and rv["source"] == "confirm" and "1/2" in rv["note"]
+    # Chấm tay thắng, và xác nhận lại sau đó không ghi đè.
+    assert flow.post(f"/api/incidents/{iid}/review", json={"verdict": "wrong", "note": "thật ra do node hết RAM"}).json()["verdict"] == "wrong"
+    flow.post(f"/api/incidents/{iid}/rootcause/confirm", json={"prevent": ""})
+    d = flow.get(f"/api/incidents/{iid}").json()
+    assert d["review"]["verdict"] == "wrong" and d["review"]["source"] == "manual" and any(e["kind"] == "reviewed" for e in d["timeline"])
+    # Lượt điều tra mới: chưa chấm; xác nhận nguyên chuỗi của agent là đúng.
+    with db.session() as conn:
+        conn.execute("UPDATE incident SET stage='reported' WHERE id=?", (iid,))
+        incidents.investigate(conn, tenant(users), iid)
+    assert flow.get(f"/api/incidents/{iid}").json()["review"] is None
+    flow.post(f"/api/incidents/{iid}/rootcause/confirm", json={"prevent": ""})
+    assert flow.get(f"/api/incidents/{iid}").json()["review"]["verdict"] == "correct"
+    st = flow.get("/api/incidents/stats?days=30").json()
+    assert st["rounds"] == 2 and st["reviews"] == {"correct": 1, "partial": 0, "wrong": 1, "total": 2, "manual": 1}
+    assert st["accuracy"] == 0.5 and st["review_coverage"] == 1.0 and st["wrong"][0]["note"] == "thật ra do node hết RAM"
+    assert st["first_insight_minutes"]["n"] == 1
+
+
+def test_stats_mttr_from_first_alert_and_levels(flow, users, infra):
+    t = tenant(users)
+    poll(users)
+    with db.session() as conn:
+        ids = [r["id"] for r in conn.execute("SELECT id FROM incident WHERE tenant_id=?", (t,))]
+        conn.execute("UPDATE alert_event SET starts_at='2026-11-12T08:00:00Z' WHERE tenant_id=?", (t,))
+        conn.execute("UPDATE incident SET status='resolved', resolved_at='2026-11-12T08:30:00+00:00' WHERE id=?", (ids[0],))
+        conn.execute("UPDATE incident SET status='resolved', resolved_at='2026-11-12T09:30:00+00:00' WHERE id=?", (ids[1],))
+    st = flow.get("/api/incidents/stats").json()
+    assert st["incidents"] == len(ids) and st["mttr_minutes"] == {"n": 2, "median": 60.0, "mean": 60.0}
+    assert st["levels"]["1"] == 2 and st["accuracy"] is None and st["reviews"]["total"] == 0
+    assert flow.get("/api/incidents/stats?env=prod").json()["incidents"] == 0
+    assert flow.get("/api/incidents/stats?days=0").status_code == 400
+
+
 def test_same_cause_recurrence_downgrades_old_incident_and_blames_lessons(flow, users, infra):
     from kagent import knowledge, sources
     t = tenant(users)

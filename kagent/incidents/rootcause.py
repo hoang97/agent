@@ -113,6 +113,8 @@ def confirm(conn, tenant_id: str, incident_id: str, user: str, whys: list[dict] 
     if inc is None:
         raise IncidentError("không tìm thấy sự cố", 404)
     c = chain(inc)
+    agent_links = sum(1 for w in c["whys"] if not w.get("by_user"))
+    kept = agent_links
     if whys is not None:
         old = {w["answer"]: w for w in c["whys"]}
         edited = []
@@ -126,6 +128,7 @@ def confirm(conn, tenant_id: str, incident_id: str, user: str, whys: list[dict] 
                            "by_user": not base})
         for w in edited[:-1]:
             w["weakness"] = False  # chỉ mắt xích cuối là điểm dừng
+        kept = sum(1 for w in edited if not w["by_user"] and not old[w["answer"]].get("by_user"))
         c["whys"] = edited
     if not c["whys"]:
         raise IncidentError("chuỗi 5 Whys trống: cần ít nhất một mắt xích")
@@ -142,6 +145,8 @@ def confirm(conn, tenant_id: str, incident_id: str, user: str, whys: list[dict] 
                                     (incident_id, prevent[:200])).fetchone():
         conn.execute("INSERT INTO incident_task(id,tenant_id,incident_id,text,source,created_at,created_by) VALUES (?,?,?,?, 'prevent', ?, ?)",
                      (db.new_id(), tenant_id, incident_id, prevent[:200], now, user))
+    from .quality import infer_from_confirm
+    infer_from_confirm(conn, tenant_id, incident_id, user, agent_links, kept)
     last = c["whys"][-1]["answer"]
     _event(conn, tenant_id, incident_id, "rc_confirmed", f"xác nhận chuỗi 5 Whys ({len(c['whys'])} mắt xích): {last[:200]}", actor=user)
     return level(conn, conn.execute("SELECT * FROM incident WHERE id=?", (incident_id,)).fetchone())

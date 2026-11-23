@@ -1691,6 +1691,13 @@ def incident_list(status: str = "open", t: Tenant = Depends(current_tenant), con
                                        (t.tenant_id, db.now().date().isoformat())).fetchone()["n"]}
 
 
+@app.get("/api/incidents/stats")
+def incident_stats(days: int = 30, env: str | None = None, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    if not 1 <= days <= 365:
+        raise HTTPException(400, "days phải từ 1 đến 365")
+    return incidents.quality.stats(conn, t.tenant_id, days, env or None)
+
+
 @app.get("/api/incidents/{incident_id}")
 def incident_get(incident_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     return _incident_call(lambda: incidents.get(conn, t.tenant_id, incident_id))
@@ -1780,6 +1787,18 @@ def incident_rootcause_confirm(incident_id: str, body: RootCauseConfirm, t: Tena
     whys = [w.model_dump() for w in body.whys] if body.whys is not None else None
     with db.tx(conn):
         return _incident_call(lambda: incidents.rootcause.confirm(conn, t.tenant_id, incident_id, t.user_id, whys, body.prevent))
+
+
+class IncidentReview(BaseModel):
+    verdict: str
+    note: str = Field(default="", max_length=500)
+
+
+@app.post("/api/incidents/{incident_id}/review")
+def incident_review(incident_id: str, body: IncidentReview, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_writer()
+    with db.tx(conn):
+        return _incident_call(lambda: incidents.quality.review(conn, t.tenant_id, incident_id, t.user_id, body.verdict, body.note))
 
 
 class TaskDone(BaseModel):
