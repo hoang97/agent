@@ -232,6 +232,8 @@ def test_view_highlights_specific_common_host_and_groups_the_rest(topo, infra):
     assert roles["k8s.node:k8s/master-1"] == "alert" and roles["k8s.node:k8s/worker-1"] == "alert"
     # Hai node bị cảnh báo là đúng hai node k8s trên host: đặc hiệu, nghi gây lỗi.
     assert v["suspect"]["ids"] == ["os.hypervisor:compute-07"] and v["suspect"]["basis"] == "common" and "2/2 node" in v["suspect"]["reason"]
+    # worker-1 nối máy ảo chỉ bằng IP: vẫn nghi, nhưng lý do nói rõ cần kiểm chứng.
+    assert v["suspect"]["trusted"] is False and v["suspect"]["reason"].endswith("có cạnh gợi ý, cần kiểm chứng")
     assert roles["os.hypervisor:compute-07"] == "suspect" and roles["k8s.cluster:k8s"] == "path"
     agg = {n["id"]: n["count"] for n in v["nodes"] if n["role"] == "aggregate"}
     assert agg == {"agg:os.hypervisor:compute-07:os.server": 1, "agg:os.volume:v1:k8s.pv": 1}  # máy ảo other-vm, PV của volume gộp vào nhóm
@@ -264,6 +266,21 @@ def test_common_layer_shared_by_many_is_not_suspect(topo, infra, monkeypatch):
     assert v["suspect"]["ids"] == [] and {n["id"]: n["role"] for n in v["nodes"]}["os.hypervisor:compute-07"] == "common"
 
 
+def test_specific_needs_80_percent_of_peers_and_trusted_path(topo, infra):
+    infra.os_servers["s9"] = {"id": "s9", "name": "k8s-worker-2", "status": "ACTIVE", "OS-EXT-SRV-ATTR:hypervisor_hostname": "compute-07"}
+    infra.k8s_nodes[1]["PROVIDER"] = f"openstack:///{U2}"
+    infra.k8s_nodes.append({"NAME": "worker-2", "PROVIDER": "openstack:///s9", "IP": "10.1.0.13", "READY": "True"})
+    _scan(topo)
+    _incident(topo, "i8", [("A", {"node": "master-1"}), ("B", {"node": "worker-1"})])
+    v = _view(topo, "i8")
+    assert v["suspect"]["ids"] == []  # 2/3 node trên host: dưới 80%
+    assert {n["id"]: n.get("note") for n in v["nodes"]}["os.hypervisor:compute-07"] == "dùng chung bởi 3 node, 2 đang bị cảnh báo"
+    _incident(topo, "i9", [("C", {"node": "worker-2"})])
+    v = _view(topo, "i8")
+    assert v["suspect"]["ids"] == ["os.hypervisor:compute-07"] and v["suspect"]["trusted"] is True
+    assert v["suspect"]["reason"] == "tầng dưới của 2 thực thể bị cảnh báo ở sự cố này; 3/3 node dùng nó đang bị cảnh báo, gồm 1 ở sự cố khác"
+
+
 def test_5_whys_evidence_wins_and_pods_of_incident_namespaces_are_scanned(topo, infra, users):
     infra.k8s_pods = {"kube-system": [{"NAME": "etcd-0", "NODE": "master-1", "PVC": "data-etcd-0", "PHASE": "Running"}]}
     whys = {"whys": [{"question": "Tại sao etcd chậm?", "answer": "đĩa của máy ảo master chậm", "refs": ["S1"], "weakness": False,
@@ -277,7 +294,8 @@ def test_5_whys_evidence_wins_and_pods_of_incident_namespaces_are_scanned(topo, 
     # Chuỗi tầng dưới của pod: node → máy ảo → host, và PVC → PV → volume → backend.
     assert {"k8s.node:k8s/master-1", f"os.server:{U1}", "os.hypervisor:compute-07", "k8s.pvc:k8s/kube-system/data-etcd-0", "k8s.pv:k8s/pv-etcd",
             "os.volume:v1", "os.backend:cinder@ceph-ssd"} <= set(roles)
-    assert v["suspect"] == {"ids": ["os.volume:v1"], "basis": "5whys", "reason": "mắt xích 5 Whys số 1 có căn cứ đọc tới: đĩa của máy ảo master chậm"}
+    assert v["suspect"] == {"ids": ["os.volume:v1"], "basis": "5whys", "reason": "mắt xích 5 Whys số 1 có căn cứ đọc tới: đĩa của máy ảo master chậm",
+                            "trusted": True}
     pod_edge = next(e for e in v["edges"] if e["from"] == "k8s.pod:k8s/kube-system/etcd-0" and e["rel"] == "runs_on")
     assert pod_edge["trust"] == "tin cậy"  # vừa quét
     # Pod bị xoá thì lần quét sau đánh dấu mất (namespace đã quét đủ).
@@ -298,6 +316,8 @@ def test_view_shows_other_incidents_and_unmapped_alerts(topo, infra):
     roles = {n["id"]: n for n in v["nodes"]}
     assert roles["k8s.node:k8s/worker-1"]["role"] == "other_alert" and roles["k8s.node:k8s/worker-1"]["incident"]["id"] == "i5"
     assert roles[f"os.server:{U2}"]["role"] == "path"  # đoạn nối worker-1 → máy ảo → host chung
+    # Cảnh báo ở sự cố khác chưa gộp vẫn được đếm: host chạy 2 node, cả 2 đang bị cảnh báo.
+    assert v["suspect"]["ids"] == ["os.hypervisor:compute-07"] and "2/2 node dùng nó đang bị cảnh báo, gồm 1 ở sự cố khác" in v["suspect"]["reason"]
     assert not any(n["role"] == "aggregate" and n["id"].startswith("agg:os.hypervisor") for n in v["nodes"])
     assert v["unmapped"][0]["alertname"] == "KubePodCrashLooping" and "get pod web-1 -n web" in v["unmapped"][0]["verify"][0]["args"]["command"]
 

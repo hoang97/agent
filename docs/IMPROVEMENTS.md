@@ -546,3 +546,10 @@ Theo `TOPOLOGY-PLAN.md` (đã chốt: topology là dữ kiện có thời hạn,
 - **Trên bản sao DB:** 77 cặp sự cố mở chồng thời gian, luật cũ gộp được 12; luật mới không gộp thêm cặp nào, vì không host hay backend
   nào đủ đặc hiệu. Luật thận trọng như mong muốn; giá trị thật sẽ thấy khi có sự cố trên một host hay volume dùng riêng.
 
+## Đợt 51 — 2026-11-24: điều kiện nghi gây lỗi theo tầng dưới chung
+
+- **Ngưỡng:** `SPECIFIC_SHARE` 0,5 → 0,8, vẫn cần từ 2 thực thể cùng loại đang bị cảnh báo. Dùng chung cho đồ thị sự cố và gom cảnh báo (B3).
+- **Đếm cả sự cố khác:** số đang bị cảnh báo tính cả thực thể của sự cố khác đang mở. Trước đó hai sự cố chưa gộp của cùng một host lỗi
+  mỗi bên chỉ thấy một nửa nên không bên nào qua ngưỡng. Vì vậy tầng dưới chỉ một thực thể của sự cố này đi tới cũng được xét.
+- **Cạnh gợi ý:** nghi theo tầng dưới chung mà đường nối có cạnh gợi ý thì lý do ghi "có cạnh gợi ý, cần kiểm chứng" và `suspect.trusted`
+  là false; gom cảnh báo tự động vẫn chỉ khi mọi cạnh tin cậy.

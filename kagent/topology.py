@@ -493,7 +493,7 @@ LAYER = {"k8s.cluster": 0, "k8s.pod": 1, "k8s.node": 2, "k8s.pvc": 2, "os.server
 LAYER_NAMES = ["Cluster", "Pod", "Node, PVC", "Máy ảo, PV", "Volume", "Hạ tầng: host, backend lưu trữ"]
 TYPE_LABEL = {"k8s.cluster": "cluster", "k8s.pod": "pod", "k8s.node": "node", "k8s.pvc": "PVC", "k8s.pv": "PV", "os.server": "máy ảo",
               "os.volume": "volume", "os.hypervisor": "host", "os.backend": "backend lưu trữ", "os.project": "project"}
-SPECIFIC_SHARE = 0.5  # đề xuất, chưa kiểm trên sự cố thật
+SPECIFIC_SHARE = 0.8  # cùng hit >= 2; chưa kiểm trên sự cố thật
 _UP = ("WITH RECURSIVE up(id, d) AS (SELECT ?, 0 UNION SELECT e.src, up.d + 1 FROM topo_edge e JOIN up ON e.dst = up.id "
        "WHERE e.tenant_id = ? AND e.rel IN ('runs_on','uses') AND e.valid_from <= ? AND (e.valid_to IS NULL OR e.valid_to > ?) AND up.d < 5) "
        "SELECT DISTINCT t.id, t.type FROM up JOIN topo_entity t ON t.tenant_id = ? AND t.id = up.id WHERE up.d > 0")
@@ -516,15 +516,19 @@ def above(conn, tenant_id: str, eid: str, t: datetime) -> list[tuple[str, str]]:
 
 def specific(conn, tenant_id: str, eid: str, alerted: set[str], alerting: set[str], t: datetime) -> tuple[bool, str, int, int]:
     """Tầng dưới chung có đáng nghi không: chính nó đang có cảnh báo, hoặc phần lớn thực thể cùng loại với thực thể bị cảnh báo
-    mà phụ thuộc vào nó đang bị cảnh báo. Dùng chung là bình thường với backend hay host lớn, nên không đủ để nghi."""
+    mà phụ thuộc vào nó đang bị cảnh báo (ở sự cố này hay sự cố khác đang mở, vì cảnh báo của cùng một lỗi có thể chưa được gộp).
+    Dùng chung là bình thường với backend hay host lớn, nên không đủ để nghi."""
     if eid in alerting:
         return True, "chính nó đang có cảnh báo", 0, 0
     kinds = {a.split(":", 1)[0] for a in alerted}
     peers = {i for i, ty in above(conn, tenant_id, eid, t) if ty in kinds}
-    hit = len(peers & alerted)
+    hits = peers & (alerted | alerting)
+    hit, label = len(hits), "/".join(TYPE_LABEL.get(k, k) for k in sorted(kinds))
+    elsewhere = len(hits - alerted)
+    extra = f", gồm {elsewhere} ở sự cố khác" if elsewhere else ""
     if hit >= 2 and hit / len(peers) >= SPECIFIC_SHARE:
-        return True, f"{hit}/{len(peers)} {'/'.join(TYPE_LABEL.get(k, k) for k in sorted(kinds))} dùng nó đang bị cảnh báo", hit, len(peers)
-    return False, f"dùng chung bởi {len(peers)} {'/'.join(TYPE_LABEL.get(k, k) for k in sorted(kinds))}, {hit} đang bị cảnh báo", hit, len(peers)
+        return True, f"{hit}/{len(peers)} {label} dùng nó đang bị cảnh báo{extra}", hit, len(peers)
+    return False, f"dùng chung bởi {len(peers)} {label}, {hit} đang bị cảnh báo{extra}", hit, len(peers)
 
 
 _KIND = {"node": "k8s.node", "nodes": "k8s.node", "no": "k8s.node", "pv": "k8s.pv", "persistentvolume": "k8s.pv", "pvc": "k8s.pvc",
@@ -575,28 +579,33 @@ def _alert_entities(conn, tenant_id: str, rows) -> tuple[dict, list]:
     return mapped, unmapped
 
 
-def suspects(conn, tenant_id: str, inc, starts: list[str], walked: dict[str, set], alerting: set[str], t: datetime) -> dict:
-    """Nghi gây lỗi: (1) thực thể mắt xích 5 Whys có căn cứ đọc tới, sâu nhất trước; (2) tầng dưới chung đặc hiệu của từ 2 thực thể
-    bị cảnh báo. Luôn là "nghi", kèm lý do; không có căn cứ nào thì rỗng."""
+def suspects(conn, tenant_id: str, inc, starts: list[str], walked: dict[str, set], chains: dict[str, list], alerting: set[str], t: datetime) -> dict:
+    """Nghi gây lỗi: (1) thực thể mắt xích 5 Whys có căn cứ đọc tới, sâu nhất trước; (2) tầng dưới đặc hiệu của thực thể bị cảnh báo,
+    gần nhất trước. Luôn là "nghi", kèm lý do; đường nối có cạnh gợi ý thì lý do ghi rõ. Không có căn cứ nào thì rỗng."""
     from .incidents import rootcause
     whys = rootcause.chain(inc)["whys"]
     for n, w in reversed(list(enumerate(whys, 1))):
         ids = [e for st in w.get("steps") or [] for e in step_entities(st["tool"], st.get("args"))]
         ids = list(_get(conn, tenant_id, ids))
         if ids:
-            return {"ids": ids, "basis": "5whys", "reason": f"mắt xích 5 Whys số {n} có căn cứ đọc tới: {w['answer'][:160]}"}
-    reach: dict[str, int] = {}
+            return {"ids": ids, "basis": "5whys", "reason": f"mắt xích 5 Whys số {n} có căn cứ đọc tới: {w['answer'][:160]}", "trusted": True}
+    reach: dict[str, list] = {}
     for s in starts:
         for e in walked.get(s, set()) - {s}:
-            reach[e] = reach.get(e, 0) + 1
-    common = sorted((e for e, k in reach.items() if k >= 2), key=lambda e: LAYER.get(e.split(":", 1)[0], 9))
+            reach.setdefault(e, []).append(s)
     alerted, checked = set(starts), []
-    for e in common:
-        ok, why, _, _ = specific(conn, tenant_id, e, alerted, alerting, t)
+    # Xét cả tầng dưới chỉ một thực thể của sự cố này đi tới: thực thể cùng loại đang bị cảnh báo ở sự cố khác vẫn được đếm.
+    for e in sorted(reach, key=lambda e: (LAYER.get(e.split(":", 1)[0], 9), e)):
+        ok, why, hit, _ = specific(conn, tenant_id, e, alerted, alerting, t)
+        if len(reach[e]) < 2 and hit < 2 and not ok:
+            continue
         checked.append({"id": e, "specific": ok, "why": why})
         if ok:
-            return {"ids": [e], "basis": "common", "reason": f"tầng dưới chung của {reach[e]} thực thể bị cảnh báo; {why}", "common": checked}
-    return {"ids": [], "basis": None, "reason": "", "common": checked}
+            trusted = all(_path_trusted(chains.get(s, []), s, e) for s in reach[e])
+            reason = f"tầng dưới của {len(reach[e])} thực thể bị cảnh báo ở sự cố này; {why}"
+            return {"ids": [e], "basis": "common", "reason": reason + ("" if trusted else "; có cạnh gợi ý, cần kiểm chứng"),
+                    "trusted": trusted, "common": checked}
+    return {"ids": [], "basis": None, "reason": "", "trusted": None, "common": checked}
 
 
 def blast(conn, tenant_id: str, eid: str, t: datetime) -> dict:
@@ -633,14 +642,14 @@ def incident_view(conn, tenant_id: str, incident_id: str) -> dict:
             other_inc.setdefault(e, {"id": r["id"], "title": r["title"]})
     starts = list(mine)
     ents = _get(conn, tenant_id, starts)
-    chain, walked, reads = [], {}, []
+    chain, walked, chains, reads = [], {}, {}, []
     for s in starts:
         c, seen, rd = _walk(conn, tenant_id, [s], t, 5, ents)
         chain += c
-        walked[s] = seen
+        walked[s], chains[s] = seen, c
         reads += [x for x in rd if all(x["args"] != y["args"] for y in reads)]
     shown = set(starts).union(*walked.values()) if walked else set()
-    sus = suspects(conn, tenant_id, inc, starts, walked, set(mine) | set(others), t)
+    sus = suspects(conn, tenant_id, inc, starts, walked, chains, set(mine) | set(others), t)
     shown |= set(sus["ids"])
     edges = {}
     for e in chain:
@@ -705,7 +714,7 @@ def incident_view(conn, tenant_id: str, incident_id: str) -> dict:
                       "role": "aggregate", "label": f"+{a['count']} {TYPE_LABEL.get(a['type'], a['type'])} khác", "count": a["count"], "alerts": []})
         edges[(a["id"], a["under"])] = {"from": a["id"], "to": a["under"], "rel": "runs_on", "trust": "nhóm", "why": ""}
     return {"available": True, "at": db.iso(t), "layers": LAYER_NAMES, "nodes": sorted(nodes, key=lambda n: (n["layer"], n["id"])),
-            "edges": list(edges.values()), "suspect": {k: sus[k] for k in ("ids", "basis", "reason")},
+            "edges": list(edges.values()), "suspect": {k: sus[k] for k in ("ids", "basis", "reason", "trusted")},
             "blast": blast(conn, tenant_id, sus["ids"][0], t) if sus["ids"] else None,
             "unmapped": unmapped, "verify": reads[:8], "last_scan": last["started_at"],
             "skipped_layers": {f"{src}:{layer}": text for src, r in last["sources"].items() for layer, text in (r.get("layers") or {}).items() if text != "ok"}}

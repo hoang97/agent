@@ -18,7 +18,7 @@ Làm theo thứ tự, mỗi việc một commit; chi tiết ở `IMPROVEMENTS.md
 | 4 | Link bằng chứng tới công cụ gốc (Grafana Explore, Kibana Discover) dựng từ truy vấn | xong (Đợt 44) |
 | 2 | Kênh thông báo sự cố mới và thẻ chờ duyệt (thay việc 8 bên dưới) | xong (Đợt 45, webhook) |
 | 5 | Mức S1–S4 theo ảnh hưởng (thay việc 6 bên dưới) | xong (Đợt 46) |
-| 9 | Topology nhiều tầng (vật lý → hypervisor → VM → node → workload) | A, B1–B3 xong (Đợt 47–50); B4 (màn Topology riêng) để sau; tên kiểu chờ data model chung |
+| 9 | Topology nhiều tầng (vật lý → hypervisor → VM → node → workload) | A, B1–B3 xong (Đợt 47–51); B4 (màn Topology riêng) để sau; tên kiểu chờ data model chung |
 
 Chưa cần: che dữ liệu nhạy cảm trước khi gửi LLM, nhận phản ánh ngoài Alertmanager (netchat, GNOC), mở công cụ qua MCP.
 

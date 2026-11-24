@@ -130,9 +130,10 @@ như vậy là bình thường, không phải dấu hiệu gây lỗi.
   thực thể thì làm nổi đường nối, không lọc; hiện tên, loại, cảnh báo, lệnh đọc lại. Ghi rõ cảnh báo không gắn được và tầng bị bỏ qua.
 - **Nghi gây lỗi, luôn ghi là "nghi" kèm lý do:**
   1. thực thể mà mắt xích 5 Whys có căn cứ đã đọc (`api_read /servers/<id>`, `/volumes/<id>`, `describe node X`...), ưu tiên mắt xích sâu nhất;
-  2. không có thì tầng dưới chung của từ 2 thực thể bị cảnh báo trở lên, **chỉ khi đặc hiệu**: chính nó đang có cảnh báo, hoặc phần lớn
-     (từ một nửa trở lên) những thứ trực tiếp dùng nó đang bị ảnh hưởng. Không đặc hiệu thì vẽ là "tầng dưới chung, dùng bởi N" mà không
-     làm nổi.
+  2. không có thì tầng dưới của thực thể bị cảnh báo, gần nhất trước, **chỉ khi đặc hiệu**: chính nó đang có cảnh báo, hoặc trong các
+     thực thể cùng loại với thực thể bị cảnh báo phụ thuộc vào nó (trực tiếp hay gián tiếp), từ 2 thực thể và từ 80% trở lên đang bị cảnh
+     báo. Đếm cả cảnh báo ở sự cố khác đang mở, vì cảnh báo của cùng một lỗi có thể chưa được gộp. Đường nối có cạnh gợi ý thì vẫn nghi
+     nhưng lý do ghi "có cạnh gợi ý, cần kiểm chứng". Không đặc hiệu thì vẽ là "tầng dưới chung, dùng bởi N" mà không làm nổi.
 - **Pod:** khi sự cố mở, lần quét do sự cố (mục lịch quét) đọc thêm `get pods -n <ns> -o custom-columns=...` cho namespace của cảnh báo,
   lưu `k8s.pod` (cạnh pod → node, pod → PVC). Cạnh pod → node vẫn chỉ tin bản đọc trong chính lượt điều tra, như mục Nguyên tắc.
 - **Backend:** `topology.incident_view(incident)` tính lúc đọc, trả kèm `GET /api/incidents/{id}`.
