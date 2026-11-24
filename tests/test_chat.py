@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import threading
 from types import SimpleNamespace as NS
 
@@ -7,7 +8,8 @@ import openai
 import pytest
 
 from conftest import Session
-from kagent import agent, api as api_mod, conversation, db, llm, vault
+from aiops import agent, api as api_mod, conversation, db, llm, vault
+from aiops.config import settings
 
 
 def events(response):
@@ -69,7 +71,7 @@ def test_history_passed_to_provider_on_next_turn(users):
 
 
 def test_history_limited_by_budget(users):
-    from kagent.config import settings
+    from aiops.config import settings
     settings.budget_history = 50
 
     class Long(llm.HeuristicProvider):
@@ -381,7 +383,7 @@ def test_internal_history_format_never_reaches_the_answer(users):
 
 def test_reload_replays_running_turn_then_streams_rest(users):
     import threading
-    from kagent import live
+    from aiops import live
     alice, bob = users["alice"], users["bob"]
     cid = next(e for e in chat(alice, "xem pod") if e["type"] == "done")["conversation_id"]
     run = live.start(cid, "run-1", "câu hỏi đang chạy")
@@ -400,7 +402,7 @@ def test_reload_replays_running_turn_then_streams_rest(users):
 
 def test_timeline_keeps_text_and_tools_in_order(users):
     """Đoạn chữ agent viết giữa các lệnh được lưu theo thứ tự, để giao diện xếp xen kẽ như Claude Code."""
-    from kagent import llm
+    from aiops import llm
 
     class Talky(llm.HeuristicProvider):
         def run_agent(self, task, context, tools, call_tool, on_text=None, **kw):
@@ -476,7 +478,7 @@ def test_next_turn_replays_previous_turn_verbatim_so_prompt_cache_holds(users):
 
 
 def test_history_cut_point_moves_rarely(users):
-    from kagent.config import settings
+    from aiops.config import settings
 
     class Long(llm.HeuristicProvider):
         def run_agent(self, task, context, tools, call_tool, **kw):
@@ -498,7 +500,7 @@ def test_history_cut_point_moves_rarely(users):
 def test_message_sent_while_running_is_read_after_current_tool(users):
     """Tin gửi thêm vào hộp tin của lượt, agent đọc sau lệnh đang chạy; tin đến sau lần đọc cuối thành leftover để gửi lượt mới."""
     import threading
-    from kagent import live, llm
+    from aiops import live, llm
     alice, bob = users["alice"], users["bob"]
     started, posted, drained, posted2, seen = threading.Event(), threading.Event(), threading.Event(), threading.Event(), {}
 
@@ -548,7 +550,7 @@ def test_message_sent_while_running_is_read_after_current_tool(users):
 
 def test_anthropic_loop_puts_queued_text_after_tool_results_and_continues_on_it():
     from types import SimpleNamespace as NS
-    from kagent import llm
+    from aiops import llm
     calls = []
     replies = [NS(content=[NS(type="tool_use", name="db__query", input={"sql": "SELECT 1"}, id="a")], stop_reason="tool_use"),
                NS(content=[NS(type="text", text="đã xong")], stop_reason="end_turn"),
@@ -570,3 +572,19 @@ def test_anthropic_loop_puts_queued_text_after_tool_results_and_continues_on_it(
     assert after_tools[0]["type"] == "tool_result" and after_tools[-1]["text"] == "[thêm] xem log"
     # Model đã kết thúc nhưng còn tin mới: đọc tin đó và chạy tiếp thay vì bỏ.
     assert calls[2][-1]["content"][0]["text"] == "[thêm] đừng restart" and out["answer"].endswith("ok, không restart")
+
+
+def test_legacy_kagent_db_and_bot_are_renamed(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    old = sqlite3.connect(tmp_path / "kagent.db")
+    old.execute("PRAGMA journal_mode = WAL")
+    old.execute("CREATE TABLE app_user (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, pw_hash TEXT NOT NULL, is_org_admin INTEGER NOT NULL DEFAULT 0)")
+    old.execute("INSERT INTO app_user VALUES ('b1','kagent-alerts','00$disabled',0)")
+    old.commit()  # còn nằm trong -wal: bản đổi tên phải mang theo
+    conn = db.connect()
+    db.init_schema(conn)
+    db.init_schema(conn)
+    assert not (tmp_path / "kagent.db").exists() and (tmp_path / "aiops.db").exists()
+    assert conn.execute("SELECT username FROM app_user WHERE id='b1'").fetchone()[0] == "aiops-alerts"
+    conn.close()
+    old.close()

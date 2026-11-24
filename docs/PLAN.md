@@ -12,21 +12,21 @@ mọi lệnh gọi công cụ đi qua gateway có phân mức rủi ro, multi-te
 
 | Thành phần | Tài liệu kiến trúc | MVP | File |
 | --- | --- | --- | --- |
-| L0 Episode | Bảng chỉ ghi thêm | Trigger SQLite chặn sửa/xóa phần bất biến | `kagent/db.py` |
-| L1 KU, `ku_edge`, `ku_event` | Nguyên tử, hai trục thời gian, audit | Đầy đủ các trường, rollback theo `ku_event` | `kagent/knowledge.py` |
-| Nguồn ngoài episode | — (thêm sau, theo ý tưởng "LLM wiki") | Tài liệu tải lên và sự cố đã xử lý xong lưu nguyên bản ở `source_doc`, LLM tách KU từng đoạn, đi qua Curator và cổng duyệt; `source_eps` ghi `doc:<id>#<đoạn>` | `kagent/sources.py` |
-| Bảo trì kho | — (thêm sau) | Mỗi ngày: loại ứng viên quá hạn, nối cạnh `related`, gợi ý gộp thực thể, báo KU không dùng và mâu thuẫn còn treo; gộp KU trùng theo cụm trang thực thể (nhóm chỉ toàn ứng viên tự gộp, gộp KU đang dùng chờ admin duyệt) | `kagent/lint.py`, `kagent/dedup.py` |
-| L2 Tri thức biên dịch | Repo git, playbook có ID + bộ đếm, Skill | Repo git riêng mỗi tenant, nhánh `proposal/*` thay cho pull request; thêm trang thực thể (KU theo loại, sự cố đã gặp, liên quan) và `entities/index.md` | `kagent/compiler.py` |
-| L3 Chỉ mục | Vector + BM25 + đồ thị | Vector băm + FTS5 BM25 + mở rộng 1 bước trên `ku_edge`; cạnh `related` do Curator ghi theo IDF thực thể chung | `kagent/retrieval.py`, `kagent/knowledge.py` |
-| Luồng đọc | Router → truy xuất → lắp ngữ cảnh theo ngân sách → ghi episode | Như thiết kế; agent tra thêm giữa lượt bằng `search_knowledge`, `read_knowledge_page` | `kagent/agent.py`, `kagent/conversation.py` |
-| Luồng học | Reflector → Curator → Cổng duyệt → Compiler | Như thiết kế, chạy nền theo lịch và theo sự kiện; episode chưa có kết quả được LLM-as-judge chấm trước khi phản tư | `kagent/learning.py`, `kagent/scheduler.py` |
-| Đo lường | Golden task, chỉ số tuần | Golden task chặn publish, trang Đo lường | `kagent/compiler.py`, `kagent/api.py` |
-| MCP Gateway | Danh mục, kiểm quyền, audit | Template công cụ (git) + kết nối do admin/user tạo với tham số riêng, gắn tenant/user/môi trường; connector gọi hệ thống thật qua lớp mạng chống SSRF; secret mã hóa; 3 cửa quyết định, audit | `kagent/templates/`, `kagent/connectors/`, `kagent/connections.py`, `kagent/net.py`, `kagent/gateway.py`, `docs/TOOLS.md` |
-| Phân cấp quyền | R0–R4 × môi trường × tin cậy | Ma trận, `auto_execute`, ép hỏi; **khác thiết kế:** điểm tin cậy và đánh dấu nội dung untrusted được thay bằng auto mode (classifier chỉ đọc ý người dùng và lệnh đã gọi, xem `docs/TOOLS.md`) | `kagent/gateway.py`, `kagent/automode.py` |
-| Phê duyệt | Card, 3 lựa chọn, 30 phút, không tự duyệt | **Khác thiết kế theo quyết định của chủ dự án (2026-11-11):** người yêu cầu tự duyệt lệnh của mình ngay trong chat, một xác nhận là đủ. Admin có thể tắt theo tenant để quay về luật cũ (không tự duyệt, R3 prod cần 2 người). Thay đổi công cụ dùng chung vẫn cần admin | `kagent/gateway.py` |
-| Skill / thủ tục chín | Biên dịch procedure thành Skill | Thêm công cụ học được: chuỗi bước tự đề xuất hoặc lưu từ chat, chạy qua gateway | `kagent/learned.py` |
-| Phạm vi `user:<id>` | Tri thức theo người dùng | Hồ sơ cá nhân, ký ức cá nhân riêng tư, không vào L2 chung | `kagent/agent.py`, `kagent/learning.py` |
-| Multi-tenant | RLS PostgreSQL, overlay chỉ siết | Lọc `tenant_id` ở tầng truy vấn, overlay chỉ siết | `kagent/gateway.py`, `kagent/api.py` |
+| L0 Episode | Bảng chỉ ghi thêm | Trigger SQLite chặn sửa/xóa phần bất biến | `aiops/db.py` |
+| L1 KU, `ku_edge`, `ku_event` | Nguyên tử, hai trục thời gian, audit | Đầy đủ các trường, rollback theo `ku_event` | `aiops/knowledge.py` |
+| Nguồn ngoài episode | — (thêm sau, theo ý tưởng "LLM wiki") | Tài liệu tải lên và sự cố đã xử lý xong lưu nguyên bản ở `source_doc`, LLM tách KU từng đoạn, đi qua Curator và cổng duyệt; `source_eps` ghi `doc:<id>#<đoạn>` | `aiops/sources.py` |
+| Bảo trì kho | — (thêm sau) | Mỗi ngày: loại ứng viên quá hạn, nối cạnh `related`, gợi ý gộp thực thể, báo KU không dùng và mâu thuẫn còn treo; gộp KU trùng theo cụm trang thực thể (nhóm chỉ toàn ứng viên tự gộp, gộp KU đang dùng chờ admin duyệt) | `aiops/lint.py`, `aiops/dedup.py` |
+| L2 Tri thức biên dịch | Repo git, playbook có ID + bộ đếm, Skill | Repo git riêng mỗi tenant, nhánh `proposal/*` thay cho pull request; thêm trang thực thể (KU theo loại, sự cố đã gặp, liên quan) và `entities/index.md` | `aiops/compiler.py` |
+| L3 Chỉ mục | Vector + BM25 + đồ thị | Vector băm + FTS5 BM25 + mở rộng 1 bước trên `ku_edge`; cạnh `related` do Curator ghi theo IDF thực thể chung | `aiops/retrieval.py`, `aiops/knowledge.py` |
+| Luồng đọc | Router → truy xuất → lắp ngữ cảnh theo ngân sách → ghi episode | Như thiết kế; agent tra thêm giữa lượt bằng `search_knowledge`, `read_knowledge_page` | `aiops/agent.py`, `aiops/conversation.py` |
+| Luồng học | Reflector → Curator → Cổng duyệt → Compiler | Như thiết kế, chạy nền theo lịch và theo sự kiện; episode chưa có kết quả được LLM-as-judge chấm trước khi phản tư | `aiops/learning.py`, `aiops/scheduler.py` |
+| Đo lường | Golden task, chỉ số tuần | Golden task chặn publish, trang Đo lường | `aiops/compiler.py`, `aiops/api.py` |
+| MCP Gateway | Danh mục, kiểm quyền, audit | Template công cụ (git) + kết nối do admin/user tạo với tham số riêng, gắn tenant/user/môi trường; connector gọi hệ thống thật qua lớp mạng chống SSRF; secret mã hóa; 3 cửa quyết định, audit | `aiops/templates/`, `aiops/connectors/`, `aiops/connections.py`, `aiops/net.py`, `aiops/gateway.py`, `docs/TOOLS.md` |
+| Phân cấp quyền | R0–R4 × môi trường × tin cậy | Ma trận, `auto_execute`, ép hỏi; **khác thiết kế:** điểm tin cậy và đánh dấu nội dung untrusted được thay bằng auto mode (classifier chỉ đọc ý người dùng và lệnh đã gọi, xem `docs/TOOLS.md`) | `aiops/gateway.py`, `aiops/automode.py` |
+| Phê duyệt | Card, 3 lựa chọn, 30 phút, không tự duyệt | **Khác thiết kế theo quyết định của chủ dự án (2026-11-11):** người yêu cầu tự duyệt lệnh của mình ngay trong chat, một xác nhận là đủ. Admin có thể tắt theo tenant để quay về luật cũ (không tự duyệt, R3 prod cần 2 người). Thay đổi công cụ dùng chung vẫn cần admin | `aiops/gateway.py` |
+| Skill / thủ tục chín | Biên dịch procedure thành Skill | Thêm công cụ học được: chuỗi bước tự đề xuất hoặc lưu từ chat, chạy qua gateway | `aiops/learned.py` |
+| Phạm vi `user:<id>` | Tri thức theo người dùng | Hồ sơ cá nhân, ký ức cá nhân riêng tư, không vào L2 chung | `aiops/agent.py`, `aiops/learning.py` |
+| Multi-tenant | RLS PostgreSQL, overlay chỉ siết | Lọc `tenant_id` ở tầng truy vấn, overlay chỉ siết | `aiops/gateway.py`, `aiops/api.py` |
 
 ## Quyết định kỹ thuật và điểm khác tài liệu kiến trúc
 
@@ -62,5 +62,5 @@ mọi lệnh gọi công cụ đi qua gateway có phân mức rủi ro, multi-te
 ```bash
 python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/pytest -q
-KAGENT_ADMIN_PASSWORD=doi-mat-khau .venv/bin/uvicorn kagent.api:app --port 8000
+AIOPS_ADMIN_PASSWORD=doi-mat-khau .venv/bin/uvicorn aiops.api:app --port 8000
 ```

@@ -7,9 +7,9 @@ import pytest
 
 import fakes
 from conftest import Session, create_connections, tool_steps
-from kagent import connections, db, net, tools
-from kagent.connectors import base, elasticsearch, grafana, k8s, kubectl, sql, web
-from kagent.connectors.base import ConnectorError
+from aiops import connections, db, net, tools
+from aiops.connectors import base, elasticsearch, grafana, k8s, kubectl, sql, web
+from aiops.connectors.base import ConnectorError
 
 
 def params(**kw):
@@ -203,7 +203,7 @@ tools:
 
 @pytest.mark.parametrize("change,message", [
     (("action_class: read", "action_class: write\n    reversible: \"yes\"\n    risk_tier: R0"), "thấp hơn mức tối thiểu"),
-    (("handler: web:fetch_page", "handler: os:system"), "kagent.connectors.os"),
+    (("handler: web:fetch_page", "handler: os:system"), "aiops.connectors.os"),
     (("type: url", "type: password"), "type phải thuộc"),
     (("ping: web:ping", "ping: web:khong_co"), "khong_co"),
     (("    description: đọc\n", ""), "thiếu description"),
@@ -244,7 +244,7 @@ def test_member_creates_personal_connection_private_to_them(users):
 
 
 def test_personal_tool_usable_only_by_owner(users):
-    from kagent import gateway
+    from aiops import gateway
     alice, bob = users["alice"], users["bob"]
     c = new_k8s(alice).json()
     with db.session() as conn:

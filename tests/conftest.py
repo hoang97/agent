@@ -6,16 +6,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 import fakes
-from kagent import api as api_mod
-from kagent.config import settings
-from kagent import llm
+from aiops import api as api_mod
+from aiops.config import settings
+from aiops import llm
 
 PASSWORD = "test-password"
 
 
 @pytest.fixture()
 def client():
-    tmp = Path(tempfile.mkdtemp(prefix="kagent-test-"))
+    tmp = Path(tempfile.mkdtemp(prefix="aiops-test-"))
     settings.configure(data_dir=tmp, admin_password=PASSWORD, demo_password=PASSWORD, scheduler_enabled=False, llm_provider="heuristic", anthropic_key="")
     api_mod._failures.clear()
     llm.set_provider(None)
@@ -34,7 +34,7 @@ class Session:
         self.cookie = None
         r = client.post("/api/auth/login", json={"username": username, "password": PASSWORD})
         assert r.status_code == 200, r.text
-        self.cookie = r.cookies["kagent_session"]
+        self.cookie = r.cookies["aiops_session"]
         client.cookies.clear()
         me = self.get("/api/me", tenant=False).json()
         self.tenant = next(t["id"] for t in me["tenants"] if t["name"] == tenant_name) if me["tenants"] else None
@@ -42,7 +42,7 @@ class Session:
     def _call(self, method, path, tenant=True, **kw):
         headers = {"X-Tenant-Id": self.tenant} if tenant else {}
         self.c.cookies.clear()
-        self.c.cookies.set("kagent_session", self.cookie)
+        self.c.cookies.set("aiops_session", self.cookie)
         r = self.c.request(method, path, headers=headers, **kw)
         self.c.cookies.clear()
         return r
@@ -68,15 +68,15 @@ class Session:
 @pytest.fixture(autouse=True)
 def infra(monkeypatch, tmp_path):
     """Mọi test chạy connector thật trên hạ tầng giả: không DNS, không mạng, không CSDL thật."""
-    from kagent import net
-    from kagent.connectors import kubectl, openstack, sql as sql_connector
+    from aiops import net
+    from aiops.connectors import kubectl, openstack, sql as sql_connector
     openstack._cache.clear()
     fake = fakes.Infra()
     monkeypatch.setattr(net, "resolve", fakes.resolve)
     monkeypatch.setattr(net, "transport_override", fake.transport)
     monkeypatch.setattr(sql_connector, "_open", fakes.sqlite_open(tmp_path / "shop.db"))
     monkeypatch.setattr(kubectl, "runner", fakes.kubectl_runner(fake))
-    from kagent import proxy
+    from aiops import proxy
     proxy.reset()
     monkeypatch.setattr(proxy, "fetcher", lambda url: (_ for _ in ()).throw(AssertionError("test chưa khai file PAC giả")))
     yield fake
@@ -84,7 +84,7 @@ def infra(monkeypatch, tmp_path):
 
 
 def create_connections(tenant_id: str, enable_all: bool = True) -> None:
-    from kagent import connections, db
+    from aiops import connections, db
     with db.session() as conn:
         admin = conn.execute("SELECT id FROM app_user WHERE username='admin'").fetchone()["id"]
         for name, template, params, secrets in fakes.CONNECTIONS:

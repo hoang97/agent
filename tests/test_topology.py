@@ -4,14 +4,14 @@ from datetime import timedelta
 import pytest
 
 from test_openstack import CLOUDS
-from kagent import connections, db, gateway, topology
+from aiops import connections, db, gateway, topology
 
 U1, U2 = "11111111-2222-3333-4444-555555555551", "11111111-2222-3333-4444-555555555552"
 
 
 @pytest.fixture()
 def clock(monkeypatch):
-    """Đẩy đồng hồ của kagent về sau thay cho chờ thật."""
+    """Đẩy đồng hồ của aiops về sau thay cho chờ thật."""
     real, offset = db.now, [timedelta(0)]
     monkeypatch.setattr(db, "now", lambda: real() + offset[0])
 
@@ -338,7 +338,7 @@ def _new_alert(tenant, aid, labels):
 
 
 def _assign(tenant, aid):
-    from kagent import incidents
+    from aiops import incidents
     with db.session() as conn:
         cfg = {**incidents.settings(conn, tenant), "ai_grouping": False}
         iid = incidents.assign(conn, tenant, aid, cfg)
@@ -356,7 +356,7 @@ def test_alert_joins_incident_on_same_specific_host_when_all_edges_trusted(topo,
 
 
 def test_hint_edge_never_auto_groups_but_is_suggested(topo, infra):
-    from kagent import incidents
+    from aiops import incidents
     _scan(topo)  # worker-1 chỉ nối máy ảo bằng IP: cạnh gợi ý
     _incident(topo, "h2", [("etcdHighCommitDurations", {"node": "master-1"})])
     _new_alert(topo, "a-w2", {"node": "worker-1"})
@@ -369,7 +369,7 @@ def test_hint_edge_never_auto_groups_but_is_suggested(topo, infra):
 
 
 def test_auto_merge_open_incidents_sharing_a_specific_host(topo, infra):
-    from kagent import incidents
+    from aiops import incidents
     infra.k8s_nodes[1]["PROVIDER"] = f"openstack:///{U2}"
     _scan(topo)
     _incident(topo, "h3", [("A", {"node": "master-1"})])

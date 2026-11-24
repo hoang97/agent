@@ -1,7 +1,7 @@
 """LLM-as-judge: chấm episode chưa có kết quả trước khi Reflector và bộ đếm dùng tới."""
 import json
 
-from kagent import agent, db, knowledge, learning, llm
+from aiops import agent, db, knowledge, learning, llm
 
 from test_llm import msg, provider, text
 

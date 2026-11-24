@@ -2,15 +2,15 @@
 import pytest
 
 import fakes
-from kagent import connections, db, gateway, llm
-from kagent.connectors import gitlab
-from kagent.connectors.base import ConnectorError
+from aiops import connections, db, gateway, llm
+from aiops.connectors import gitlab
+from aiops.connectors.base import ConnectorError
 
 GL = {"_allow_private": False, "url": "https://gitlab.test/gitlab/", "token": fakes.GITLAB_TOKEN, "default_project": "team/shop"}
 
 
 def test_reads(infra):
-    assert gitlab.ping(GL) == {"ok": True, "version": "17.5.0", "user": "kagent-bot"}
+    assert gitlab.ping(GL) == {"ok": True, "version": "17.5.0", "user": "aiops-bot"}
     assert gitlab.list_projects(GL, {"search": "shop"})["projects"][0]["path"] == "team/shop"
     assert gitlab.list_pipelines(GL, {"ref": "release/1.2"})["pipelines"][0] == {
         "id": 11, "ref": "release/1.2", "status": "failed", "source": "push", "sha": "abcdef12", "created_at": None, "url": None}

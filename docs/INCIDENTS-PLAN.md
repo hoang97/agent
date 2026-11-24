@@ -8,7 +8,7 @@ và chờ duyệt khi cần, cuối cùng có một bản tóm tắt ngắn cho 
 
 ## Theo tài liệu Cloud Operations (2026-11-23)
 
-Đối chiếu kagent với kiến trúc tham chiếu Gartner G00834503, benchmark AIOps (AWS, Azure, Google) và Cloud Monitor 2.0 của Alibaba.
+Đối chiếu aiops với kiến trúc tham chiếu Gartner G00834503, benchmark AIOps (AWS, Azure, Google) và Cloud Monitor 2.0 của Alibaba.
 Làm theo thứ tự, mỗi việc một commit; chi tiết ở `IMPROVEMENTS.md`.
 
 | # | Việc | Trạng thái |
@@ -43,7 +43,7 @@ Xếp theo thứ tự nên làm.
 
 Bản tóm tắt dựa vào dòng sự kiện cho chi tiết, nhưng hiện mỗi lệnh chỉ ghi "chạy X".
 
-- Mỗi lệnh ghi: ai yêu cầu (kagent tự động hay người vận hành trong chat), tự chạy hay ai duyệt lúc nào, bị từ chối kèm ghi chú,
+- Mỗi lệnh ghi: ai yêu cầu (aiops tự động hay người vận hành trong chat), tự chạy hay ai duyệt lúc nào, bị từ chối kèm ghi chú,
   hết hạn, lỗi; kết quả tóm một dòng; xác minh lúc nào, cảnh báo đã hết hay còn.
 - Gồm cả lệnh người dùng tự yêu cầu trong hội thoại sự cố, hiện chỉ nằm trong trace mà không vào `incident.actions`.
 - Dữ liệu đã có (`approval_request.decided_by`, `decided_at`, `deny_reason`, `result`; `incident.actions`), không cần gọi model.
@@ -81,7 +81,7 @@ Khi người dùng hỏi tiếp trong hội thoại sự cố, agent chưa nhậ
 ### 6. Mức S1–S4 và đánh giá có cần postmortem
 
 - dev/staging mặc định S4 (chỉ ảnh hưởng nội bộ).
-- prod: hỏi người bằng `ask_user` điều kagent không biết (khách hàng có bị ảnh hưởng, diện rộng hay hẹp, có mất dữ liệu),
+- prod: hỏi người bằng `ask_user` điều aiops không biết (khách hàng có bị ảnh hưởng, diện rộng hay hẹp, có mất dữ liệu),
   rồi áp cây quyết định ở README mục 3 của `ops/incidents`.
 - Cần postmortem theo README mục 5, dùng kết quả của việc 2 cho điều kiện "S3 lặp lại ≥ 2 lần trong 30 ngày".
 

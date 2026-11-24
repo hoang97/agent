@@ -1,0 +1,127 @@
+template: k8s
+title: Kubernetes
+description: "API server Kubernetes, xác thực bằng token ServiceAccount hoặc file kubeconfig. Công cụ kubectl_* chạy bằng ServiceAccount riêng theo nhóm quyền đọc/ghi/quản trị, do aiops tạo từ tài khoản này (cần quyền tạo ServiceAccount và RBAC)."
+ping: k8s:ping
+validate: k8s:validate_params
+fields:
+  - {name: kubeconfig, type: secret_text, description: "Nội dung kubeconfig có nhúng sẵn chứng chỉ, xuất bằng: kubectl config view --raw --minify --flatten. Dùng được token hoặc chứng chỉ client; không hỗ trợ exec/auth-provider"}
+  - {name: context, type: string, description: "Context trong kubeconfig; để trống thì dùng current-context"}
+  - {name: api_url, type: url, description: "Địa chỉ API server, ví dụ https://k8s.example.com:6443; bắt buộc nếu không có kubeconfig, điền thì thay server trong kubeconfig"}
+  - {name: token, type: secret, description: "Token của tài khoản quản trị (dùng để tạo ServiceAccount và RBAC); bắt buộc nếu không có kubeconfig, điền thì thay thông tin xác thực trong kubeconfig"}
+  - {name: ca_cert, type: text, description: Chứng chỉ CA dạng PEM nếu cụm dùng CA riêng}
+  - {name: verify_tls, type: boolean, default: true, description: Kiểm tra chứng chỉ TLS}
+  - {name: namespace, type: string, default: default, description: "Namespace mặc định của kubectl khi lệnh không có -n"}
+  - {name: proxy, type: string, default: auto, description: "auto = theo file PAC ở Cài đặt → Proxy; none = đi thẳng; hoặc http://host:port"}
+tools:
+  # Ba công cụ kubectl chạy bằng ServiceAccount riêng của từng nhóm quyền, do aiops tạo trong cụm (Công cụ → Kết nối → Quyền Kubernetes).
+  # RBAC của cụm là giới hạn thật; mức rủi ro của công cụ khớp với nhóm quyền nên không cần đọc lệnh để đoán.
+  - name: kubectl_read
+    description: "Chạy lệnh kubectl chỉ đọc (get, describe, logs, top, events, explain, auth can-i, rollout status/history...) bằng quyền nhóm đọc. Ví dụ command: get pods -n app -o wide. Lọc kết quả được bằng | grep [-i -v -E -F -w -c], | head -n N, | tail -n N, | wc -l (aiops tự lọc, không có shell)"
+    handler: kubectl:run_read
+    trusted_when: kubectl:trusted_output
+    trusted_view: kubectl:trusted_view
+    action_class: read
+    blast_radius: cluster
+    data_sensitivity: personal
+    untrusted_output: true
+    input_schema:
+      properties:
+        command: {type: string, description: "Lệnh kubectl không kèm chữ kubectl, flag đặt sau lệnh con, flag ngắn viết tách (-n app); có thể nối | grep/head/tail/wc -l"}
+        timeout_seconds: {type: integer}
+      required: [command]
+
+  - name: kubectl_write
+    description: "Chạy lệnh kubectl thay đổi tài nguyên (apply, create, patch, replace, label, annotate, scale, set, rollout restart/undo, cordon...) bằng quyền nhóm ghi; không xóa được. Luôn chạy thử --dry-run=server trước"
+    handler: kubectl:run_write
+    trusted_when: kubectl:trusted_output
+    trusted_view: kubectl:trusted_view
+    check: kubectl:check_write
+    action_class: write
+    reversible: partial
+    blast_radius: namespace
+    data_sensitivity: internal
+    dry_run: server
+    untrusted_output: true
+    rollback_hint: "Áp lại manifest cũ, hoặc kubectl rollout undo với deployment"
+    undo: kubectl_undo
+    input_schema:
+      properties:
+        command: {type: string, description: "Lệnh kubectl không kèm chữ kubectl, ví dụ: apply -f - hoặc scale deploy/web --replicas=3 -n app"}
+        manifest: {type: string, description: "Nội dung YAML/JSON khi lệnh có -f -"}
+        timeout_seconds: {type: integer}
+      required: [command]
+
+  - name: kubectl_admin
+    description: "Chạy lệnh kubectl bất kỳ trong phạm vi nhóm quản trị (delete, drain, exec, run, certificate approve và mọi lệnh của nhóm ghi, đọc). Luôn cần duyệt"
+    handler: kubectl:run_admin
+    trusted_when: kubectl:trusted_output
+    trusted_view: kubectl:trusted_view
+    check: kubectl:check_admin
+    action_class: destructive
+    reversible: "no"
+    blast_radius: cluster
+    data_sensitivity: secret
+    dry_run: server
+    untrusted_output: true
+    rollback_hint: "Tạo lại tài nguyên từ manifest đã lưu; object đã xóa không tự khôi phục"
+    undo: kubectl_undo
+    input_schema:
+      properties:
+        command: {type: string, description: "Lệnh kubectl không kèm chữ kubectl, ví dụ: delete pod web-0 -n app hoặc exec web-0 -n app -- env"}
+        manifest: {type: string, description: "Nội dung YAML/JSON khi lệnh có -f -"}
+        timeout_seconds: {type: integer}
+      required: [command]
+
+  # Helm lưu release trong Secret nên ba công cụ helm_* đều chạy bằng ServiceAccount nhóm quản trị; aiops tự phân lệnh theo nội dung (xem helm.py).
+  - name: helm_read
+    description: "Chạy lệnh helm chỉ đọc: list, status, history, show chart/values/readme, template, get notes/metadata, diff upgrade/rollback/revision/release (plugin helm-diff, giá trị Secret bị che), drift run/all (plugin helm-drift, so release với trạng thái thật trong cụm). Chart lấy từ oci://, https://.../chart.tgz hoặc tên chart kèm --repo URL. Ví dụ: drift run web -n app --from-release. Cần nhóm quản trị đã áp dụng"
+    handler: helm:run_read
+    trusted_when: helm:trusted_output
+    action_class: read
+    blast_radius: cluster
+    data_sensitivity: personal
+    untrusted_output: true
+    input_schema:
+      properties:
+        command: {type: string, description: "Lệnh helm không kèm chữ helm, flag ngắn viết tách (-n app); có thể nối | grep/head/tail/wc -l"}
+        values: {type: string, description: "Nội dung values YAML khi lệnh có -f -"}
+        timeout_seconds: {type: integer}
+      required: [command]
+
+  - name: helm_write
+    description: "Chạy helm install, upgrade (kể cả --install), rollback. Luôn chạy thử bằng helm diff trước; hoàn tác bằng helm rollback về revision trước, hoặc gỡ release vừa cài. Chart lấy từ oci://, https://.../chart.tgz hoặc tên chart kèm --repo URL; values truyền qua tham số values với -f -"
+    handler: helm:run_write
+    check: helm:check_write
+    action_class: write
+    reversible: partial
+    blast_radius: namespace
+    data_sensitivity: internal
+    dry_run: server
+    untrusted_output: true
+    rollback_hint: "helm rollback <release> <revision trước>"
+    undo: helm_undo
+    input_schema:
+      properties:
+        command: {type: string, description: "Lệnh helm không kèm chữ helm, ví dụ: upgrade web oci://registry.example.com/charts/web --version 1.2.3 -n app -f -"}
+        values: {type: string, description: "Nội dung values YAML khi lệnh có -f -"}
+        timeout_seconds: {type: integer, description: "Mặc định 300, tối đa 600; tự thêm --timeout cho helm nếu lệnh chưa có"}
+      required: [command]
+
+  - name: helm_admin
+    description: "Chạy helm uninstall, test, get values/manifest/hooks/all, diff --show-secrets và mọi lệnh của helm_write, helm_read. Kết quả có thể chứa Secret. Luôn cần duyệt"
+    handler: helm:run_admin
+    check: helm:check_admin
+    action_class: destructive
+    reversible: "no"
+    blast_radius: cluster
+    data_sensitivity: secret
+    dry_run: server
+    untrusted_output: true
+    rollback_hint: "Release đã gỡ không tự khôi phục; cài lại từ chart và values cũ"
+    undo: helm_undo
+    input_schema:
+      properties:
+        command: {type: string, description: "Lệnh helm không kèm chữ helm, ví dụ: uninstall web -n app hoặc get values web -n app"}
+        values: {type: string, description: "Nội dung values YAML khi lệnh có -f -"}
+        timeout_seconds: {type: integer}
+      required: [command]

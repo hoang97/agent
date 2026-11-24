@@ -135,7 +135,7 @@ class Infra:
         if path == "/version":
             return self._json({"version": "17.5.0"})
         if path == "/user":
-            return self._json({"username": "kagent-bot"})
+            return self._json({"username": "aiops-bot"})
         if path == "/projects":
             return self._json([{"id": 7, "path_with_namespace": "team/shop", "default_branch": "main", "web_url": "https://gitlab.test/team/shop"}])
         if path == f"{proj}/pipelines":
@@ -194,7 +194,7 @@ class Infra:
             return self._json({"error": {"code": 401, "message": "The request you have made requires authentication."}}, 401)
         token = f"os-token-{len(self.os_logins)}"
         self.os_tokens.add(token)
-        body = {"token": {"expires_at": "2999-01-01T00:00:00.000000Z", "user": {"name": "kagent"}, "project": {"name": "demo", "id": "p1"},
+        body = {"token": {"expires_at": "2999-01-01T00:00:00.000000Z", "user": {"name": "aiops"}, "project": {"name": "demo", "id": "p1"},
                           "roles": [{"name": "member"}, {"name": "reader"}], "catalog": self.CATALOG}}
         return httpx.Response(201, json=body, headers={"x-subject-token": token})
 
@@ -295,7 +295,7 @@ class Infra:
 
     def k8s_rbac(self, r: httpx.Request, path: str, sa: str | None):
         if path == "/apis/authentication.k8s.io/v1/selfsubjectreviews":
-            return self._json({"status": {"userInfo": {"username": f"system:serviceaccount:kagent-system:{sa}" if sa else "admin"}}}, 201)
+            return self._json({"status": {"userInfo": {"username": f"system:serviceaccount:aiops-system:{sa}" if sa else "admin"}}}, 201)
         if sa is not None and not path.startswith("/api/v1/namespaces/default/pods"):
             return self._json({"message": "forbidden"}, 403)
         if path in self.K8S_DISCOVERY and r.method == "GET":
@@ -324,7 +324,7 @@ class Infra:
         if r.method == "DELETE":
             return self._json({"status": "Success"}) if self.k8s_objects.pop(key, None) else self._json({"message": "not found"}, 404)
         if r.method == "PATCH":
-            assert r.headers["content-type"] == "application/apply-patch+yaml" and r.url.params["fieldManager"] == "kagent"
+            assert r.headers["content-type"] == "application/apply-patch+yaml" and r.url.params["fieldManager"] == "aiops"
             if ns and ns not in self.k8s_namespaces:
                 return self._json({"message": f'namespaces "{ns}" not found'}, 404)
             if self.k8s_forbid_grant and kind in ("Role", "ClusterRole"):
@@ -502,7 +502,7 @@ def sqlite_open(path: Path):
     seed.close()
 
     def _open(p, kind, read_only):
-        from kagent import net
+        from aiops import net
         net.check_host(p["host"], int(p.get("port") or 5432), p.get("_allow_private", False))
         conn = sqlite3.connect(path, timeout=10, check_same_thread=False, autocommit=False)  # DDL nằm trong giao dịch như PostgreSQL
         if read_only:

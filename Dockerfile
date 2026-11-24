@@ -30,12 +30,12 @@ RUN t=$(mktemp -d) && mkdir -p /opt/helm/plugins \
          && printf 'name: "drift"\nversion: "0.1.2"\nusage: "Identifies configurations deviated from helm charts"\ndescription: "helm-drift"\nuseTunnel: true\ncommand: "$HELM_PLUGIN_DIR/bin/helm-drift"\n' > /opt/helm/plugins/drift/plugin.yaml; fi \
     && if [ -x /usr/local/bin/helm ]; then HELM_PLUGINS=/opt/helm/plugins helm plugin list; fi \
     && rm -rf "$t"
-COPY kagent ./kagent
+COPY aiops ./aiops
 
-# /data tạo sẵn với chủ sở hữu kagent để named volume nhận đúng quyền khi khởi tạo lần đầu.
-RUN useradd --system --uid 10001 --home-dir /app kagent && install -d -o kagent -g kagent -m 750 /data
-USER kagent
-ENV KAGENT_DATA_DIR=/data PYTHONUNBUFFERED=1
+# /data tạo sẵn với chủ sở hữu aiops để named volume nhận đúng quyền khi khởi tạo lần đầu.
+RUN useradd --system --uid 10001 --home-dir /app aiops && install -d -o aiops -g aiops -m 750 /data
+USER aiops
+ENV AIOPS_DATA_DIR=/data PYTHONUNBUFFERED=1
 VOLUME /data
 EXPOSE 8000
 
@@ -43,4 +43,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"
 
 # Một worker: lịch nền và khóa Compiler nằm trong tiến trình.
-CMD ["uvicorn", "kagent.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["uvicorn", "aiops.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

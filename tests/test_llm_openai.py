@@ -5,8 +5,8 @@ import httpx
 import openai
 import pytest
 
-from kagent import llm, vault
-from kagent.config import settings
+from aiops import llm, vault
+from aiops.config import settings
 
 URL = "/api/settings/llm-key"
 KEY = "sk-openai-test-0123456789abcdWXYZ"
@@ -158,7 +158,7 @@ def test_default_models_kept_without_override():
 
 
 def test_legacy_stored_credential_still_decrypts(users, auto_provider):
-    from kagent import db
+    from aiops import db
     with db.session() as conn:
         old = json.dumps({"key": KEY, "base_url": "https://r.test", "auth_type": "token"})
         conn.execute("INSERT INTO app_secret(name,ciphertext,last4,updated_at,updated_by) VALUES (?,?,?,?,?)",

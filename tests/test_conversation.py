@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kagent import conversation, db, llm
+from aiops import conversation, db, llm
 
 ROOT = Path(__file__).resolve().parent.parent
 

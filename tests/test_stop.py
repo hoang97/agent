@@ -5,9 +5,9 @@ import time
 
 import pytest
 
-from kagent import agent, db, gateway, incidents, live, llm
-from kagent.connectors import kubectl
-from kagent.connectors.base import ConnectorError
+from aiops import agent, db, gateway, incidents, live, llm
+from aiops.connectors import kubectl
+from aiops.connectors.base import ConnectorError
 
 
 def test_abort_on_closes_blocked_stream_from_other_thread():

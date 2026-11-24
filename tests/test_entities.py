@@ -1,5 +1,5 @@
 """Chuẩn hoá tên thực thể và gộp tên do admin chọn."""
-from kagent import db, entities, knowledge
+from aiops import db, entities, knowledge
 
 V = entities.Vocab(["kibana_staging.search_logs", "kibana_staging.count_logs", "k8s_staging.kubectl_read", "db.kubectl_read"], {})
 

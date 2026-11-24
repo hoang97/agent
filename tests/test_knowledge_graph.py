@@ -1,5 +1,5 @@
 """API tra cứu L3: đồ thị theo thực thể và theo câu hỏi."""
-from kagent import db, knowledge
+from aiops import db, knowledge
 
 
 def _ku(tenant, title, content, entities, status="active", scope="tenant"):
@@ -8,7 +8,7 @@ def _ku(tenant, title, content, entities, status="active", scope="tenant"):
 
 
 def test_graph_with_entity_adds_its_kus_beyond_the_default_limit(users, monkeypatch):
-    from kagent import api
+    from aiops import api
     a = users["admin"]
     monkeypatch.setattr(api, "GRAPH_LIMIT", 2)
     for i in range(3):

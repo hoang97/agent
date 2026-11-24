@@ -1,12 +1,12 @@
-"""Công cụ kubectl_* và việc kagent tạo ServiceAccount/RBAC theo 3 nhóm quyền, chạy trên API server giả."""
+"""Công cụ kubectl_* và việc aiops tạo ServiceAccount/RBAC theo 3 nhóm quyền, chạy trên API server giả."""
 import yaml
 import pytest
 
 import fakes
 from conftest import Session
-from kagent import connections, db, gateway, tools
-from kagent.connectors import k8s, k8s_rbac, kubectl
-from kagent.connectors.base import ConnectorError
+from aiops import connections, db, gateway, tools
+from aiops.connectors import k8s, k8s_rbac, kubectl
+from aiops.connectors.base import ConnectorError
 
 ADMIN_P = {"_allow_private": False, "api_url": "https://k8s.test:6443", "token": fakes.K8S_TOKEN, "namespace": "default"}
 CID, CNAME = "0123456789abcdef-conn", "k8s_prod"
@@ -18,7 +18,7 @@ def rule(ns="default", resources=("pods",), verbs=("get", "list"), groups=("",))
 
 
 def config(read=(), write=(), admin=()):
-    return {"sa_namespace": "kagent-system", "profiles": {"read": list(read), "write": list(write), "admin": list(admin)}}
+    return {"sa_namespace": "aiops-system", "profiles": {"read": list(read), "write": list(write), "admin": list(admin)}}
 
 
 @pytest.fixture()
@@ -69,7 +69,7 @@ def test_parse_accepts(command, profile):
     ("get pods --watch", "read", "--watch"),
     ("get pods -w", "read", "-w"),
     ("logs web-0 -f", "read", "theo dõi log"),
-    ("apply -f /data/kagent.db", "write", "chỉ được -f -"),
+    ("apply -f /data/aiops.db", "write", "chỉ được -f -"),
     ("apply --filename=/etc/passwd", "write", "--filename=-"),
     ("apply -k ./dir", "write", "-k"),
     ("create configmap x --from-file=/data/secret.key", "write", "--from-file"),
@@ -104,7 +104,7 @@ def test_kubeconfig_refuses_internal_address_without_permission():
 
 
 def test_run_uses_profile_token_and_clean_env(calls, monkeypatch):
-    monkeypatch.setenv("KAGENT_SECRET_KEY", "super-secret")
+    monkeypatch.setenv("AIOPS_SECRET_KEY", "super-secret")
     out = kubectl.run_read({**ADMIN_P, "_sa_read": "read-tok"}, {"command": "kubectl get pods -n default", "timeout_seconds": 500})
     call = calls.seen[0]
     assert call["argv"][1:] == ["--request-timeout=120s", call["argv"][2], "get", "pods", "-n", "default"] and call["timeout"] == 120
@@ -236,14 +236,14 @@ def test_plan_apply_and_reapply(infra):
     plan = k8s_rbac.plan(ADMIN_P, CID, CNAME, cfg)
     assert not plan["errors"] and plan["profiles"] == {"read": True, "write": False, "admin": True}
     actions = {(i["kind"], i["namespace"], i["name"]): i["action"] for i in plan["items"]}
-    assert actions[("Namespace", None, "kagent-system")] == "create"
+    assert actions[("Namespace", None, "aiops-system")] == "create"
     assert actions[("ClusterRole", None, f"{BASE}-read")] == "create" and actions[("Role", "default", f"{BASE}-admin")] == "create"
     assert not infra.k8s_objects  # xem trước chỉ chạy thử
 
     result, tokens = k8s_rbac.apply(ADMIN_P, CID, CNAME, cfg)
     assert tokens == {"read": f"sa-token-{BASE}-read-token", "write": None, "admin": f"sa-token-{BASE}-admin-token"}
     objs = infra.k8s_objects
-    assert ("ServiceAccount", "kagent-system", f"{BASE}-read") in objs and ("ServiceAccount", "kagent-system", f"{BASE}-write") not in objs
+    assert ("ServiceAccount", "aiops-system", f"{BASE}-read") in objs and ("ServiceAccount", "aiops-system", f"{BASE}-write") not in objs
     # nhóm cao hơn thừa hưởng quyền nhóm thấp hơn
     read_binding = objs[("RoleBinding", "default", f"{BASE}-read")]
     assert {s["name"] for s in read_binding["subjects"]} == {f"{BASE}-read", f"{BASE}-admin"}
@@ -268,7 +268,7 @@ def test_plan_reports_missing_namespace_and_escalation(infra):
     assert any("namespace ghost không tồn tại" in e for e in plan["errors"])
     with pytest.raises(ConnectorError, match="không áp dụng được"):
         k8s_rbac.apply(ADMIN_P, CID, CNAME, config(read=[rule(ns="ghost")]))
-    infra.k8s_namespaces.add("kagent-system")
+    infra.k8s_namespaces.add("aiops-system")
     infra.k8s_forbid_grant = True
     plan = k8s_rbac.plan(ADMIN_P, CID, CNAME, config(read=[rule()]))
     assert any("not currently held" in e for e in plan["errors"])
@@ -277,7 +277,7 @@ def test_plan_reports_missing_namespace_and_escalation(infra):
 def test_ping_reports_service_account_identities(infra):
     _, tokens = k8s_rbac.apply(ADMIN_P, CID, CNAME, config(read=[rule()]))
     out = k8s.ping({**ADMIN_P, "_sa_read": tokens["read"], "_sa_write": "revoked-token"})
-    assert out["identities"]["read"] == f"system:serviceaccount:kagent-system:{BASE}-read"
+    assert out["identities"]["read"] == f"system:serviceaccount:aiops-system:{BASE}-read"
     assert out["identities"]["write"].startswith("lỗi: HTTP 401")
 
 

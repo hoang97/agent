@@ -2,7 +2,7 @@
 import json
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from kagent import connections, db, links
+from aiops import connections, db, links
 
 AT = "2026-11-12T08:00:00+00:00"
 

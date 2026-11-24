@@ -26,16 +26,16 @@ Mockup: `incident-ui.html` (artifact đã gửi). Mỗi phần của trang đề
 │ (Cần người xử lý) (Đang mở 2 ngày) (7/12 đang bắn) (Lặp lại 13 lần)    │
 ├ Đang chờ (2) ──────────────────────────────┬ Mốc thời gian ───────────┤
 │ ✗ Tạo Service … hết hạn 17:18 13/11        │ Bắt đầu 15:00 12/11       │
-│   vì auto mode chặn …  [Nhờ agent đề xuất] │ kagent nhận 20:15 (5h15)  │
+│   vì auto mode chặn …  [Nhờ agent đề xuất] │ aiops nhận 20:15 (5h15)  │
 │ ○ Đẩy lại image lên registry (ngoài cluster)│ Phục hồi: chưa            │
 │   [Đánh dấu đã xong]                        ├ Cảnh báo (theo tên) ─────┤
 ├ Tóm tắt ─────────── cập nhật 15:15 [Tóm tắt ngay] │ TargetDown  2 đang bắn │
 │ 2–4 câu cho lãnh đạo                        │ … [Xem nhãn, tách]        │
 ├ Dòng sự kiện [Tất cả|Hành động|Điều tra|Cảnh báo] ├ Nguyên nhân ─────────┤
 │ Ngày 13/11                                  │ lượt 3 · 16:48 · 0.60     │
-│ 00:40 kagent đề xuất  rollout undo → cần duyệt │ • thiếu Service …      │
+│ 00:40 aiops đề xuất  rollout undo → cần duyệt │ • thiếu Service …      │
 │ 00:52 admin duyệt     rollout undo → lỗi: …  │ • registry thiếu blob … │
-│ 16:48 kagent · lần 3  14 lệnh đọc → 2 nguyên nhân ├ Sự cố liên quan ──────┤
+│ 16:48 aiops · lần 3  14 lệnh đọc → 2 nguyên nhân ├ Sự cố liên quan ──────┤
 │ 17:18 hết hạn         tạo Service → chưa chạy│ 13 sự cố từ 12/11 …      │
 └─────────────────────────────────────────────┴──────────────────────────┘
 ```
@@ -47,8 +47,8 @@ Mockup: `incident-ui.html` (artifact đã gửi). Mỗi phần của trang đề
 | Menu ⋯ | Điều tra lại, Gộp vào…, Đóng kèm ghi chú | API sẵn có | 2 |
 | Đang chờ | Lệnh chờ duyệt (Duyệt/Từ chối), lệnh hết hạn hoặc bị từ chối chưa có lệnh thay (Nhờ agent đề xuất lại), lệnh lỗi, việc cần người ngoài cluster (Đánh dấu đã xong), chờ quota, điều tra lỗi | `incident_action` + `incident_task` + stage | 2, 5 |
 | Tóm tắt | Như hiện tại (`summaryCard`) | `incident.summary` | có |
-| Dòng sự kiện | Nhật ký xử lý: giờ, ai (cảnh báo / kagent · điều tra lần N / tên người / hết hạn), `hành động → kết quả`; nhóm theo ngày; lọc theo loại | `incident_event` + bắt đầu/hết của `alert_event` | 1, 2 |
-| Mốc thời gian | Cảnh báo đầu tiên bắt đầu, kagent nhận, thời gian phát hiện, phục hồi, đã kéo dài | `min(alert_event.starts_at)`, `created_at`, `resolved_at` | 2 |
+| Dòng sự kiện | Nhật ký xử lý: giờ, ai (cảnh báo / aiops · điều tra lần N / tên người / hết hạn), `hành động → kết quả`; nhóm theo ngày; lọc theo loại | `incident_event` + bắt đầu/hết của `alert_event` | 1, 2 |
+| Mốc thời gian | Cảnh báo đầu tiên bắt đầu, aiops nhận, thời gian phát hiện, phục hồi, đã kéo dài | `min(alert_event.starts_at)`, `created_at`, `resolved_at` | 2 |
 | Cảnh báo | Gom theo `alertname`: số đang bắn/đã hết; nhóm gom theo nhãn nào; bảng đầy đủ (nhãn, tách) trong `<details>` | `alert_event` | 2 |
 | Nguyên nhân | Nhận định của lượt điều tra mới nhất kèm số lượt, giờ, độ tin; bằng chứng và số lệnh đọc trong `<details>` | `incident.cause*` cập nhật mỗi lượt (việc 5) | 2 |
 | Sự cố liên quan | Sự cố đã hết hoặc đã đóng cùng nhóm trong 30 ngày; sự cố đang mở nên gộp | `_rule_match` mở rộng | 4 |
@@ -71,7 +71,7 @@ dòng sự kiện vẫn không hiện mốc nội bộ (lúc gộp, lúc bắt �
 CREATE TABLE incident_action (
   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, incident_id TEXT NOT NULL,
   episode_id TEXT, approval_id TEXT, origin TEXT NOT NULL,      -- investigation | chat
-  requested_by TEXT NOT NULL,                                   -- kagent-alerts hoặc user chat
+  requested_by TEXT NOT NULL,                                   -- aiops-alerts hoặc user chat
   tool TEXT NOT NULL, args TEXT, why TEXT, risk_tier TEXT, reasons TEXT NOT NULL DEFAULT '[]', dry_run TEXT,
   status TEXT NOT NULL,          -- pending | ok | error | denied | expired | blocked | invalid
   auto INTEGER NOT NULL DEFAULT 0, proposed_at TEXT NOT NULL,
@@ -91,11 +91,11 @@ CREATE INDEX ix_incident_action_approval ON incident_action(approval_id);
 
 ### Sự kiện `incident_event` thành nhật ký
 
-Thêm cột `actor` (`kagent`, id người dùng, `alert`, `system`) và `action_id`. Ghi sự kiện ngay lúc việc xảy ra:
+Thêm cột `actor` (`aiops`, id người dùng, `alert`, `system`) và `action_id`. Ghi sự kiện ngay lúc việc xảy ra:
 
 | kind | Khi | Dòng hiện |
 | --- | --- | --- |
-| `investigated` | lượt điều tra xong | `kagent · điều tra lần N` · `M lệnh đọc → kết luận (độ tin)` |
+| `investigated` | lượt điều tra xong | `aiops · điều tra lần N` · `M lệnh đọc → kết luận (độ tin)` |
 | `proposed` | `act` hoặc chat đưa lệnh qua gateway | không hiện: dòng sự kiện chỉ có lệnh đã thực sự chạy; sự kiện vẫn ghi làm mốc cho bản tóm tắt |
 | `ran`, `failed` | lệnh chạy xong | `<người> duyệt` hoặc `tự động` · `lệnh → result_line` |
 | `denied`, `expired`, `skipped` | quyết định, hết hạn, hoặc hội thoại có tin nhắn mới trước khi duyệt | không hiện (như `proposed`) |
@@ -103,7 +103,7 @@ Thêm cột `actor` (`kagent`, id người dùng, `alert`, `system`) và `action
 | `reopened`, `resolved`, `closed` | như hiện tại | |
 | `no_action`, `quota`, `error`, `stopped` | trạng thái chờ người | không hiện; mục "Đang chờ" đọc chúng |
 
-Bắt đầu và hết của cảnh báo vẫn lấy từ `alert_event` lúc đọc: giờ `starts_at` do nguồn cảnh báo cung cấp, có thể trước lúc kagent lấy về.
+Bắt đầu và hết của cảnh báo vẫn lấy từ `alert_event` lúc đọc: giờ `starts_at` do nguồn cảnh báo cung cấp, có thể trước lúc aiops lấy về.
 
 ### Cột mới của `incident`
 
@@ -117,11 +117,11 @@ Bắt đầu và hết của cảnh báo vẫn lấy từ `alert_event` lúc đ�
 ### Bảng `incident_task` (việc cần người)
 
 `id, incident_id, text, source (summary|user), created_at, done_by, done_at`. Bản tóm tắt trả JSON `{summary, human_tasks[]}`,
-kagent thêm task mới vào bảng và giữ task người đã đánh dấu xong.
+aiops thêm task mới vào bảng và giữ task người đã đánh dấu xong.
 
 ## Tách module
 
-`kagent/incidents.py` thành package, `__init__.py` re-export đúng các tên `api.py`, `scheduler.py` và test đang dùng
+`aiops/incidents.py` thành package, `__init__.py` re-export đúng các tên `api.py`, `scheduler.py` và test đang dùng
 (`settings`, `poll`, `get`, `merge`, `on_approval`, `tick`, …):
 
 | File | Nội dung |
@@ -142,7 +142,7 @@ Rủi ro: monkeypatch phải trỏ vào module con. Hiện chỉ có một chỗ
 | # | Giai đoạn | Việc trong plan | Thay đổi | Kiểm tra |
 | --- | --- | --- | --- | --- |
 | 0 | Tách module | — | Chỉ dời code, không đổi hành vi | toàn bộ test (`-n auto`) |
-| 1 | Hành động và nhật ký | 1 | `incident_action` + migration; sự kiện có `actor`/`action_id`; gateway ghi lệnh trong chat sự cố; `timeline()` chỉ đọc sự kiện; `on_approval` theo index | test migration trên bản chép `kagent.db`; dòng sự kiện của `b70c928e` có rollout undo lỗi, tạo Service hết hạn, ai duyệt |
+| 1 | Hành động và nhật ký | 1 | `incident_action` + migration; sự kiện có `actor`/`action_id`; gateway ghi lệnh trong chat sự cố; `timeline()` chỉ đọc sự kiện; `on_approval` theo index | test migration trên bản chép `aiops.db`; dòng sự kiện của `b70c928e` có rollout undo lỗi, tạo Service hết hạn, ai duyệt |
 | 2 | API view và trang chi tiết mới | 5 | `get()` trả `header`, `waiting`, `events`, `milestones`, `alert_groups`, `cause`; báo cáo điều tra có `symptom`; nguyên nhân cập nhật mỗi lượt; viết lại `incidentDetail` 2 cột, menu ⋯, lọc sự kiện | Chrome: `b70c928e` đối chiếu mockup; màn hẹp thành 1 cột |
 | 3 | Quota và danh sách | 3 | stage `waiting_quota` khi tenant hết quota hoặc provider trả 429, dừng tới khi người bấm Tiếp tục; danh sách mới, lọc "Cần người xử lý" | test với clock; Chrome danh sách |
 | 4 | Lặp lại và liên quan | 2 | `repeats`; `related()` 30 ngày; gợi ý gộp cho sự cố tự gộp bỏ qua | test; Chrome |

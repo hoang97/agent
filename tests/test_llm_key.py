@@ -5,8 +5,8 @@ import pytest
 import anthropic
 from cryptography.fernet import Fernet
 
-from kagent import db, llm, vault
-from kagent.config import settings
+from aiops import db, llm, vault
+from aiops.config import settings
 
 URL = "/api/settings/llm-key"
 KEY = "sk-ant-test-0123456789abcdefWXYZ"

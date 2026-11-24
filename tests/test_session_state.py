@@ -3,7 +3,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 
-from kagent import api as api_mod, db, knowledge, llm
+from aiops import api as api_mod, db, knowledge, llm
 from test_chat import chat
 
 
@@ -17,7 +17,7 @@ def test_active_session_is_extended_and_cookie_renewed(users):
     with db.session() as conn:
         conn.execute("UPDATE session SET expires_at=? WHERE token_hash=?", (db.later(hours=1), api_mod._token_hash(alice.cookie)))
     r = alice.get("/api/me", tenant=False)
-    assert r.status_code == 200 and "kagent_session" in r.headers.get("set-cookie", "")
+    assert r.status_code == 200 and "aiops_session" in r.headers.get("set-cookie", "")
     left = datetime.fromisoformat(_session_row(alice)["expires_at"]) - db.now()
     assert left > timedelta(hours=11)
 

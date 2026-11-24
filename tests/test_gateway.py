@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from kagent import db, gateway
+from aiops import db, gateway
 from conftest import tool_steps
 
 
@@ -189,7 +189,7 @@ def test_deny_note_creates_lesson_and_deny_without_note_does_not(users):
 
 
 def test_expired_approval_cannot_be_used(users, client):
-    from kagent import db
+    from aiops import db
     alice, bob = users["alice"], users["bob"]
     step = tool_steps(alice.run("scale deployment web lên 6 replica"))[0]
     with db.session() as conn:
@@ -228,7 +228,7 @@ class FakeJudge:
 
 
 def _write(users, judge, monkeypatch, task="scale deployment web lên 4 replica trong namespace default", n=1):
-    from kagent import db, llm
+    from aiops import db, llm
     monkeypatch.setattr(llm, "get_provider", lambda: judge)
     alice = users["alice"]
     with db.session() as conn:
@@ -263,7 +263,7 @@ def test_auto_mode_unavailable_asks(users, monkeypatch):
 
 def test_classifier_sees_calls_but_not_results(users, monkeypatch):
     judge = FakeJudge(True, True)
-    from kagent import db, llm
+    from aiops import db, llm
     monkeypatch.setattr(llm, "get_provider", lambda: judge)
     alice = users["alice"]
     with db.session() as conn:
@@ -297,7 +297,7 @@ def test_change_freeze_forces_ask(users):
 
 
 def test_disabled_tool_is_hidden_from_agent_and_blocked_by_gateway(users):
-    from kagent import db
+    from aiops import db
     alice = users["alice"]
     users["admin"].patch("/api/tools/k8s.kubectl_read", json={"enabled": False})
     assert tool_steps(alice.run("xem pod")) == []
@@ -308,7 +308,7 @@ def test_disabled_tool_is_hidden_from_agent_and_blocked_by_gateway(users):
 
 
 def test_tenant_admin_cannot_lower_risk_but_can_raise(users):
-    from kagent import db
+    from aiops import db
     alice = users["alice"]
     with db.session() as conn:
         uid = conn.execute("SELECT id FROM app_user WHERE username='alice'").fetchone()["id"]

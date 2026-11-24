@@ -5,7 +5,7 @@ import httpx2
 import openai
 import pytest
 
-from kagent import llm, vault
+from aiops import llm, vault
 
 URL = "/api/settings/llm-models"
 KEY = "sk-ant-test-0123456789abcdefWXYZ"

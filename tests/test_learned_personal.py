@@ -4,7 +4,7 @@ import json
 import pytest
 
 from conftest import tool_steps
-from kagent import agent, compiler, conversation, db, knowledge, learned, llm
+from aiops import agent, compiler, conversation, db, knowledge, learned, llm
 
 
 def run_three(user, tasks):

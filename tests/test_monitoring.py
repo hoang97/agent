@@ -2,9 +2,9 @@
 import pytest
 
 import fakes
-from kagent import net
-from kagent.connectors import alertmanager, prometheus
-from kagent.connectors.base import ConnectorError
+from aiops import net
+from aiops.connectors import alertmanager, prometheus
+from aiops.connectors.base import ConnectorError
 
 PROM = {"_allow_private": False, "url": "https://prom.test", "token": fakes.PROM_TOKEN}
 AM = {"_allow_private": False, "url": "https://am.test", "username": "am", "password": "pw"}
@@ -32,7 +32,7 @@ def test_prometheus_stats_skip_nan_and_inf():
 def test_row_turns_stored_nan_into_null():
     import json
     import sqlite3
-    from kagent import db
+    from aiops import db
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     r = c.execute("SELECT ? AS trace", ('[{"min": NaN, "max": Infinity}]',)).fetchone()

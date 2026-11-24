@@ -10,9 +10,9 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 import fakes
-from kagent import connections, db, net
-from kagent.connectors import k8s
-from kagent.connectors.base import ConnectorError
+from aiops import connections, db, net
+from aiops.connectors import k8s
+from aiops.connectors.base import ConnectorError
 
 
 def b64(text: str) -> str:
@@ -87,7 +87,7 @@ def test_invalid_yaml_rejected():
 
 def _cert_pair():
     key = ec.generate_private_key(ec.SECP256R1())
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "kagent-test")])
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "aiops-test")])
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key()).serial_number(1)
             .not_valid_before(now).not_valid_after(now + datetime.timedelta(days=1)).sign(key, hashes.SHA256()))

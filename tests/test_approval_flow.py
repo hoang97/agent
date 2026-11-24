@@ -1,7 +1,7 @@
 """Duyệt lệnh: grant theo phiên, lệnh cùng loại, agent tự chạy tiếp sau khi duyệt."""
 import json
 
-from kagent import agent, conversation, db, gateway
+from aiops import agent, conversation, db, gateway
 from test_chat import chat, done
 
 # Lệnh đọc R1 ở prod của tenant mẫu phải hỏi (auto_execute=read_only), nên dùng để dựng lệnh chờ duyệt.
@@ -168,7 +168,7 @@ def test_approve_with_note_reaches_agent_after_result(users):
 
 
 def test_why_shows_on_card_but_never_reaches_connector_or_classifier(users, monkeypatch):
-    from kagent import llm
+    from aiops import llm
     seen = []
 
     class Judge:
@@ -205,7 +205,7 @@ class Scripted:
 
 
 def _run_scripted(users, fn):
-    from kagent import llm
+    from aiops import llm
     provider = Scripted(fn)
     llm.set_provider(provider)
     try:

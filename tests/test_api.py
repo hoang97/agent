@@ -1,5 +1,5 @@
 from conftest import PASSWORD, Session
-from kagent import db, knowledge
+from aiops import db, knowledge
 
 
 def test_requires_login(client):

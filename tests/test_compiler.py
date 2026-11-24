@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from kagent import compiler, db, knowledge
+from aiops import compiler, db, knowledge
 
 
 def active(conn, tenant, **kw):
@@ -84,7 +84,7 @@ def test_file_read_blocks_traversal(users):
     with db.session() as conn:
         active(conn, a.tenant, kind="lesson", title="C", content="N", domain="general")
     a.post("/api/compile")
-    for bad in ("../kagent.db", "..\\kagent.db", ".git/config", "/etc/passwd"):
+    for bad in ("../aiops.db", "..\\aiops.db", ".git/config", "/etc/passwd"):
         assert a.get("/api/knowledge/file", params={"path": bad}).status_code == 404
 
 
@@ -234,7 +234,7 @@ def test_mode_off_and_policy_validation(users):
 
 
 def test_entity_pages_group_kinds_incidents_and_related(users):
-    from kagent import compiler, db, knowledge, sources
+    from aiops import compiler, db, knowledge, sources
     t = users["admin"].tenant
     with db.session() as conn:
         a = knowledge.add(conn, t, kind="fact", title="Index log", content="log ở k8s-staging-web-*", entities=["web", "kibana"], source_eps=["e1"],

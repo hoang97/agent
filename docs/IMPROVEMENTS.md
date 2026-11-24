@@ -16,10 +16,10 @@ Dựng MVP theo `docs/PLAN.md`.
 
 ## Đợt 2 — 2026-11-10: triển khai thử
 
-- Server Ubuntu 24.04 đã có RustDesk và Docker; ứng dụng chạy riêng bằng systemd service `kagent` sau Caddy, nghe `127.0.0.1:8000`.
+- Server Ubuntu 24.04 đã có RustDesk và Docker; ứng dụng chạy riêng bằng systemd service `aiops` sau Caddy, nghe `127.0.0.1:8000`.
 - Chỉ cần cổng 443 mở từ ngoài: Caddy lấy chứng chỉ bằng thử thách TLS-ALPN, không cần cổng 80.
 - `httpx` không còn đi kèm SDK `anthropic` 2.x nên kiểm thử trọn vòng trên server dùng virtualenv tạm riêng.
-- Cookie `Secure` khiến client HTTP không gửi lại phiên, nên kiểm thử trên server chạy bản tạm với `KAGENT_COOKIE_SECURE=0` và dữ liệu riêng, xóa sau khi xong.
+- Cookie `Secure` khiến client HTTP không gửi lại phiên, nên kiểm thử trên server chạy bản tạm với `AIOPS_COOKIE_SECURE=0` và dữ liệu riêng, xóa sau khi xong.
 
 ## Đợt 3 — 2026-11-10: HTTPS công khai
 
@@ -33,7 +33,7 @@ Dựng MVP theo `docs/PLAN.md`.
 ## Đợt 5 — 2026-11-11: nhập LLM key trên giao diện
 
 - Tab Cài đặt cho org admin: key được kiểm tra bằng Models API trước khi lưu, mã hóa Fernet trong bảng `app_secret`, API chỉ trả 4 ký tự cuối.
-- Khóa chủ `KAGENT_SECRET_KEY` nằm trong `/etc/kagent/kagent.env`, ngoài thư mục dữ liệu, để bản sao DB không kèm khóa giải mã.
+- Khóa chủ `AIOPS_SECRET_KEY` nằm trong `/etc/aiops/aiops.env`, ngoài thư mục dữ liệu, để bản sao DB không kèm khóa giải mã.
 - Thứ tự dùng key: giao diện → biến môi trường → chế độ heuristic.
 
 ## Đợt 6 — 2026-11-11: hỗ trợ relay tương thích Anthropic
@@ -59,8 +59,8 @@ Dựng MVP theo `docs/PLAN.md`.
 
 ## Đợt 9 — 2026-11-11: chuẩn hóa danh mục công cụ
 
-- Danh mục chuyển từ mã Python sang manifest YAML trong `kagent/catalog` (mỗi file một MCP server). Handler tách sang `kagent/backends`. Hướng dẫn ở `docs/TOOLS.md`.
-- Manifest được kiểm tra chặt khi khởi động và bằng `python -m kagent.tools`: khóa lạ, enum, handler, schema, trùng tên. Mức rủi ro tối thiểu tính từ metadata, không được khai thấp hơn. Công cụ chưa phân loại bị coi là destructive. Annotation MCP chỉ sinh cảnh báo.
+- Danh mục chuyển từ mã Python sang manifest YAML trong `aiops/catalog` (mỗi file một MCP server). Handler tách sang `aiops/backends`. Hướng dẫn ở `docs/TOOLS.md`.
+- Manifest được kiểm tra chặt khi khởi động và bằng `python -m aiops.tools`: khóa lạ, enum, handler, schema, trùng tên. Mức rủi ro tối thiểu tính từ metadata, không được khai thấp hơn. Công cụ chưa phân loại bị coi là destructive. Annotation MCP chỉ sinh cảnh báo.
 - Danh mục tự đồng bộ vào mọi tenant khi khởi động. Trước đây tenant đã có không nhận được công cụ mới. Công cụ mới mặc định tắt, công cụ bị gỡ chuyển trạng thái removed và bị chặn.
 - Tenant được siết theo môi trường, vai trò và mức rủi ro (chỉ nâng). Agent chỉ thấy công cụ người yêu cầu được dùng. Gateway kiểm lại ở mọi lệnh và lúc duyệt.
 - Bỏ quyền hạ mức rủi ro của org admin qua giao diện: muốn hạ thì sửa manifest và review trong git.
@@ -87,13 +87,13 @@ Dựng MVP theo `docs/PLAN.md`.
 
 ## Đợt 12 — 2026-11-11: công cụ thật từ template và kết nối
 
-- **Bỏ mô phỏng:** xóa toàn bộ backend mô phỏng (`kagent/backends`) và danh mục cố định (`kagent/catalog`).
-- **Template:** 7 template trong `kagent/templates`: Kubernetes, Grafana, Elasticsearch/Kibana, Web, HTTP API, PostgreSQL, MySQL. Connector trong `kagent/connectors` gọi REST API, WebSocket exec và driver CSDL thật.
+- **Bỏ mô phỏng:** xóa toàn bộ backend mô phỏng (`aiops/backends`) và danh mục cố định (`aiops/catalog`).
+- **Template:** 7 template trong `aiops/templates`: Kubernetes, Grafana, Elasticsearch/Kibana, Web, HTTP API, PostgreSQL, MySQL. Connector trong `aiops/connectors` gọi REST API, WebSocket exec và driver CSDL thật.
 - **Kết nối:**
   - Template cộng tham số riêng, gắn tenant (admin quản lý) hoặc cá nhân (chính chủ quản lý), và gắn môi trường.
   - Secret mã hóa, không trả lại client.
   - Công cụ đọc bật sẵn, công cụ ghi mặc định tắt.
-- **Lớp mạng `kagent/net.py`:** chặn loopback, link-local, metadata; mạng nội bộ cần org_admin; ghim IP chống DNS rebinding; không tự theo redirect; giới hạn kích thước và thời gian.
+- **Lớp mạng `aiops/net.py`:** chặn loopback, link-local, metadata; mạng nội bộ cần org_admin; ghim IP chống DNS rebinding; không tự theo redirect; giới hạn kích thước và thời gian.
 - **Phân quyền:** công cụ cá nhân chỉ chủ sở hữu dùng. Luật chặn khớp cả tên theo template (`k8s.exec`) cho mọi kết nối. Lệnh chờ duyệt không chạy được nếu kết nối bị tắt hoặc gỡ sau đó.
 - **Dữ liệu cũ:** công cụ mô phỏng còn trong DB tự chuyển removed khi khởi động; công cụ học được dựa trên chúng bị chặn.
 - **Test:** chạy connector thật trên hạ tầng giả ở tầng HTTP (`tests/fakes.py`) và SQLite.
@@ -122,7 +122,7 @@ Dựng MVP theo `docs/PLAN.md`.
 
 ## Đợt 16 — 2026-11-11: kết nối Kubernetes bằng kubeconfig
 
-- **Theo yêu cầu của chủ dự án:** template `k8s` nhận nội dung kubeconfig (field `kubeconfig`, secret nhiều dòng) và `context` tùy chọn. `api_url` và `token` không còn bắt buộc; điền tay thì được ưu tiên hơn giá trị trong kubeconfig, ví dụ khi `server` trong kubeconfig là địa chỉ mà máy chủ kagent không tới được.
+- **Theo yêu cầu của chủ dự án:** template `k8s` nhận nội dung kubeconfig (field `kubeconfig`, secret nhiều dòng) và `context` tùy chọn. `api_url` và `token` không còn bắt buộc; điền tay thì được ưu tiên hơn giá trị trong kubeconfig, ví dụ khi `server` trong kubeconfig là địa chỉ mà máy chủ aiops không tới được.
 - **Hỗ trợ:** token, chứng chỉ client (mTLS), `certificate-authority-data`, `insecure-skip-tls-verify`. Không chạy được `exec`/`auth-provider` (aws, gcloud, oidc) vì máy chủ không được chạy lệnh ngoài; kubeconfig trỏ tới file trên máy cũng bị từ chối. Cả hai trường hợp đều báo rõ cách xử lý.
 - **An toàn:** kubeconfig được mã hóa như mọi secret, không trả về giao diện. Địa chỉ `server` qua cùng lớp chống SSRF. Chứng chỉ client được ghi tạm với quyền 600 để nạp vào TLS, rồi xóa ngay.
 - **Template:** thêm khóa `validate` để kiểm tra chéo các tham số khi tạo hoặc sửa kết nối, và kiểu field `secret_text`.
@@ -262,7 +262,7 @@ Số đo trên lượt thật "có bao nhiêu lỗi ERROR trong log svc-backend 
 
 ## Đợt 33 — 2026-11-11: chuẩn hoá tên thực thể, đồ thị L3 kéo thả và phóng to
 
-- `kagent/entities.py`: tên thực thể được chuẩn hoá khi thêm hoặc sửa KU và khi truy xuất. Tên viết thường, gộp khoảng trắng; bỏ `.keyword` và `*` cuối index pattern; mã HTTP viết thành `http 500`; tên lệnh được đổi thành `tool:<kết nối>.<lệnh>` kèm tên kết nối, chỉ khi tên lệnh không trùng giữa các kết nối.
+- `aiops/entities.py`: tên thực thể được chuẩn hoá khi thêm hoặc sửa KU và khi truy xuất. Tên viết thường, gộp khoảng trắng; bỏ `.keyword` và `*` cuối index pattern; mã HTTP viết thành `http 500`; tên lệnh được đổi thành `tool:<kết nối>.<lệnh>` kèm tên kết nối, chỉ khi tên lệnh không trùng giữa các kết nối.
 - Admin gộp được nhiều tên vào một tên (`POST /api/knowledge/entities/merge`). Tên cũ thành bí danh của tenant, nên KU học sau này dùng tên cũ cũng tự đổi sang tên mới.
 - Reflector nhận danh sách thực thể đang dùng để dùng lại đúng tên, tối đa 5 tên cụ thể mỗi mục.
 - KU đã có được chuẩn hoá lại khi khởi động, mỗi phiên bản luật chạy một lần. Trên team-finance, số tên khác nhau giảm từ 126 xuống 94.
@@ -417,10 +417,10 @@ lặp lại 2 lần trong 30 ngày là dấu hiệu chưa xử lý.
 
 Đối chiếu với tài liệu Cloud Operations (Gartner G00834503, benchmark AIOps, Cloud Monitor 2.0 của Alibaba): change record là bối cảnh
 hàng đầu khi điều tra; AWS và Azure đều có "chỉ ra thay đổi gây lỗi"; cả hai demo của Alibaba kết thúc ở một bản release. Prompt điều
-tra của kagent chỉ nói pod, event, metric, log nên agent hiếm khi xem đã đổi gì.
-- **`data.recent_changes` (R0, local):** lệnh ghi chạy thành công qua kagent (`tool_call_audit` nối `tool_registry`, `action_class != read`)
+tra của aiops chỉ nói pod, event, metric, log nên agent hiếm khi xem đã đổi gì.
+- **`data.recent_changes` (R0, local):** lệnh ghi chạy thành công qua aiops (`tool_call_audit` nối `tool_registry`, `action_class != read`)
   trong `[around - before_minutes, around + after_minutes]`, mặc định 6 giờ trước và 30 phút sau; lọc `env`, `contains`; tối đa 100 dòng.
-  Lệnh lỗi và lệnh đọc không tính. Kết quả ghi rõ chỉ gồm thay đổi qua kagent.
+  Lệnh lỗi và lệnh đọc không tính. Kết quả ghi rõ chỉ gồm thay đổi qua aiops.
 - **Prompt điều tra:** truyền thời điểm cảnh báo đầu tiên, bắt gọi `data.recent_changes` rồi xem nguồn ngoài đang có kết nối (rollout
   history, thời điểm tạo ReplicaSet, helm history, deploy và pipeline GitLab, os-instance-actions OpenStack); thay đổi khớp thì nêu
   cái gì, lúc nào, ai và kiểm chứng; không thấy thì nói đã xem nguồn nào.
@@ -429,7 +429,7 @@ tra của kagent chỉ nói pod, event, metric, log nên agent hiếm khi xem đ
 ## Đợt 43 — 2026-11-23: đo độ chính xác của điều tra, MTTR
 
 Gartner khuyên thử AI trên dữ liệu của chính mình và theo dõi MTTR; benchmark AIOps có mục "đo AI trả lời đúng bao nhiêu" (AWS, Azure
-có). kagent có xác nhận chuỗi 5 Whys nhưng chưa tổng hợp thành tỉ lệ.
+có). aiops có xác nhận chuỗi 5 Whys nhưng chưa tổng hợp thành tỉ lệ.
 - **Chấm theo lượt (`incidents/quality.py`, bảng `investigation_review`):** khoá là episode của lượt điều tra, vì lượt sau có thể đúng khi lượt
   trước sai; lượt mới thì chưa chấm. Thẻ Nguyên nhân có nút Đúng / Đúng một phần / Sai kèm ghi chú (`POST /api/incidents/{id}/review`),
   ghi sự kiện `reviewed` lên dòng sự kiện.
@@ -444,8 +444,8 @@ có). kagent có xác nhận chuỗi 5 Whys nhưng chưa tổng hợp thành t�
 ## Đợt 44 — 2026-11-23: link bằng chứng tới công cụ gốc
 
 Biên bản MVP Cloud Operations yêu cầu "show ra các bằng chứng, link query của kibana, action log, victoria metrics"; Gartner gọi là
-contextual linking. Trước đây bằng chứng chỉ là kết quả lưu trong kagent, người muốn tự xem phải gõ lại truy vấn.
-- **`kagent/links.py`:** từ (công cụ, tham số đã chạy, giờ bắt đầu lượt) dựng link: Prometheus `/graph?g0.expr=…` (khoảng = `minutes` + 10
+contextual linking. Trước đây bằng chứng chỉ là kết quả lưu trong aiops, người muốn tự xem phải gõ lại truy vấn.
+- **`aiops/links.py`:** từ (công cụ, tham số đã chạy, giờ bắt đầu lượt) dựng link: Prometheus `/graph?g0.expr=…` (khoảng = `minutes` + 10
   phút sau mốc, hoặc `time` của truy vấn tức thời), Grafana Explore (`left` gồm datasource và PromQL, khoảng theo `range_minutes`),
   Kibana Discover (`_g` thời gian, `_a` query Lucene, mã hoá rison). Bước không có giờ riêng nên mốc là lúc bắt đầu lượt điều tra.
 - **`ui_url` của kết nối** (Prometheus, Grafana, Elasticsearch): địa chỉ trình duyệt khi url là địa chỉ nội bộ; chỉ nhận http/https.
@@ -467,8 +467,8 @@ Thẻ duyệt của sự cố hết hạn vì không ai xem (việc 8 của kế
   trường, mức, link `#/t/<tenant>/incidents/<id>`) và `action` (công cụ, lệnh, giờ hết hạn duyệt). Không gửi log hay kết quả điều tra.
 - **Cài đặt (Cài đặt → Cảnh báo, tenant admin; `GET/PUT /api/notify-settings`, `POST /api/notify-settings/test`):** cả khối mã hóa trong
   cột `tenant.notify` vì URL webhook thường chứa token; API chỉ trả scheme và máy chủ. Địa chỉ mạng nội bộ cần org admin bật, như kết nối.
-  Địa chỉ kagent trong link mặc định là địa chỉ đang mở trang lúc lưu.
-- **Chưa làm:** chưa thử với webhook thật của netchat; nút duyệt ngay trong tin chat (cần bot trung gian gọi lại API kagent).
+  Địa chỉ aiops trong link mặc định là địa chỉ đang mở trang lúc lưu.
+- **Chưa làm:** chưa thử với webhook thật của netchat; nút duyệt ngay trong tin chat (cần bot trung gian gọi lại API aiops).
 
 ## Đợt 46 — 2026-11-24: mức S1–S4 theo ảnh hưởng, điều kiện postmortem
 
@@ -489,7 +489,7 @@ bộ; lỗi control plane là ảnh hưởng khách hàng; mất dữ liệu lu�
 ## Đợt 47 — 2026-11-24: topology nhiều tầng, giai đoạn A
 
 Theo `TOPOLOGY-PLAN.md` (đã chốt: topology là dữ kiện có thời hạn, mức tin theo cạnh; tên kiểu và khoá là tạm, đổi theo data model chung).
-- **`kagent/topology.py`, bảng `topo_entity`, `topo_edge`, `topo_scan`:** quét k8s (cluster, node, PV, PVC) và OpenStack (máy ảo, volume,
+- **`aiops/topology.py`, bảng `topo_entity`, `topo_edge`, `topo_scan`:** quét k8s (cluster, node, PV, PVC) và OpenStack (máy ảo, volume,
   project; hypervisor và backend lưu trữ khi tài khoản có quyền admin, không có thì ghi tầng bị bỏ qua) bằng công cụ đọc đang bật của kết
   nối dùng chung, tài khoản bot, audit `decision='system'`. Gọi connector trực tiếp như lúc lấy cảnh báo, không qua classifier.
 - **Cạnh có thời hạn:** đổi thì đóng cạnh cũ (`valid_to`) và mở cạnh mới; thực thể không còn trong danh sách đầy đủ thì `gone_at` và đóng

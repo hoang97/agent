@@ -13,7 +13,7 @@ Tri thức đến từ ba nguồn: lượt chat (Reflector → Curator → cổn
 postmortem, ghi chú markdown) và sự cố đã xử lý xong. Mỗi KU trỏ về nguồn của nó; tài liệu được giữ nguyên bản, KU ghi đoạn
 đã tách ra. Compiler dựng playbook, quy ước core và trang cho từng thực thể (`entities/*.md`); agent tự tra giữa lượt bằng
 `search_knowledge` và `read_knowledge_page`. Vòng nền kiểm tra kho mỗi ngày: loại ứng viên quá hạn, nối KU cùng chủ đề,
-gợi ý gộp tên thực thể, gộp KU trùng ý (nhóm chỉ toàn ứng viên tự gộp, bản gộp vẫn là ứng viên; gộp KU đang dùng thì chờ admin duyệt). Biến liên quan: `KAGENT_LINT_STALE_DAYS` (mặc định 7), `KAGENT_INCIDENT_LEARN` (mặc định 1).
+gợi ý gộp tên thực thể, gộp KU trùng ý (nhóm chỉ toàn ứng viên tự gộp, bản gộp vẫn là ứng viên; gộp KU đang dùng thì chờ admin duyệt). Biến liên quan: `AIOPS_LINT_STALE_DAYS` (mặc định 7), `AIOPS_INCIDENT_LEARN` (mặc định 1).
 
 ## Chạy cục bộ
 
@@ -23,7 +23,7 @@ Cần Python 3.10 trở lên.
 python -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/pytest -q -n auto                      # cả bộ, song song; khi sửa thì chỉ chạy file test liên quan
-KAGENT_ADMIN_PASSWORD=<mật-khẩu> KAGENT_DEMO_PASSWORD=<mật-khẩu> .venv/bin/uvicorn kagent.api:app --port 8000
+AIOPS_ADMIN_PASSWORD=<mật-khẩu> AIOPS_DEMO_PASSWORD=<mật-khẩu> .venv/bin/uvicorn aiops.api:app --port 8000
 ```
 
 Tài khoản mẫu: `admin` (quản trị), `alice` (member), `bob` và `carol` (approver). Không đặt biến mật khẩu thì ứng dụng
@@ -32,15 +32,15 @@ sinh mật khẩu ngẫu nhiên vào `data/initial-credentials.txt`. API docs �
 ## Chạy bằng Docker Compose
 
 ```bash
-printf 'KAGENT_SECRET_KEY=%s\n' "$(openssl rand -base64 32 | tr '+/' '-_')" > .env   # chỉ lần đầu
+printf 'AIOPS_SECRET_KEY=%s\n' "$(openssl rand -base64 32 | tr '+/' '-_')" > .env   # chỉ lần đầu
 docker compose up -d --build
-docker compose exec kagent cat /data/initial-credentials.txt
+docker compose exec aiops cat /data/initial-credentials.txt
 ```
 
-Mở `http://127.0.0.1:8000`. Dữ liệu nằm trong volume `kagent-data`. Mặc định image gốc lấy từ Docker Hub, pip từ PyPI,
+Mở `http://127.0.0.1:8000`. Dữ liệu nằm trong volume `aiops-data`. Mặc định image gốc lấy từ Docker Hub, pip từ PyPI,
 kubectl từ dl.k8s.io. Mạng nội bộ không ra được Internet thì trỏ sang mirror trong `.env` (đã gitignore):
-`KAGENT_BASE_IMAGE`, `KAGENT_PIP_INDEX_URL`, `KAGENT_PIP_TRUSTED_HOST`, `KAGENT_KUBECTL_URL`.
-Các biến khác: `KAGENT_BIND=0.0.0.0` để mở cho LAN, `KAGENT_PORT`, `ANTHROPIC_API_KEY`, `KAGENT_ADMIN_PASSWORD`, `KAGENT_DEMO_PASSWORD`.
+`AIOPS_BASE_IMAGE`, `AIOPS_PIP_INDEX_URL`, `AIOPS_PIP_TRUSTED_HOST`, `AIOPS_KUBECTL_URL`.
+Các biến khác: `AIOPS_BIND=0.0.0.0` để mở cho LAN, `AIOPS_PORT`, `ANTHROPIC_API_KEY`, `AIOPS_ADMIN_PASSWORD`, `AIOPS_DEMO_PASSWORD`.
 
 ## Bật LLM
 
@@ -48,7 +48,7 @@ Org admin chọn nhà cung cấp (Anthropic, relay Anthropic, OpenAI hoặc dị
 OpenAI bắt buộc nhập tên model. Thông tin được mã hóa khi lưu, ưu tiên hơn biến môi trường `ANTHROPIC_API_KEY`.
 Thiếu khóa, agent chạy chế độ heuristic: lập kế hoạch theo từ khóa, không gọi LLM.
 Model mặc định: `claude-opus-5-5` cho agent, Reflector, Curator; `claude-haiku-5-5` cho router và kiểm tra độc lập
-(đổi bằng `KAGENT_MODEL_STRONG`, `KAGENT_MODEL_FAST`). Yêu cầu tới Opus bật server-side fallback khi model từ chối.
+(đổi bằng `AIOPS_MODEL_STRONG`, `AIOPS_MODEL_FAST`). Yêu cầu tới Opus bật server-side fallback khi model từ chối.
 
 ## Triển khai lên Ubuntu
 
@@ -56,4 +56,4 @@ Model mặc định: `claude-opus-5-5` cho agent, Reflector, Curator; `claude-ha
 sudo DOMAIN=<tên-miền> REPO_DIR=$PWD bash deploy/install.sh
 ```
 
-Cài systemd service `kagent` và Caddy (HTTPS tự động). Cấu hình ở `/etc/kagent/kagent.env`, dữ liệu ở `/opt/kagent/data`.
+Cài systemd service `aiops` và Caddy (HTTPS tự động). Cấu hình ở `/etc/aiops/aiops.env`, dữ liệu ở `/opt/aiops/data`.

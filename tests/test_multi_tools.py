@@ -3,7 +3,7 @@ import threading
 import time
 
 from conftest import tool_steps
-from kagent import agent, db, gateway, llm
+from aiops import agent, db, gateway, llm
 
 
 def test_parallel_reads_run_concurrently(users, monkeypatch):

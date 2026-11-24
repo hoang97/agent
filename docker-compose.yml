@@ -1,33 +1,33 @@
-# Chạy: KAGENT_SECRET_KEY lấy từ file .env cạnh file này (đã gitignore), rồi `docker compose up -d --build`.
+# Chạy: AIOPS_SECRET_KEY lấy từ file .env cạnh file này (đã gitignore), rồi `docker compose up -d --build`.
 services:
-  kagent:
+  aiops:
     build:
       context: .
       args:
-        BASE_IMAGE: ${KAGENT_BASE_IMAGE:-python:3.12-bookworm}
-        PIP_INDEX_URL: ${KAGENT_PIP_INDEX_URL:-https://pypi.org/simple}
-        PIP_TRUSTED_HOST: ${KAGENT_PIP_TRUSTED_HOST:-pypi.org}
-        KUBECTL_URL: ${KAGENT_KUBECTL_URL:-https://dl.k8s.io/release/v1.29.3/bin/linux/amd64/kubectl}
-        HELM_URL: ${KAGENT_HELM_URL-https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz}
+        BASE_IMAGE: ${AIOPS_BASE_IMAGE:-python:3.12-bookworm}
+        PIP_INDEX_URL: ${AIOPS_PIP_INDEX_URL:-https://pypi.org/simple}
+        PIP_TRUSTED_HOST: ${AIOPS_PIP_TRUSTED_HOST:-pypi.org}
+        KUBECTL_URL: ${AIOPS_KUBECTL_URL:-https://dl.k8s.io/release/v1.29.3/bin/linux/amd64/kubectl}
+        HELM_URL: ${AIOPS_HELM_URL-https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz}
         # "-" chứ không phải ":-": đặt rỗng trong .env là bỏ qua khi mirror chưa có.
-        HELM_DIFF_URL: ${KAGENT_HELM_DIFF_URL-https://github.com/databus23/helm-diff/releases/download/v3.15.15/helm-diff-linux-amd64.tgz}
-        HELM_DRIFT_URL: ${KAGENT_HELM_DRIFT_URL-https://github.com/nikhilsbhat/helm-drift/releases/download/v0.1.2/helm-drift_0.1.2_linux_x86_64.tar.gz}
-    image: kagent:local
+        HELM_DIFF_URL: ${AIOPS_HELM_DIFF_URL-https://github.com/databus23/helm-diff/releases/download/v3.15.15/helm-diff-linux-amd64.tgz}
+        HELM_DRIFT_URL: ${AIOPS_HELM_DRIFT_URL-https://github.com/nikhilsbhat/helm-drift/releases/download/v0.1.2/helm-drift_0.1.2_linux_x86_64.tar.gz}
+    image: aiops:local
     restart: unless-stopped
     ports:
-      - "${KAGENT_BIND:-0.0.0.0}:${KAGENT_PORT:-8000}:8000"  # KAGENT_BIND=0.0.0.0 để máy khác trong LAN truy cập
+      - "${AIOPS_BIND:-0.0.0.0}:${AIOPS_PORT:-8000}:8000"  # AIOPS_BIND=0.0.0.0 để máy khác trong LAN truy cập
     environment:
       # Khóa chủ để ngoài volume dữ liệu, để bản sao dữ liệu không kèm khóa giải mã LLM key.
-      KAGENT_SECRET_KEY: ${KAGENT_SECRET_KEY:?đặt KAGENT_SECRET_KEY trong .env}
-      KAGENT_COOKIE_SECURE: ${KAGENT_COOKIE_SECURE:-0}  # 1 khi đứng sau HTTPS
-      KAGENT_ADMIN_PASSWORD: ${KAGENT_ADMIN_PASSWORD:-}
-      KAGENT_DEMO_PASSWORD: ${KAGENT_DEMO_PASSWORD:-}
+      AIOPS_SECRET_KEY: ${AIOPS_SECRET_KEY:?đặt AIOPS_SECRET_KEY trong .env}
+      AIOPS_COOKIE_SECURE: ${AIOPS_COOKIE_SECURE:-0}  # 1 khi đứng sau HTTPS
+      AIOPS_ADMIN_PASSWORD: ${AIOPS_ADMIN_PASSWORD:-}
+      AIOPS_DEMO_PASSWORD: ${AIOPS_DEMO_PASSWORD:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      KAGENT_LLM: ${KAGENT_LLM:-auto}
+      AIOPS_LLM: ${AIOPS_LLM:-auto}
     extra_hosts:
       - "host.docker.internal:host-gateway"  # LLM tự host chạy trên máy host (localhost trong container là chính container)
     volumes:
-      - kagent-data:/data
+      - aiops-data:/data
 
 volumes:
-  kagent-data:
+  aiops-data:

@@ -1,13 +1,13 @@
-# kagent
+# aiops
 
 ## Chạy test
 
 Chỉ chạy các file test liên quan đến phần vừa sửa. Cả bộ (~780 test) chạy một lần trước khi commit, và chỉ khi sửa code dùng chung: schema `db.py`, `CallContext`, chữ ký `gateway.invoke`/`evaluate`, `conversation.py`.
 
-Test chạy trong container `kagent:local`, repo mount vào `/src`. Phải có `-e HOME=/tmp` vì user trong image không ghi được `/app/.local`; thiếu thì báo `No module named pytest`.
+Test chạy trong container `aiops:local`, repo mount vào `/src`. Phải có `-e HOME=/tmp` vì user trong image không ghi được `/app/.local`; thiếu thì báo `No module named pytest`.
 
 ```sh
-docker run --rm -v "$PWD":/src -w /src -e HOME=/tmp kagent:local sh -c \
+docker run --rm -v "$PWD":/src -w /src -e HOME=/tmp aiops:local sh -c \
   'pip install --user -q -r requirements-dev.txt && python -m pytest -q tests/test_llm.py'
 # cả bộ: python -m pytest -n auto -q
 ```
@@ -47,9 +47,9 @@ Sửa phần tri thức gửi kèm lượt (KU, playbook, tìm KU, cạnh `ku_ed
 Chạy golden hay thử migration trên bản sao, không đụng DB đang chạy:
 
 ```sh
-docker exec agent-kagent-1 python -c "import sqlite3; s=sqlite3.connect('/data/kagent.db'); d=sqlite3.connect('/tmp/k.db'); s.backup(d)"
-mkdir -p "$DRY" && docker cp agent-kagent-1:/tmp/k.db "$DRY/kagent.db" && docker cp agent-kagent-1:/data/knowledge "$DRY/knowledge" && chmod -R 777 "$DRY"
-docker run --rm -v "$PWD":/src -v "$DRY":/dry -w /src -e HOME=/tmp -e PYTHONPATH=/src kagent:local sh -c \
+docker exec agent-aiops-1 python -c "import sqlite3; s=sqlite3.connect('/data/aiops.db'); d=sqlite3.connect('/tmp/k.db'); s.backup(d)"
+mkdir -p "$DRY" && docker cp agent-aiops-1:/tmp/k.db "$DRY/aiops.db" && docker cp agent-aiops-1:/data/knowledge "$DRY/knowledge" && chmod -R 777 "$DRY"
+docker run --rm -v "$PWD":/src -v "$DRY":/dry -w /src -e HOME=/tmp -e PYTHONPATH=/src aiops:local sh -c \
   'git config --global --add safe.directory "*"; python script.py'   # script gọi settings.configure(data_dir=Path("/dry")) trước khi import phần còn lại
 ```
 
@@ -60,7 +60,7 @@ docker run --rm -v "$PWD":/src -v "$DRY":/dry -w /src -e HOME=/tmp -e PYTHONPATH
 
 Thêm connector mới thì tạo fake trong `tests/fakes.py`, kèm `tests/test_<name>.py`, rồi thêm một dòng vào bảng trên.
 
-## UI (`kagent/static`)
+## UI (`aiops/static`)
 
 - Không gọi `replaceChildren`/`append` gốc với con kiểu `cond && el`: trình duyệt in chữ `false`. Dùng `h()` hoặc `setKids`/`addKids` trong `app.js`, chúng lọc bỏ `false`.
 - Không dùng lại một node DOM (ví dụ ô tiêu đề) cho nhiều bảng: node chỉ nằm được một chỗ, bảng trước mất nó. Tạo node mới cho từng bảng, rồi đếm số tiêu đề bằng số ô.

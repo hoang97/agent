@@ -4,8 +4,8 @@ import pytest
 import yaml
 
 import fakes
-from kagent import db, net, proxy
-from kagent.connectors import kubectl
+from aiops import db, net, proxy
+from aiops.connectors import kubectl
 
 PAC = """
 function FindProxyForURL(url, host) {

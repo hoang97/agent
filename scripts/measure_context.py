@@ -1,6 +1,6 @@
 """Đo lượng tri thức gửi kèm mỗi lượt và phần đã gửi ở lượt trước, đọc thẳng DB (chỉ đọc, không gọi LLM).
 
-    python scripts/measure_context.py [đường_dẫn/kagent.db] [--top 5] [--json]
+    python scripts/measure_context.py [đường_dẫn/aiops.db] [--top 5] [--json]
 """
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def measure(conn: sqlite3.Connection) -> list[dict]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("db", nargs="?", default="data/kagent.db")
+    ap.add_argument("db", nargs="?", default="data/aiops.db")
     ap.add_argument("--top", type=int, default=5, help="số hội thoại dài nhất in chi tiết từng lượt")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()

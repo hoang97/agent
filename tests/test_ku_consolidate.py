@@ -2,7 +2,7 @@
 import json
 import time
 
-from kagent import api as api_mod, db, knowledge, llm
+from aiops import api as api_mod, db, knowledge, llm
 
 
 def _add(tenant, title, content, kind="lesson", trust="verified_tool", eps=("e1",)):

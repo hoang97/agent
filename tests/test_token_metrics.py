@@ -2,7 +2,7 @@
 import json
 from types import SimpleNamespace as NS
 
-from kagent import db, llm, vault
+from aiops import db, llm, vault
 from test_llm import msg, provider, text, use
 
 
@@ -95,7 +95,7 @@ def test_run_task_saves_usage_rows(users, monkeypatch):
 
 
 def test_step_limit_forces_a_summary_instead_of_failing(monkeypatch):
-    from kagent.config import settings
+    from aiops.config import settings
     monkeypatch.setattr(settings, "max_agent_steps", 2)
     loop = NS(content=[use("k8s__kubectl_read", {})], stop_reason="tool_use", usage=usage(), model="m")
     p, fake = provider([loop, loop, NS(content=[text("Tóm tắt: đã xem pod, chưa xong phần log.")], stop_reason="end_turn", usage=usage(), model="m")])
@@ -107,7 +107,7 @@ def test_step_limit_forces_a_summary_instead_of_failing(monkeypatch):
 
 
 def test_reflector_view_clips_large_step_results():
-    from kagent import learning
+    from aiops import learning
     ep = {"id": "e", "input": {"task": "x"}, "trace": [{"type": "tool_call", "tool": "logs.search_logs", "status": "ok", "result": {"hits": ["y" * 50] * 2000},
                                                       "confidence_parts": {"a": 1}}]}
     view = learning._episode_view(ep)
@@ -248,13 +248,13 @@ def test_record_returns_cost_weighted_tokens():
 
 
 def test_reflector_view_drops_transcript():
-    from kagent import learning
+    from aiops import learning
     ep = {"id": "e", "input": {"task": "x"}, "trace": [], "transcript": json.dumps([{"role": "user", "content": "y" * 5000}])}
     assert "transcript" not in learning._episode_view(ep) and "transcript" in ep
 
 
 def test_learning_calls_add_to_episode_tokens(users):
-    from kagent import learning
+    from aiops import learning
     alice = users["alice"]
     ep = alice.run("xem pod trong namespace default")
 

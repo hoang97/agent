@@ -1,7 +1,7 @@
 """Gộp KU trùng theo cụm chủ đề (dedup.py) và KU cùng chủ đề cho Curator."""
 import time
 
-from kagent import db, dedup, knowledge, learning, llm
+from aiops import db, dedup, knowledge, learning, llm
 
 TEXT = "Wikijs crash vì role wikijs không là thành viên role wiki; chạy GRANT wiki TO wikijs rồi xóa pod"
 

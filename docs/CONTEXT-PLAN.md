@@ -7,8 +7,8 @@
 | 0.1 Script đo `scripts/measure_context.py` | Xong | Mốc: 23 hội thoại nhiều lượt, 587.683 ký tự tri thức, 70% đã gửi ở lượt trước; hội thoại dài nhất 16 lượt lặp 82% |
 | 0.2 Trường trace `knowledge_chars`, `skipped_chars`, `skipped_ids` | Xong | Hai trường `skipped_*` luôn là 0 cho tới giai đoạn 2 |
 | 0.3 Golden task | Xong | 12 câu từ câu hỏi thật, ghi vào DB của tenant (không để trong repo). Điểm mốc 0,9: đủ từ khóa ở cả 12 câu, phần thiếu do router heuristic xếp sai domain ở 4 câu |
-| 1 `kagent/conversation.py` | Xong | So từng byte trên bản sao dữ liệu thật: 266/266 kết quả `load_history` và `assemble_context` giống code cũ; 773 test xanh |
-| 2 Bỏ phần đã gửi | Xong | Mô phỏng trên 23 hội thoại thật: tri thức gửi giảm 61% (hội thoại dài 197k → 40k ký tự), `ku_used` không đổi, golden giữ 0,9; 780 test xanh. Tắt được bằng `KAGENT_KNOWLEDGE_DEDUP=0` |
+| 1 `aiops/conversation.py` | Xong | So từng byte trên bản sao dữ liệu thật: 266/266 kết quả `load_history` và `assemble_context` giống code cũ; 773 test xanh |
+| 2 Bỏ phần đã gửi | Xong | Mô phỏng trên 23 hội thoại thật: tri thức gửi giảm 61% (hội thoại dài 197k → 40k ký tự), `ku_used` không đổi, golden giữ 0,9; 780 test xanh. Tắt được bằng `AIOPS_KNOWLEDGE_DEDUP=0` |
 | 3 Bỏ trùng trong lượt | Xong | KU đã có trong core/playbook chiếm 25% ký tự units. Bản gửi đủ giảm 12% (1,45M → 1,28M ký tự); khi đã bỏ phần gửi ở lượt trước thì gần như không giảm thêm (562k), vì playbook vốn chỉ gửi một lần mỗi hội thoại. Golden giữ 0,9; 784 test xanh |
 | 4 Playbook theo độ liên quan | Hoãn | Số đo giai đoạn 5 cho thấy tri thức chỉ chiếm khoảng 7% input agent, và đó là trước khi bỏ trùng; playbook giờ chỉ gửi một lần mỗi hội thoại. Phần còn tiết kiệm được nhỏ, trong khi rủi ro mất tri thức cần thiết thì có thật. Riêng thiếu sót "có metadata Skill nhưng không có tool đọc `SKILL.md`" đã làm riêng: công cụ `read_skill` |
 | 5 Usage thật | Xong | Màn Đo lường có mục "Tri thức gửi kèm lượt" (ký tự mới, ký tự bỏ qua do trùng, tỷ lệ bỏ qua, tri thức trên input agent) và hai cột tương ứng ở bảng lượt tốn nhất. Token tri thức = ký tự/4 × số lần gọi agent của lượt, vì khối tri thức nằm trong prefix của mọi lần gọi. Số thật 30 lượt đầu: tri thức chiếm 7% input agent. Giữ `tokens_est` trong trace làm số ước lượng; số thật nằm ở `llm_call`. 785 test xanh |
@@ -58,10 +58,10 @@ Khác với kế hoạch ở giai đoạn 1: không giữ `agent.assemble_contex
 ### Vì sao không chuyển sang Claude Agent SDK
 
 - SDK chỉ chạy với Claude, không chạy trực tiếp với provider OpenAI-compatible.
-- Duyệt lệnh qua `can_use_tool` chặn ngay lúc đang chạy, nên phải giữ tiến trình sống tới khi người duyệt bấm. kagent cần duyệt bất đồng bộ.
-- Session lưu thành file JSONL trên đĩa. kagent cần lưu trong DB, tách theo tenant.
+- Duyệt lệnh qua `can_use_tool` chặn ngay lúc đang chạy, nên phải giữ tiến trình sống tới khi người duyệt bấm. aiops cần duyệt bất đồng bộ.
+- Session lưu thành file JSONL trên đĩa. aiops cần lưu trong DB, tách theo tenant.
 - SDK không tự bỏ phần KU trùng giữa các lượt, nên vấn đề này vẫn phải tự giải quyết.
-- Phần "harness" SDK làm thay chỉ khoảng 500 dòng. Phần phức tạp là nghiệp vụ riêng của kagent.
+- Phần "harness" SDK làm thay chỉ khoảng 500 dòng. Phần phức tạp là nghiệp vụ riêng của aiops.
 
 Từ Claude Code chỉ học thiết kế: nạp chi tiết khi cần, không gửi lại thứ đã đưa vào phiên, index + tool đọc chi tiết.
 
@@ -75,14 +75,14 @@ Từ Claude Code chỉ học thiết kế: nạp chi tiết khi cần, không g�
    - tỉ lệ `<context>` so với transcript mới.
 
    Script đọc thẳng DB, không gọi LLM. Dùng nó làm mốc trước/sau cho từng giai đoạn.
-2. **Thêm trường vào trace `context`** (`kagent/agent.py`, trong `_run_task`): `knowledge_chars`, `skipped_chars`, `skipped_ids`. Đây chỉ là JSON trong trace, không cần migration DB.
+2. **Thêm trường vào trace `context`** (`aiops/agent.py`, trong `_run_task`): `knowledge_chars`, `skipped_chars`, `skipped_ids`. Đây chỉ là JSON trong trace, không cần migration DB.
 3. **Tạo golden task.** Hiện có 0 golden task, nên `golden_score` trả `None` và không chặn được gì. Cần khoảng 10–15 câu hỏi thật cho `k8s_ops`, `observability`, `general`, kèm `expect_terms`. Thiếu bước này thì giai đoạn 4 không có gì để đo.
 
 ---
 
 ## Giai đoạn 1: Gom phần hội thoại về một module, chưa đổi hành vi (1 ngày)
 
-Tạo module mới `kagent/conversation.py` và chuyển vào đó:
+Tạo module mới `aiops/conversation.py` và chuyển vào đó:
 
 | Hiện ở | Chuyển thành |
 |---|---|

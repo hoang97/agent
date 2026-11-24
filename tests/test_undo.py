@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from kagent import db, gateway, llm, undo
-from kagent.connectors import sql_undo
+from aiops import db, gateway, llm, undo
+from aiops.connectors import sql_undo
 
 DEPLOY = json.dumps({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "worker", "namespace": "default"},
                      "spec": {"replicas": 1, "template": {"spec": {"containers": [{"name": "worker", "image": "worker:1"}]}}}})
@@ -222,10 +222,10 @@ def test_purge_needs_approver(users, infra, judge):
 def _rows(sql):
     with db.session() as conn:
         tenant = conn.execute("SELECT id FROM tenant WHERE name='team-platform'").fetchone()["id"]
-    from kagent import connections
+    from aiops import connections
     with db.session() as conn:
         _, _, _, params = connections.resolve(conn, tenant, "db.query")
-    from kagent.connectors import sql as sql_connector
+    from aiops.connectors import sql as sql_connector
     return sql_connector._run(params, "postgres", sql, read_only=True, commit=False)["rows"]
 
 
@@ -234,7 +234,7 @@ def test_drop_table_is_renamed_and_restored(users, judge):
     assert step["status"] == "pending" and step["undo"]["soft"]
     _approve(users, step["approval_id"])
     tables = [r[0] for r in _rows("SELECT name FROM sqlite_master WHERE type='table'")]
-    assert "orders" not in tables and any(t.startswith("_kagent_trash_orders_") for t in tables)
+    assert "orders" not in tables and any(t.startswith("_aiops_trash_orders_") for t in tables)
     change = users["alice"].get("/api/trash").json()[0]
     users["alice"].post(f"/api/changes/{change['id']}/undo", json={})
     assert _rows("SELECT count(*) FROM orders") == [[6]]
@@ -255,9 +255,9 @@ def test_update_rows_restored_and_drift_detected(users, judge, monkeypatch):
     step = _call(users, "db.execute", {"sql": "UPDATE orders SET status='paid' WHERE status='failed'"})
     _approve(users, step["approval_id"])
     change = users["alice"].get("/api/trash").json()[0]
-    from kagent.connectors import sql as sql_connector
+    from aiops.connectors import sql as sql_connector
     with db.session() as conn:
-        from kagent import connections
+        from aiops import connections
         _, _, _, params = connections.resolve(conn, users["alice"].tenant, "db.execute")
     sql_connector._run(params, "postgres", "UPDATE orders SET amount=1 WHERE id=102", read_only=False, commit=True)
     r = users["alice"].post(f"/api/changes/{change['id']}/undo", json={})
@@ -312,7 +312,7 @@ def test_delete_deployment_snapshot_recreated(users, infra, judge):
 
 
 def test_mysql_refuses_to_dry_run_ddl():
-    from kagent.connectors import sql
-    from kagent.connectors.base import ConnectorError
+    from aiops.connectors import sql
+    from aiops.connectors.base import ConnectorError
     with pytest.raises(ConnectorError, match="tự commit DDL"):
         sql.my_execute_check({"host": "db.test"}, {"sql": "DROP TABLE orders"})

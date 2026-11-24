@@ -3,7 +3,7 @@ import sqlite3
 
 import pytest
 
-from kagent import db, knowledge, learning, llm, retrieval
+from aiops import db, knowledge, learning, llm, retrieval
 
 
 def tenant_of(u):

@@ -1,5 +1,5 @@
 """Kiểm tra định kỳ kho tri thức (lint.py)."""
-from kagent import db, knowledge, lint
+from aiops import db, knowledge, lint
 
 
 def _add(conn, tenant, title, *, days_old=0, eps=("e1",), status="candidate", scope="tenant", entities=None, kind="lesson"):

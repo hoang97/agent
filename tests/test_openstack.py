@@ -4,16 +4,16 @@ import textwrap
 import pytest
 
 import fakes
-from kagent import tools
-from kagent.connectors import openstack
-from kagent.connectors.base import ConnectorError
+from aiops import tools
+from aiops.connectors import openstack
+from aiops.connectors.base import ConnectorError
 
 CLOUDS = textwrap.dedent(f"""
     clouds:
       demo:
         auth:
           auth_url: https://keystone.test:5000
-          username: kagent
+          username: aiops
           password: {fakes.OS_PASSWORD}
           project_name: demo
           user_domain_name: Default
@@ -29,7 +29,7 @@ OPENRC = textwrap.dedent("""
     export OS_PROJECT_ID=p1
     export OS_PROJECT_NAME="demo"
     export OS_USER_DOMAIN_NAME="Default"
-    export OS_USERNAME="kagent"
+    export OS_USERNAME="aiops"
     echo "Please enter your OpenStack Password for project $OS_PROJECT_NAME as user $OS_USERNAME: "
     read -sr OS_PASSWORD_INPUT
     export OS_PASSWORD=$OS_PASSWORD_INPUT
@@ -75,7 +75,7 @@ def test_application_credential(infra):
     """)
     with pytest.raises(ConnectorError, match="nhiều cloud"):
         openstack.settings({"config": cfg})
-    assert openstack.ping({"_allow_private": False, "config": cfg, "cloud": "a"})["user"] == "kagent"
+    assert openstack.ping({"_allow_private": False, "config": cfg, "cloud": "a"})["user"] == "aiops"
     assert "scope" not in infra.os_logins[0]
 
 

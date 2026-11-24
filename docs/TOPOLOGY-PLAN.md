@@ -8,7 +8,7 @@ nhóm Cloud Operations đang làm trước khi chốt; các quyết định ở 
 - Biên bản MVP: "có đủ thông tin topology từ lớp vật lý, hypervisor, cloud control plane, K8s, PaaS, ứng dụng, cho phép vẽ topology".
 - Gartner G00834503: Topology Mapping là nền cho tương quan và Causal AI; thiếu topology động thì không tách được nguyên nhân khỏi triệu chứng.
 - Alibaba Cloud Monitor 2.0 coi topology thực thể là kho dữ liệu riêng (UModel), ngang hàng log, metric, trace, event.
-- **Dữ liệu của chính kagent (tenant devtest, 47 lượt điều tra):** agent tự nối các tầng bằng tay ở mỗi lượt. 68 lần gọi
+- **Dữ liệu của chính aiops (tenant devtest, 47 lượt điều tra):** agent tự nối các tầng bằng tay ở mỗi lượt. 68 lần gọi
   `/servers/detail` và `/volumes/detail`, 48 lần `get nodes`, phần lớn để đi từ cảnh báo etcd hay disk của node k8s xuống máy ảo
   OpenStack và volume bên dưới. 59/133 cảnh báo là `etcdHighCommitDurations`, 14 là `NodeDiskIOSaturation`: đúng loại sự cố mà
   nguyên nhân nằm ở tầng dưới (đĩa, backend lưu trữ, host) chứ không ở tầng cảnh báo bắn ra.
@@ -47,7 +47,7 @@ cách tìm dữ liệu đo của thực thể đó.
 | --- | --- |
 | `id` | khoá ổn định: `<type>:<khoá tự nhiên>`, ví dụ `os.server:<uuid>`, `k8s.node:<cluster>/<name>`, `k8s.pod:<cluster>/<ns>/<name>` |
 | `type` | xem bảng tầng bên dưới |
-| `name`, `env` | tên hiển thị; môi trường của kagent |
+| `name`, `env` | tên hiển thị; môi trường của aiops |
 | `attrs` | JSON: thuộc tính cần cho khoanh vùng (status, flavor, AZ, storage class...); không chứa secret |
 | `source` | kết nối đã thấy nó (`k8s_devtest`, `openstack_x`) hoặc `manual` |
 | `first_seen`, `last_seen` | lần quét đầu và gần nhất; quá N lần quét không thấy thì `gone_at` (giữ lại để điều tra sự cố cũ) |
@@ -73,10 +73,10 @@ của cảnh báo. 104/133 cảnh báo có `instance`, 66 có `pod`, nên phần
 
 ## Tầng và nguồn
 
-| Tầng | Kiểu thực thể | Nguồn có sẵn trong kagent | Khoảng trống |
+| Tầng | Kiểu thực thể | Nguồn có sẵn trong aiops | Khoảng trống |
 | --- | --- | --- | --- |
 | Vật lý | `dc.host`, `dc.rack` | chưa có | cần DCIM (biên bản nhắc) hoặc khai tay |
-| Hypervisor | `os.hypervisor` | OpenStack `os-hypervisors`, trường host của server (cần quyền admin) | tài khoản kagent có thể không đủ quyền |
+| Hypervisor | `os.hypervisor` | OpenStack `os-hypervisors`, trường host của server (cần quyền admin) | tài khoản aiops có thể không đủ quyền |
 | Cloud control plane | `os.server`, `os.volume`, `os.network`, `os.project` | OpenStack `/servers/detail`, `/volumes/detail` | backend của volume (`os-vol-host-attr:host`) cần quyền admin |
 | K8s | `k8s.cluster`, `k8s.node`, `k8s.workload`, `k8s.pod`, `k8s.pvc` | `kubectl get nodes,pods,pvc,pv -o json` | node ↔ VM nhờ `spec.providerID` (`openstack:///<uuid>`), cần kiểm trên cụm thật |
 | PaaS, ứng dụng | `app.service` (CMP, AI Platform, DBaaS...) | nhãn `service` của cảnh báo, Service k8s | quan hệ giữa dịch vụ cần khai tay hoặc lấy từ trace |
@@ -169,9 +169,9 @@ Thứ tự: B1 → B2 → B3, mỗi việc một commit. Đo lại sau B1: tỉ 
 
 ## Đã chốt (2026-11-24)
 
-1. **Data model chung:** kagent sửa theo data model của nhóm Cloud Operations (tên kiểu thực thể, khoá, quan hệ), không giữ mô hình riêng.
+1. **Data model chung:** aiops sửa theo data model của nhóm Cloud Operations (tên kiểu thực thể, khoá, quan hệ), không giữ mô hình riêng.
    Khi data model chưa công bố, tên kiểu và khoá trong bản này là tạm, đổi theo data model chung khi có.
-2. **Nguồn:** kagent tiếp tục tự quét. Đọc từ hệ thống topology/CMDB chung chưa làm khi hệ thống đó chưa có.
+2. **Nguồn:** aiops tiếp tục tự quét. Đọc từ hệ thống topology/CMDB chung chưa làm khi hệ thống đó chưa có.
 3. **Quyền OpenStack admin:** best effort. Có quyền thì dựng cả tầng hạ tầng, không có thì bỏ qua tầng đó, các tầng khác vẫn dựng.
 4. **Chu kỳ quét:** 6 giờ một lần khi không có sự cố; có sự cố mà lần quét gần nhất cách hơn 15 phút thì quét lại một lần.
 5. **Phạm vi:** tạm thời chỉ hạ tầng nội bộ (Private Cloud), chưa đụng tài nguyên của khách hàng trên Public Cloud.

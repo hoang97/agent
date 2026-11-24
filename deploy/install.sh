@@ -5,8 +5,8 @@ set -euo pipefail
 
 DOMAIN="${DOMAIN:?thiếu DOMAIN}"
 REPO_DIR="${REPO_DIR:?thiếu REPO_DIR}"
-APP_DIR=/opt/kagent
-ENV_FILE=/etc/kagent/kagent.env
+APP_DIR=/opt/aiops
+ENV_FILE=/etc/aiops/aiops.env
 
 apt-get update -qq
 apt-get install -y -qq python3 python3-venv git curl debian-keyring debian-archive-keyring apt-transport-https gnupg
@@ -18,41 +18,41 @@ if ! command -v caddy >/dev/null; then
   apt-get install -y -qq caddy
 fi
 
-id kagent >/dev/null 2>&1 || useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin kagent
-install -d -o kagent -g kagent -m 750 "$APP_DIR" "$APP_DIR/data"
-install -d -m 750 -o root -g kagent /etc/kagent
+id aiops >/dev/null 2>&1 || useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin aiops
+install -d -o aiops -g aiops -m 750 "$APP_DIR" "$APP_DIR/data"
+install -d -m 750 -o root -g aiops /etc/aiops
 
-tar -C "$REPO_DIR" -cf - kagent requirements.txt | tar -C "$APP_DIR" -xf -
-chown -R root:kagent "$APP_DIR/kagent" "$APP_DIR/requirements.txt"
-chmod -R g+rX,o-rwx "$APP_DIR/kagent"
+tar -C "$REPO_DIR" -cf - aiops requirements.txt | tar -C "$APP_DIR" -xf -
+chown -R root:aiops "$APP_DIR/aiops" "$APP_DIR/requirements.txt"
+chmod -R g+rX,o-rwx "$APP_DIR/aiops"
 
 [ -d "$APP_DIR/.venv" ] || python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
 "$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
-chown -R kagent:kagent "$APP_DIR/.venv"
+chown -R aiops:aiops "$APP_DIR/.venv"
 
 if [ ! -f "$ENV_FILE" ]; then
   umask 027
   cat > "$ENV_FILE" <<EOF
-KAGENT_DATA_DIR=$APP_DIR/data
-KAGENT_COOKIE_SECURE=1
-# Điền khóa để bật Claude, rồi: sudo systemctl restart kagent
+AIOPS_DATA_DIR=$APP_DIR/data
+AIOPS_COOKIE_SECURE=1
+# Điền khóa để bật Claude, rồi: sudo systemctl restart aiops
 ANTHROPIC_API_KEY=
 EOF
-  chown root:kagent "$ENV_FILE"
+  chown root:aiops "$ENV_FILE"
   chmod 640 "$ENV_FILE"
 fi
 
 # Khóa chủ mã hóa LLM key: nằm ngoài thư mục dữ liệu để bản sao DB không kèm khóa giải mã.
-if ! grep -q '^KAGENT_SECRET_KEY=' "$ENV_FILE"; then
-  echo "KAGENT_SECRET_KEY=$(openssl rand -base64 32 | tr '+/' '-_')" >> "$ENV_FILE"
+if ! grep -q '^AIOPS_SECRET_KEY=' "$ENV_FILE"; then
+  echo "AIOPS_SECRET_KEY=$(openssl rand -base64 32 | tr '+/' '-_')" >> "$ENV_FILE"
 fi
 
-install -m 644 "$REPO_DIR/deploy/kagent.service" /etc/systemd/system/kagent.service
+install -m 644 "$REPO_DIR/deploy/aiops.service" /etc/systemd/system/aiops.service
 sed "s/__DOMAIN__/$DOMAIN/g" "$REPO_DIR/deploy/Caddyfile" > /etc/caddy/Caddyfile
 
 systemctl daemon-reload
-systemctl enable --quiet kagent caddy
-systemctl restart kagent
+systemctl enable --quiet aiops caddy
+systemctl restart aiops
 systemctl reload-or-restart caddy
-systemctl is-active kagent caddy
+systemctl is-active aiops caddy

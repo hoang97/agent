@@ -5,9 +5,9 @@ import pytest
 import yaml
 
 import fakes
-from kagent import net
-from kagent.connectors import helm, helm_undo
-from kagent.connectors.base import ConnectorError
+from aiops import net
+from aiops.connectors import helm, helm_undo
+from aiops.connectors.base import ConnectorError
 
 P = {"_allow_private": False, "api_url": "https://k8s.test:6443", "token": fakes.K8S_TOKEN, "namespace": "default", "_sa_admin": "admin-tok"}
 
@@ -60,7 +60,7 @@ def test_parse_accepts(command, profile):
     ("upgrade web bitnami/nginx", "write", "không phải tên hợp lệ"),
     ("upgrade web file:///etc/passwd", "write", "không hỗ trợ chart"),
     ("upgrade web oci://example.test/web -f /data/values.yaml", "write", "chỉ được -f -"),
-    ("upgrade web oci://example.test/web --set-file x=/data/kagent.db", "write", "--set-file"),
+    ("upgrade web oci://example.test/web --set-file x=/data/aiops.db", "write", "--set-file"),
     ("upgrade web oci://example.test/web --post-renderer /bin/sh", "write", "--post-renderer"),
     ("list --kubeconfig /data/x", "read", "--kubeconfig"),
     ("list --kube-token abc", "read", "--kube-token"),
@@ -96,7 +96,7 @@ def test_chart_urls_must_pass_network_check():
 # ---------- chạy ----------
 
 def test_run_uses_admin_token_clean_env_and_temp_helm_home(calls, monkeypatch):
-    monkeypatch.setenv("KAGENT_SECRET_KEY", "super-secret")
+    monkeypatch.setenv("AIOPS_SECRET_KEY", "super-secret")
     out = helm.run_read(P, {"command": "helm list -n app"})
     call = calls.seen[0]
     assert call["argv"][1:] == ["list", "-n", "app"] and call["timeout"] == 60
@@ -160,7 +160,7 @@ def test_read_output_filters(calls):
 
 
 def test_chart_proxy_skips_api_server(calls, monkeypatch):
-    from kagent import proxy
+    from aiops import proxy
     monkeypatch.setattr(proxy, "routes", lambda url, mode=None: ["http://proxy.test:3128"] if "example.test" in url else ["DIRECT"])
     helm.run_read(P, {"command": "show chart oci://example.test/charts/web"})
     env = calls.seen[0]["env"]

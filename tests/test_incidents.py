@@ -6,7 +6,7 @@ import pytest
 
 import fakes
 from conftest import create_connections
-from kagent import agent, connections, db, gateway, incidents, live, llm
+from aiops import agent, connections, db, gateway, incidents, live, llm
 
 
 def am(labels, fp, state="active", starts="2026-11-12T08:00:00Z", summary=""):
@@ -502,9 +502,9 @@ def test_approval_updates_incident_at_once_and_timeline_shows_fix(flow, users, i
     assert (ran["title"], ran["cmd"], ran["result"]) == ("Khởi động lại", "kubectl_write rollout restart deployment/web -n default", "deployment.apps/web restarted")
     assert not any(e["kind"] == "proposed" for e in inc["timeline"])  # chỉ hiện lệnh đã thực sự chạy
     proposed = _recorded(iid, "proposed")
-    assert proposed["actor"] == "kagent" and proposed["text"].startswith("kubectl_write rollout restart") and "→ cần duyệt" in proposed["text"]
+    assert proposed["actor"] == "aiops" and proposed["text"].startswith("kubectl_write rollout restart") and "→ cần duyệt" in proposed["text"]
     investigated = next(e for e in inc["timeline"] if e["kind"] == "investigated")
-    assert investigated["who"] == "kagent · điều tra lần 1" and investigated["text"] == "1 lệnh đọc → Image lỗi (độ tin 0.60)"
+    assert investigated["who"] == "aiops · điều tra lần 1" and investigated["text"] == "1 lệnh đọc → Image lỗi (độ tin 0.60)"
     assert (investigated["title"], investigated["result"]) == ("Image lỗi", "1 lệnh đọc · độ tin 0.60")
     assert not any("bắt đầu điều tra" in t for t in texts) and inc["cause"]["round"] == 1 and inc["cause"]["text"] == "image lỗi"
     infra.am_alerts[:] = infra.am_alerts[:1]
@@ -686,7 +686,7 @@ class Summarizing(Reporting):
 
 @pytest.fixture()
 def clock(monkeypatch):
-    """Đẩy đồng hồ của kagent về sau thay cho việc chờ thật (episode chỉ cho ghi thêm nên không lùi mốc cũ được)."""
+    """Đẩy đồng hồ của aiops về sau thay cho việc chờ thật (episode chỉ cho ghi thêm nên không lùi mốc cũ được)."""
     real, offset = db.now, [0]
     monkeypatch.setattr(db, "now", lambda: real() + timedelta(minutes=offset[0]))
 
@@ -709,7 +709,7 @@ def test_summary_written_after_quiet_and_again_only_after_new_activity(flow, use
         view = incidents.summarize(conn, t, iid, due[0][1])
         assert view["text"] == "tóm tắt lần 1" and not view["stale"]
         data = provider.inputs[0]
-        assert data["turns"][0]["by"] == "kagent điều tra tự động" and data["incident"]["env"] == "dev" and data["previous_summary"] is None
+        assert data["turns"][0]["by"] == "aiops điều tra tự động" and data["incident"]["env"] == "dev" and data["previous_summary"] is None
         assert incidents.due_summaries(conn, t) == []  # không có gì mới: không viết lại
 
         incidents._event(conn, t, iid, "verified", "đã xác minh")
@@ -937,7 +937,7 @@ def test_chat_fix_in_incident_conversation_triggers_verify(flow, users):
         approval = conn.execute("SELECT approval_id FROM incident_action WHERE incident_id=? AND origin='chat'", (iid,)).fetchone()["approval_id"]
     flow.post(f"/api/approvals/{approval}/decide", json={"action": "approve_once"})
     inc = flow.get(f"/api/incidents/{iid}").json()
-    assert inc["stage"] == "verifying" and inc["verify_due"]  # sửa trong chat xong thì kagent xác minh cảnh báo đã hết chưa
+    assert inc["stage"] == "verifying" and inc["verify_due"]  # sửa trong chat xong thì aiops xác minh cảnh báo đã hết chưa
 
 
 def test_new_message_in_incident_conversation_skips_proposed_fix(flow, users):
@@ -993,7 +993,7 @@ def test_timeline_attaches_change_check_and_hides_sandbox_scripts(flow, users):
 
 
 def test_action_view_reads_gitlab_writes():
-    from kagent.incidents.present import action_view
+    from aiops.incidents.present import action_view
     commit = {"tool": "gl.api_admin", "status": "ok", "why": "Tạo nhánh fix/x và sửa values. Chi tiết khác.",
               "args": json.dumps({"method": "POST", "path": "/projects/1/repository/commits", "body": {
                   "branch": "fix/x", "commit_message": "fix: nới probe\n\nthân dài", "actions": [{"action": "update", "file_path": "values.yaml", "content": "x" * 5000}]}}),
@@ -1011,7 +1011,7 @@ def test_action_view_reads_gitlab_writes():
 
 
 def test_cause_parts_splits_run_on_paragraph():
-    from kagent.incidents.present import cause_parts, headline
+    from aiops.incidents.present import cause_parts, headline
     text = ("Chưa chắc chắn hoàn toàn. Bằng chứng cho thấy probe timeout 1s quá ngắn (scrape ~2,1s). Hệ quả: flower restart 32 lần. "
             "Chưa đọc được ngưỡng của rule CPUThrottlingHigh.")
     assert cause_parts(text) == {"hedge": "Chưa chắc chắn hoàn toàn", "lead": "Probe timeout 1s quá ngắn (scrape ~2,1s).",
@@ -1143,7 +1143,7 @@ def test_incident_page_links_steps_and_whys_to_source_tool(flow, users, infra):
 
 
 def test_same_cause_recurrence_downgrades_old_incident_and_blames_lessons(flow, users, infra):
-    from kagent import knowledge, sources
+    from aiops import knowledge, sources
     t = tenant(users)
     old = _web_incident(users)
     llm.set_provider(FiveWhys([TECH]))
@@ -1173,7 +1173,7 @@ def test_same_cause_recurrence_downgrades_old_incident_and_blames_lessons(flow, 
 
 
 def test_restart_is_mitigation_even_if_report_calls_it_fix(flow, users, infra):
-    from kagent.incidents.rootcause import action_kind, is_mitigation
+    from aiops.incidents.rootcause import action_kind, is_mitigation
     assert is_mitigation("k8s.kubectl_write", {"command": "rollout restart deployment/web -n default"})
     assert is_mitigation("k8s.kubectl_write", {"command": "kubectl scale deploy/web --replicas=3"})
     assert is_mitigation("os.api_write", {"path": "/servers/x/action", "body": {"reboot": {"type": "SOFT"}}})
@@ -1293,7 +1293,7 @@ def test_notify_new_incident_once_only_after_enabling(flow, users, infra):
     with db.session() as conn:
         assert _notify(conn, users) == 1 and _notify(conn, users) == 0  # không gửi trùng
     hook = infra.hooks[-1]
-    assert hook["event"] == "new" and "DiskFull" in hook["text"] and "[kagent · dev]" in hook["text"]
+    assert hook["event"] == "new" and "DiskFull" in hook["text"] and "[aiops · dev]" in hook["text"]
     assert hook["incident"]["url"] == f"http://testserver/#/t/{tenant(users)}/incidents/{hook['incident']['id']}"
     assert flow.get("/api/notify-settings").json()["recent"][0]["status"] == "sent"
 

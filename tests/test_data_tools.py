@@ -4,7 +4,7 @@ import json
 import pytest
 
 from conftest import tool_steps
-from kagent import datafilter, db, gateway, results, tools
+from aiops import datafilter, db, gateway, results, tools
 
 LOGS = {"total": 5, "hits": [
     {"timestamp": "t1", "source": json.dumps({"level": "ERROR", "request_id": "a1", "msg": "409 Conflict"})},
@@ -138,7 +138,7 @@ def test_script_needs_approval_then_runs_in_sandbox(users):
     ("while True: pass", "vượt giới hạn CPU"),
 ])
 def test_script_sandbox_blocks_escape(users, code, message, monkeypatch):
-    from kagent.connectors import data
+    from aiops.connectors import data
     monkeypatch.setattr(data, "SCRIPT_TIMEOUT", 2)
     with db.session() as conn:
         rid = results.save(conn, users["alice"].tenant, _ctx(users).user_id, None, "x", {"a": 1}, False)
@@ -157,7 +157,7 @@ def test_learned_tool_keeps_inline_filter_but_skips_data_steps(users):
     step = next(s for s in trace if s["type"] == "tool_call")
     step["args"]["_filter"] = {"fields": ["index"]}
     trace.append({"type": "tool_call", "tool": "data.query", "args": {"result_id": rid}, "status": "ok", "result": {}})
-    from kagent import learned
+    from aiops import learned
     with db.session() as conn:
         conn.execute("DROP TRIGGER episode_append_only")
         conn.execute("UPDATE episode SET trace=? WHERE id=?", (json.dumps(trace), ep["id"]))
@@ -175,7 +175,7 @@ def test_purge_removes_old_results(users):
 def test_filtered_call_keeps_large_raw_result_for_requery(users, monkeypatch):
     big = {"hits": [{"i": i, "source": {"level": "ERROR" if i % 2 else "INFO", "msg": "y" * 100}} for i in range(200)]}
     real = gateway._run
-    from kagent import connections
+    from aiops import connections
     monkeypatch.setattr(connections, "resolve", lambda conn, t, name: (None, None, type("S", (), {"check": None, "run": staticmethod(lambda p, a: big),
                                                                                                     "untrusted_output": True, "untrusted": lambda self, args: True})(), {}))
     with db.session() as conn:
@@ -186,7 +186,7 @@ def test_filtered_call_keeps_large_raw_result_for_requery(users, monkeypatch):
 
 
 def test_elasticsearch_source_stays_an_object_so_fields_can_be_grouped(infra):
-    from kagent.connectors import elasticsearch
+    from aiops.connectors import elasticsearch
     import fakes
     hits = elasticsearch.search_logs({"_allow_private": False, "url": "https://es.test:9200", "api_key": fakes.ES_KEY}, {"query": "error"})["hits"]
     assert isinstance(hits[0]["source"], dict)
@@ -253,7 +253,7 @@ def test_script_in_reviewed_tool_runs_without_asking_again(users):
 
 
 def test_count_logs_aggregates_all_matches_and_falls_back_to_keyword(infra):
-    from kagent.connectors import elasticsearch
+    from aiops.connectors import elasticsearch
     import fakes
     p = {"_allow_private": False, "url": "https://es.test:9200", "api_key": fakes.ES_KEY}
     out = elasticsearch.count_logs(p, {"query": "*", "group_by": "level"})
@@ -269,7 +269,7 @@ def test_filter_warns_when_counting_a_partial_page():
 
 
 def test_count_logs_retries_keyword_when_text_field_gives_no_buckets(infra):
-    from kagent.connectors import elasticsearch
+    from aiops.connectors import elasticsearch
     import fakes
     p = {"_allow_private": False, "url": "https://es.test:9200", "api_key": fakes.ES_KEY}
     out = elasticsearch.count_logs(p, {"query": "*", "group_by": "module"})
