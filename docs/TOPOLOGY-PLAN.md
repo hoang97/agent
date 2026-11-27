@@ -3,6 +3,12 @@
 Bản 2026-11-24. Giai đoạn A đã làm (`IMPROVEMENTS.md` Đợt 47). Đã chốt: topology là dữ kiện có thời hạn, mức tin theo từng cạnh (mục Nguyên tắc), và 5 điểm ở mục Đã chốt. Mục 9 trong kế hoạch theo tài liệu Cloud Operations (`INCIDENTS-PLAN.md`). Cần khớp với data model
 nhóm Cloud Operations đang làm trước khi chốt; các quyết định ở mục **Đã chốt**, phần chưa quyết ở **Còn mở**.
 
+**Bản đang chạy** mô tả ở `docs/ARCHITECTURE.md`, mục 8. Mã khác bản phác này ở các điểm:
+
+- Bảng tên `topo_entity`, `topo_edge`, thêm `topo_scan`; không có `alert_entity`, cảnh báo → thực thể tính lúc đọc (`start_points`).
+- `data.topology` (tên công cụ của `topology.neighbors`) chỉ đọc topology đã lưu và trả lệnh `verify` cho cạnh gợi ý; agent tự chạy lệnh đó qua gateway, công cụ không tự đọc lại.
+- Chỉ có cạnh `runs_on`, `uses`, `member_of`; `depends_on`, workload, khai tay và nhập CSV/YAML chưa làm.
+
 ## Vì sao cần
 
 - Biên bản MVP: "có đủ thông tin topology từ lớp vật lý, hypervisor, cloud control plane, K8s, PaaS, ứng dụng, cho phép vẽ topology".
