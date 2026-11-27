@@ -236,14 +236,13 @@ function summaryCard(s, incidentId) {
       : "sẽ tự viết khi sự cố yên sau lượt điều tra";
     setKids(card, 
       h("div", { class: "tool-head" }, h("strong", {}, "Tóm tắt sự cố"), h("span", { class: "small muted" }, meta), h("span", { class: "spacer" }),
-        h("button", { type: "button", class: "ghost small-btn", onclick: guard(async (e) => {
-          const btn = e.currentTarget;
-          btn.textContent = "Đang tóm tắt…";
-          try { paint(await api("POST", `/api/incidents/${incidentId}/summary`)); } catch (err) { btn.textContent = "Tóm tắt ngay"; throw err; }
-        }) }, "Tóm tắt ngay")),
+        jobBtn(job, { label: "Tóm tắt ngay", busyLabel: "Đang tóm tắt…", onDone: () => { job = null; card.refresh(); },
+          run: async () => { const r = await api("POST", `/api/incidents/${incidentId}/summary`); job = null; paint(r); } })),
       cur.text && h("p", { class: "summary-text" }, cur.text));
   };
+  let job = null;  // lượt "Tóm tắt ngay" đang chạy hoặc vừa lỗi (jobs.py)
   paint(cur);
+  jobsOf(`incident:${incidentId}`).then((jobs) => { job = jobs.summary || null; if (job) paint(cur); });
   card.markStale = () => { if (cur.text) paint({ ...cur, stale: true }); };
   card.refresh = async () => { paint(await api("GET", `/api/incidents/${incidentId}/summary`)); };
   return card;
@@ -305,6 +304,12 @@ function undoChecks(u, title) {
 }
 
 const CHANGE_FINAL = ["ok", "reverted", "purged", "applied", "check_failed", "conflict", "revert_failed"];
+// Một hội thoại có nhiều dòng lệnh ghi: các dòng vẽ cùng lúc dùng chung một lần đọc /api/jobs.
+let changeJobs = null;
+const changeJobsNow = () => {
+  if (!changeJobs || Date.now() - changeJobs.at > 5000) changeJobs = { at: Date.now(), p: jobsOf("changes") };
+  return changeJobs.p;
+};
 
 // Trạng thái của lệnh ghi sau khi chạy: đang kiểm tra, ổn, tự hoàn tác, kiểm tra không đạt; kèm nút Hoàn tác.
 // Đang kiểm tra thì hỏi lại máy chủ mỗi 10 giây cho tới khi có kết quả hoặc dòng bị gỡ khỏi trang.
@@ -327,11 +332,13 @@ function changeLine(change) {
       revert_failed: ["✕", "warn-text", "Hoàn tác lỗi: " + ((c.revert && c.revert.error) || "")],
       purged: ["✕", "muted", "Đã xoá thật"],
     }[c.status] || ["•", "muted", c.status];
-    const btn = c.can_undo && c.can_revert !== false && h("button", { type: "button", class: "ghost small-btn" },
-      c.status === "conflict" ? "Hoàn tác…" : c.soft ? "Khôi phục" : "Hoàn tác");
-    if (btn) btn.addEventListener("click", guard(async () => { await runUndo(c, box, (next) => { cur = next; paint(); }); }));
+    const label = c.status === "conflict" ? "Hoàn tác…" : c.soft ? "Khôi phục" : "Hoàn tác";
+    const btn = c.can_undo && c.can_revert !== false && jobBtn(job, { label, busyLabel: c.soft ? "Đang khôi phục…" : "Đang hoàn tác…",
+      run: () => runUndo(c, box, (next) => { job = null; cur = next; paint(); }), onDone: () => { job = null; poll(); } });
     setKids(box, h("span", { class: cls }, h("span", { "aria-hidden": "true" }, mark + " "), text), btn || null);
   };
+  let job = null;  // lượt hoàn tác đang chạy hoặc vừa lỗi, kể cả bấm trước khi tải lại trang
+  if (change.can_undo) changeJobsNow().then((jobs) => { job = jobs[`undo:${change.id}`] || null; if (job) paint(); });
   const poll = async () => {
     try {
       const [fresh] = await api("GET", `/api/changes?ids=${encodeURIComponent(change.id)}`);
@@ -517,17 +524,19 @@ function chatView(main) {
       if (row.nextElementSibling && row.nextElementSibling.classList.contains("save-box")) return;
       const name = h("input", { placeholder: "Tên công cụ, ví dụ: kiem tra don loi", "aria-label": "Tên công cụ", class: "wide" });
       const scope = h("select", { "aria-label": "Phạm vi" }, h("option", { value: "user" }, "Chỉ mình tôi"), h("option", { value: "tenant" }, "Cả nhóm (cần admin duyệt)"));
+      const note = h("span");  // lượt lưu đang chạy hoặc vừa lỗi, kể cả bấm trước khi tải lại trang
       const box = h("div", { class: "edit-box save-box" },
         h("div", { class: "small" }, "Lưu các bước công cụ đã chạy thành công ở lượt này thành một công cụ dùng lại được. Giá trị bạn đã gõ trong yêu cầu sẽ thành tham số."),
         h("div", { class: "row" }, name, scope,
           h("button", { type: "button", class: "ghost", onclick: () => box.remove() }, "Hủy"),
-          h("button", { type: "button", onclick: guard(async () => {
+          jobBtn(null, { label: "Lưu", busyLabel: "Đang lưu…", cls: "", run: async () => {
             const tool = await api("POST", "/api/learned-tools/from-episode", { episode_id: m.id, name: name.value || null, scope: scope.value });
             box.remove();
             toast(tool.status === "active" ? `Đã tạo ${tool.name}. Nhắc tên này trong chat để agent dùng.` : `Đã gửi ${tool.name} cho admin duyệt.`);
-          }) }, "Lưu")));
+          } }), note));
       row.after(box);
       name.focus();
+      jobsOf("learned-tools").then((jobs) => setKids(note, jobNote(jobs[`from-episode:${m.id}`], () => box.remove(), note)));
     });
     const remember = m.output && iconButton("book", "Lưu vào tri thức", () => {
       if (row.nextElementSibling && row.nextElementSibling.classList.contains("ku-box")) return;

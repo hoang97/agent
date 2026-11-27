@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import agent as agent_mod
-from . import automode, compiler, connections, db, dedup, entities, gateway, incidents, knowledge, learned, learning, lint, llm, net, proxy, sources, tools, undo, vault
+from . import automode, compiler, connections, db, dedup, entities, gateway, incidents, jobs, knowledge, learned, learning, lint, llm, net, proxy, sources, tools, undo, vault
 from . import live
 from .connectors import k8s_rbac
 from .connectors.base import ConnectorError
@@ -109,6 +109,7 @@ async def lifespan(_: FastAPI):
     with db.session() as conn:
         entities.renormalize(conn)
         sources.resume(conn)
+        jobs.recover(conn)
     resume_consolidations()
     sched = Scheduler()
     if settings.scheduler_enabled:
@@ -966,14 +967,17 @@ class EntityMerge(BaseModel):
 
 
 @app.post("/api/knowledge/entities/merge")
-def entity_merge(body: EntityMerge, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+def entity_merge(body: EntityMerge, t: Tenant = Depends(current_tenant)):
     t.require_admin()
-    try:
-        merged = entities.merge(conn, t.tenant_id, body.sources, body.target, t.principal.username)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    lint.refresh_entity_merges(conn, t.tenant_id)
-    return merged
+
+    def work(conn):
+        try:
+            merged = entities.merge(conn, t.tenant_id, body.sources, body.target, t.principal.username)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        lint.refresh_entity_merges(conn, t.tenant_id)
+        return merged
+    return _as_job(t, f"entity-merge:{body.target}", "knowledge", work)
 
 
 @app.get("/api/knowledge/lint")
@@ -983,9 +987,9 @@ def knowledge_lint(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
 
 
 @app.post("/api/knowledge/lint")
-def knowledge_lint_run(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+def knowledge_lint_run(t: Tenant = Depends(current_tenant)):
     t.require_admin()
-    return lint.run(conn, t.tenant_id, t.principal.username)
+    return _as_job(t, "lint", "knowledge", lambda conn: lint.run(conn, t.tenant_id, t.principal.username))
 
 
 @app.post("/api/knowledge/dedup")
@@ -1009,15 +1013,18 @@ class MergeDecision(BaseModel):
 
 
 @app.post("/api/knowledge/merge-proposals/{proposal_id}/decide")
-def merge_proposal_decide(proposal_id: str, body: MergeDecision, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+def merge_proposal_decide(proposal_id: str, body: MergeDecision, t: Tenant = Depends(current_tenant)):
     t.require_admin()
     edits = {k: v for k, v in (("title", body.title), ("content", body.content), ("applies_when", body.applies_when)) if v is not None}
-    try:
-        return dedup.decide(conn, t.tenant_id, proposal_id, body.approve, t.principal.username, edits)
-    except KeyError:
-        raise HTTPException(404, "không tìm thấy đề xuất")
-    except ValueError as e:
-        raise HTTPException(409, str(e))
+
+    def work(conn):
+        try:
+            return dedup.decide(conn, t.tenant_id, proposal_id, body.approve, t.principal.username, edits)
+        except KeyError:
+            raise HTTPException(404, "không tìm thấy đề xuất")
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+    return _as_job(t, f"merge-decide:{proposal_id}", "knowledge", work)
 
 
 class NewSource(BaseModel):
@@ -1302,9 +1309,9 @@ def ku_rollback(event_id: int, t: Tenant = Depends(current_tenant), conn=Depends
 
 
 @app.post("/api/learning/run")
-def learning_run(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+def learning_run(t: Tenant = Depends(current_tenant)):
     t.require_admin()
-    return learning.run_learning(conn, t.tenant_id)
+    return _as_job(t, "learning", "knowledge", lambda conn: learning.run_learning(conn, t.tenant_id))
 
 
 def _compile_error(exc: compiler.CompileError) -> HTTPException:
@@ -1312,12 +1319,15 @@ def _compile_error(exc: compiler.CompileError) -> HTTPException:
 
 
 @app.post("/api/compile")
-def compile_now(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+def compile_now(t: Tenant = Depends(current_tenant)):
     t.require_admin()
-    try:
-        return _run_view(compiler.compile_tenant(conn, t.tenant_id, t.principal.username))
-    except compiler.CompileError as exc:
-        raise _compile_error(exc) from exc
+
+    def work(conn):
+        try:
+            return _run_view(compiler.compile_tenant(conn, t.tenant_id, t.principal.username))
+        except compiler.CompileError as exc:
+            raise _compile_error(exc) from exc
+    return _as_job(t, "compile", "compile", work)
 
 
 @app.get("/api/compile/runs")
@@ -1341,10 +1351,13 @@ class RetireRule(BaseModel):
 def compile_retire_rule(body: RetireRule, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     t.require_admin()
     _visible_ku(conn, t, body.ku_id)
-    try:
-        return _run_view(compiler.retire_rule(conn, t.tenant_id, body.ku_id, t.principal.username))
-    except compiler.CompileError as exc:
-        raise _compile_error(exc) from exc
+
+    def work(conn):
+        try:
+            return _run_view(compiler.retire_rule(conn, t.tenant_id, body.ku_id, t.principal.username))
+        except compiler.CompileError as exc:
+            raise _compile_error(exc) from exc
+    return _as_job(t, f"retire-rule:{body.ku_id}", "compile", work)
 
 
 class Decide(BaseModel):
@@ -1352,21 +1365,27 @@ class Decide(BaseModel):
 
 
 @app.post("/api/compile/{run_id}/decide")
-def compile_decide(run_id: str, body: Decide, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+def compile_decide(run_id: str, body: Decide, t: Tenant = Depends(current_tenant)):
     t.require_admin()
-    try:
-        return _run_view(compiler.decide(conn, t.tenant_id, run_id, body.approve, t.principal.username))
-    except compiler.CompileError as exc:
-        raise _compile_error(exc) from exc
+
+    def work(conn):
+        try:
+            return _run_view(compiler.decide(conn, t.tenant_id, run_id, body.approve, t.principal.username))
+        except compiler.CompileError as exc:
+            raise _compile_error(exc) from exc
+    return _as_job(t, f"decide:{run_id}", "compile", work)
 
 
 @app.post("/api/compile/rollback")
-def compile_rollback(t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+def compile_rollback(t: Tenant = Depends(current_tenant)):
     t.require_admin()
-    try:
-        return compiler.rollback(conn, t.tenant_id, t.principal.username)
-    except compiler.CompileError as exc:
-        raise _compile_error(exc) from exc
+
+    def work(conn):
+        try:
+            return compiler.rollback(conn, t.tenant_id, t.principal.username)
+        except compiler.CompileError as exc:
+            raise _compile_error(exc) from exc
+    return _as_job(t, "rollback", "compile", work)
 
 
 @app.get("/api/knowledge/files")
@@ -1670,6 +1689,25 @@ def k8s_rbac_remove(connection_id: str, t: Tenant = Depends(current_tenant), con
     return {"ok": True, "removed": removed}
 
 
+def _as_job(t: Tenant, kind: str, target: str, fn):
+    """Chạy fn(conn) như việc nền (jobs.py): xong nhanh thì trả kết quả như cũ, lâu thì 202 kèm job để trang theo dõi."""
+    status, out = jobs.run(t.tenant_id, kind, target, t.user_id, fn)
+    return out if status == 200 else JSONResponse(status_code=202, content={"job": out})
+
+
+@app.get("/api/jobs")
+def job_list(target: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    return jobs.latest(conn, t.tenant_id, target)
+
+
+@app.get("/api/jobs/{job_id}")
+def job_get(job_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    job = jobs.get(conn, t.tenant_id, job_id)
+    if job is None:
+        raise HTTPException(404, "không tìm thấy việc")
+    return job
+
+
 def _incident_call(fn):
     try:
         return fn()
@@ -1749,10 +1787,13 @@ def incident_close(incident_id: str, body: IncidentClose, t: Tenant = Depends(cu
 
 
 @app.post("/api/incidents/{incident_id}/actions/{action_id}/retry")
-def incident_action_retry(incident_id: str, action_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+def incident_action_retry(incident_id: str, action_id: str, t: Tenant = Depends(current_tenant)):
     t.require_writer()
-    row = _incident_call(lambda: incidents.retry(conn, t.tenant_id, incident_id, action_id, t.user_id))
-    return {"status": row["status"], "approval_id": row["approval_id"], "reasons": json.loads(row["reasons"])}
+
+    def work(conn):
+        row = _incident_call(lambda: incidents.retry(conn, t.tenant_id, incident_id, action_id, t.user_id))
+        return {"status": row["status"], "approval_id": row["approval_id"], "reasons": json.loads(row["reasons"])}
+    return _as_job(t, f"retry:{action_id}", f"incident:{incident_id}", work)
 
 
 @app.post("/api/incidents/{incident_id}/actions/{action_id}/dismiss")
@@ -1850,9 +1891,9 @@ def incident_investigate(incident_id: str, t: Tenant = Depends(current_tenant), 
 
 
 @app.post("/api/incidents/{incident_id}/rewrite-cause")
-def incident_rewrite_cause(incident_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+def incident_rewrite_cause(incident_id: str, t: Tenant = Depends(current_tenant)):
     t.require_writer()
-    return _incident_call(lambda: incidents.rewrite_cause(conn, t.tenant_id, incident_id, t.user_id))
+    return _as_job(t, "rewrite-cause", f"incident:{incident_id}", lambda conn: _incident_call(lambda: incidents.rewrite_cause(conn, t.tenant_id, incident_id, t.user_id)))
 
 
 @app.get("/api/incidents/{incident_id}/summary")
@@ -1864,9 +1905,9 @@ def incident_summary_get(incident_id: str, t: Tenant = Depends(current_tenant), 
 
 
 @app.post("/api/incidents/{incident_id}/summary")
-def incident_summary_now(incident_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+def incident_summary_now(incident_id: str, t: Tenant = Depends(current_tenant)):
     t.require_writer()
-    return _incident_call(lambda: incidents.summarize(conn, t.tenant_id, incident_id))
+    return _as_job(t, "summary", f"incident:{incident_id}", lambda conn: _incident_call(lambda: incidents.summarize(conn, t.tenant_id, incident_id)))
 
 
 @app.get("/api/alert-settings")
@@ -1961,15 +2002,18 @@ class FromEpisode(BaseModel):
 
 
 @app.post("/api/learned-tools/from-episode")
-def learned_from_episode(body: FromEpisode, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+def learned_from_episode(body: FromEpisode, t: Tenant = Depends(current_tenant)):
     t.require_writer()
     if body.scope not in ("user", "tenant"):
         raise HTTPException(400, "phạm vi không hợp lệ")
-    try:
-        row = learned.from_episode(conn, t.tenant_id, t.user_id, body.episode_id, body.name, body.description, body.scope)
-    except learned.LearnedError as exc:
-        raise HTTPException(exc.status, str(exc)) from exc
-    return _learned_view(conn, t, row)
+
+    def work(conn):
+        try:
+            row = learned.from_episode(conn, t.tenant_id, t.user_id, body.episode_id, body.name, body.description, body.scope)
+        except learned.LearnedError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+        return _learned_view(conn, t, row)
+    return _as_job(t, f"from-episode:{body.episode_id}", "learned-tools", work)
 
 
 class LearnedPatch(BaseModel):
@@ -2076,18 +2120,20 @@ class UndoBody(BaseModel):
 
 
 @app.post("/api/changes/{change_id}/undo")
-def change_undo(change_id: str, body: UndoBody, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
-    try:
-        row = undo.get(conn, t.tenant_id, change_id)
-        if not undo.can_revert(conn, row, t.user_id, t.roles, t.principal.is_org_admin):
-            raise HTTPException(403, f"chỉ người chạy lệnh hoặc người có quyền duyệt ở {row['env']} được hoàn tác")
-        out = undo.revert(conn, t.tenant_id, change_id, t.user_id, force=body.force)
-    except undo.UndoError as exc:
-        if exc.data:
-            raise HTTPException(exc.status, {"message": str(exc), **exc.data}) from exc
-        raise HTTPException(exc.status, str(exc)) from exc
-    log.info("tenant %s: %s hoàn tác thay đổi %s%s", t.tenant_id, t.principal.username, change_id, " (đè thay đổi sau đó)" if body.force else "")
-    return out
+def change_undo(change_id: str, body: UndoBody, t: Tenant = Depends(current_tenant)):
+    def work(conn):
+        try:
+            row = undo.get(conn, t.tenant_id, change_id)
+            if not undo.can_revert(conn, row, t.user_id, t.roles, t.principal.is_org_admin):
+                raise HTTPException(403, f"chỉ người chạy lệnh hoặc người có quyền duyệt ở {row['env']} được hoàn tác")
+            out = undo.revert(conn, t.tenant_id, change_id, t.user_id, force=body.force)
+        except undo.UndoError as exc:
+            if exc.data:
+                raise HTTPException(exc.status, {"message": str(exc), **exc.data}) from exc
+            raise HTTPException(exc.status, str(exc)) from exc
+        log.info("tenant %s: %s hoàn tác thay đổi %s%s", t.tenant_id, t.principal.username, change_id, " (đè thay đổi sau đó)" if body.force else "")
+        return out
+    return _as_job(t, f"undo:{change_id}", "changes", work)
 
 
 @app.get("/api/trash")

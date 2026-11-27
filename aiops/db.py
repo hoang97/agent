@@ -324,6 +324,14 @@ CREATE TABLE IF NOT EXISTS undo_evidence (
   id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT NOT NULL, recipe TEXT NOT NULL, source TEXT NOT NULL, change_id TEXT, at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_undo_evidence ON undo_evidence(tenant_id, recipe);
+
+-- Việc chạy lâu bấm từ giao diện (jobs.py). target: trang/đối tượng để trang đọc lại sau F5 (vd. incident:<id>); kind có thể kèm id mục.
+-- error: {"status", "detail"} như HTTPException.
+CREATE TABLE IF NOT EXISTS job (
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('running','ok','error')),
+  started_by TEXT, started_at TEXT NOT NULL, finished_at TEXT, result TEXT, error TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_job_target ON job(tenant_id, target, kind, started_at);
 """
 
 

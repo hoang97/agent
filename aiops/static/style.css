@@ -532,3 +532,5 @@ input.narrow { width: 70px; }
 .tp-key.common { border-color: var(--accent); border-style: dashed; }
 .ix-tp-detail { border-top: 1px solid var(--line); padding-top: 6px; }
 .ix-blast { border-top: 1px solid var(--line); padding-top: 6px; margin-top: 4px; }
+.job-btn { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.job-btn button .spinner { display: inline-block; vertical-align: -2px; }

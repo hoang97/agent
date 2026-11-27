@@ -46,15 +46,57 @@ async function api(method, path, body) {
   const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin" });
   const data = await res.json().catch(() => null);
   if (res.status === 401 && path !== "/api/auth/login") { state.me = null; renderLogin(); throw new Error("Phiên đã hết hạn"); }
-  if (!res.ok) {
-    const detail = data && data.detail;
-    const err = new Error(typeof detail === "string" ? detail : detail && detail.message ? detail.message : `Lỗi ${res.status}`);
-    err.status = res.status;  // để nơi gọi phân biệt "không còn" (404) với lỗi tạm thời
-    if (detail && typeof detail === "object" && !Array.isArray(detail)) err.data = detail;
-    throw err;
-  }
+  if (!res.ok) throw apiError(res.status, data && data.detail);
+  if (res.status === 202 && data && data.job) return waitJob(data.job);
   return data;
 }
+
+function apiError(status, detail) {
+  const err = new Error(typeof detail === "string" ? detail : detail && detail.message ? detail.message : `Lỗi ${status}`);
+  err.status = status;  // để nơi gọi phân biệt "không còn" (404) với lỗi tạm thời
+  if (detail && typeof detail === "object" && !Array.isArray(detail)) err.data = detail;
+  return err;
+}
+
+// Việc chạy nền ở server (jobs.py): POST chờ tối đa khoảng 20 giây, lâu hơn thì trả 202 {job} và api() theo dõi tới khi xong,
+// nên nơi gọi vẫn nhận kết quả hay lỗi như lời gọi thường.
+async function waitJob(job) {
+  while (job.status === "running") {
+    await new Promise((r) => setTimeout(r, 2000));
+    try { job = await api("GET", `/api/jobs/${job.id}`); } catch (e) { if (e.status === 404) throw e; }  // mạng chập chờn: việc vẫn chạy, thử lại
+  }
+  if (job.status === "error") throw apiError(job.error.status, job.error.detail);
+  return job.result;
+}
+
+// Nút của việc chạy nền. job: lượt gần nhất từ /api/jobs?target=… (có id thì theo dõi tiếp) hoặc trạng thái chạy nền riêng của
+// trang ({ status: "running" }). Lượt đang chạy, kể cả do người khác bấm hay bấm trước khi tải lại trang, hiện thành nút chờ và
+// gọi onDone khi xong; lượt gần nhất lỗi thì lỗi nằm cạnh nút tới khi chạy lại thành công.
+const watchedJobs = new Set();
+function jobBtn(job, { label, busyLabel, run, onDone, cls = "ghost small-btn", title }) {
+  const running = !!job && job.status === "running";
+  const btn = h("button", { type: "button", class: cls, title, disabled: running,
+    onclick: guard(async (ev) => { btn.textContent = busyLabel; try { await run(ev); } finally { btn.textContent = label; } }) },
+    running ? [h("span", { class: "spinner", "aria-hidden": "true" }), " ", busyLabel] : label);
+  const wrap = h("span", { class: "job-btn" }, btn);
+  addKids(wrap, jobNote(job, onDone, wrap));
+  return wrap;
+}
+// Phần chữ của jobBtn, cho chỗ không đặt được nút (chip, form): người bấm và giờ khi đang chạy, lỗi của lượt gần nhất.
+// anchor: chỉ gọi onDone khi nó còn trên trang (người dùng chưa chuyển màn).
+function jobNote(job, onDone, anchor) {
+  if (!job) return false;
+  const running = job.status === "running";
+  if (running && job.id && onDone && !watchedJobs.has(job.id)) {
+    watchedJobs.add(job.id);
+    waitJob(job).catch((e) => toast(e.message, true)).finally(() => { watchedJobs.delete(job.id); if (!anchor || document.contains(anchor)) onDone(); });
+  }
+  const by = job.started_by_name ? `, ${job.started_by_name} bấm` : "";
+  if (running) return job.started_at ? h("span", { class: "small muted" }, `đang chạy từ ${hmd(job.started_at)}${by}`) : false;
+  return job.status === "error" && h("span", { class: "small warn-text", role: "status" },
+    `Lượt ${hmd(job.finished_at || job.started_at)}${by} lỗi: ${apiError(job.error.status, job.error.detail).message}`);
+}
+const jobsOf = (target) => api("GET", `/api/jobs?target=${encodeURIComponent(target)}`).catch(() => ({}));
 
 function toast(msg, isErr) {
   const el = h("div", { class: "toast" + (isErr ? " err" : ""), role: "status" }, msg);
@@ -503,11 +545,14 @@ async function incidentDetail(main, id) {
   let exportOpen = false;
   let topo = null;  // tính nặng hơn trang sự cố và ít đổi: tải một lần, nút Làm mới tải lại
   async function load() {
-    const [d, open, draft] = await Promise.all([api("GET", `/api/incidents/${id}`), api("GET", "/api/incidents?status=open"),
-      exportOpen ? api("GET", `/api/incidents/${id}/export`) : null]);
+    const [d, open, draft, jobs] = await Promise.all([api("GET", `/api/incidents/${id}`), api("GET", "/api/incidents?status=open"),
+      exportOpen ? api("GET", `/api/incidents/${id}/export`) : null, jobsOf(`incident:${id}`)]);
     if (!topo) topo = await api("GET", `/api/incidents/${id}/topology`).catch(() => ({ available: false, reason: "không tải được topology" }));
     const act = (fn, msg) => guard(async () => { await fn(); if (msg) toast(msg); await load(); });
     const busyNow = d.investigating || d.stage === "investigating";
+    const investigating = busyNow ? { status: "running" } : null;  // điều tra có trạng thái riêng (stage), trang tự làm mới
+    const jobAct = (job, label, busyLabel, fn, msg, extra) => jobBtn(job, { label, busyLabel, onDone: load, ...extra,
+      run: async () => { await fn(); if (msg) toast(msg); await load(); } });
     const tone = STATE_TONE[d.state.key] || "";
     const firing = d.alerts.filter((a) => a.status === "firing").length;
     const m = d.milestones;
@@ -546,8 +591,8 @@ async function incidentDetail(main, id) {
               ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("chat", x.conversation_id); } }, x.title) : x.title]))),
         h("div", { class: "row" },
           d.conversation_id && h("button", { type: "button", class: "small-btn", onclick: () => go("chat", d.conversation_id) }, busyNow ? "Xem agent đang điều tra" : "Mở hội thoại điều tra"),
-          d.status === "open" && h("button", { type: "button", class: "ghost small-btn", disabled: busyNow || d.stage === "verifying",
-            onclick: act(() => api("POST", `/api/incidents/${id}/investigate`), "Đã bắt đầu điều tra lại") }, busyNow ? "Đang điều tra…" : "Điều tra lại"),
+          d.status === "open" && d.stage !== "verifying" && jobAct(investigating, "Điều tra lại", "Đang điều tra…",
+            () => api("POST", `/api/incidents/${id}/investigate`), "Đã bắt đầu điều tra lại"),
           h("button", { type: "button", class: "ghost small-btn", "aria-expanded": String(exportOpen), onclick: act(() => { exportOpen = !exportOpen; }) },
             exportOpen ? "Ẩn bản nháp cho repo incidents" : "Soạn cho repo incidents"),
           d.status !== "closed" && h("div", { class: "ix-menu" }, more, pop))));
@@ -576,10 +621,10 @@ async function incidentDetail(main, id) {
           h("div", {}, h("strong", {}, w.summary || w.why || h("code", {}, w.command)), (w.summary || w.why) && h("code", {}, w.command),
             h("span", { class: "small" }, what, w.status === "expired" && w.reasons.length ? ` Phải duyệt vì: ${w.reasons.join("; ")}` : "")),
           h("div", { class: "ix-acts" },
-            h("button", { type: "button", class: "ghost small-btn", onclick: act(async () => {
+            jobAct(jobs[`retry:${w.action_id}`], "Nhờ agent đề xuất lại", "Agent đang đề xuất lại…", async () => {
               const r = await api("POST", `/api/incidents/${id}/actions/${w.action_id}/retry`);
               if (r.status !== "pending") toast(`Lệnh ${STEP_STATUS[r.status] || r.status}: ${r.reasons.join("; ")}`, true);
-            }, "Đã tạo thẻ duyệt mới") }, "Nhờ agent đề xuất lại"),
+            }, "Đã tạo thẻ duyệt mới"),
             h("button", { type: "button", class: "ghost small-btn", onclick: act(() => api("POST", `/api/incidents/${id}/actions/${w.action_id}/dismiss`), "Đã bỏ qua") }, "Bỏ qua")));
       }
       if (w.kind === "quota") {
@@ -588,7 +633,8 @@ async function incidentDetail(main, id) {
           h("div", {}, h("strong", {}, "Điều tra đang dừng vì hết quota"), h("span", { class: "small" }, `${why} Bấm Tiếp tục sau khi có quota lại (admin tăng quota, sang ngày mới) hoặc đã đổi sang provider/model khác.`),
             w.source === "provider" ? h("span", { class: "small" }, w.text)
               : h("a", { href: "#", class: "small", onclick: (e) => { e.preventDefault(); go("settings", undefined, "quota"); } }, state.me.is_org_admin ? "Xem và tăng quota ở Cài đặt → Quota" : "Xem quota ở Cài đặt → Quota (org admin đặt quota)")),
-          h("div", { class: "ix-acts" }, h("button", { type: "button", class: "small-btn", onclick: act(() => api("POST", `/api/incidents/${id}/investigate`), "Đã tiếp tục điều tra") }, "Tiếp tục")));
+          h("div", { class: "ix-acts" }, jobAct(investigating, "Tiếp tục", "Đang điều tra…", () => api("POST", `/api/incidents/${id}/investigate`), "Đã tiếp tục điều tra",
+            { cls: "small-btn" })));
       }
       if (w.kind === "task") {
         return h("div", { class: "ix-item" }, h("span", { class: "ix-dot info", "aria-hidden": "true" }),
@@ -599,7 +645,7 @@ async function incidentDetail(main, id) {
       return h("div", { class: "ix-item" }, h("span", { class: "ix-dot " + (isError ? "bad" : "info"), "aria-hidden": "true" }),
         h("div", {}, h("strong", {}, isError ? "Điều tra lỗi" : "Cần người xem"), h("span", { class: "small" }, w.text)),
         h("div", { class: "ix-acts" }, isError
-          ? h("button", { type: "button", class: "ghost small-btn", onclick: act(() => api("POST", `/api/incidents/${id}/investigate`), "Đã bắt đầu điều tra lại") }, "Điều tra lại")
+          ? jobAct(investigating, "Điều tra lại", "Đang điều tra…", () => api("POST", `/api/incidents/${id}/investigate`), "Đã bắt đầu điều tra lại")
           : d.conversation_id && h("button", { type: "button", class: "ghost small-btn", onclick: () => go("chat", d.conversation_id) }, "Hỏi tiếp trong hội thoại")));
     };
     const doneTasks = d.tasks_done.length > 0 && h("details", { class: "ix-done" }, h("summary", {}, `${d.tasks_done.length} việc cần người đã xong`),
@@ -656,9 +702,9 @@ async function incidentDetail(main, id) {
     const cause = h("section", { class: "card ix-cause", "aria-labelledby": "ix-c-h" },
       h("div", { class: "ix-sec" }, h("h3", { id: "ix-c-h" }, "Nguyên nhân"),
         c && h("span", { class: "small" }, [c.round ? `lượt điều tra ${c.round}` : null, c.at ? hmd(c.at) : null, `độ tin ${(c.confidence || 0).toFixed(2)}`].filter(Boolean).join(" · ")),
-        c && !busyNow && d.stage !== "verifying" && h("button", { type: "button", class: "ghost small-btn",
-          title: "Viết lại nguyên nhân và chuỗi 5 Whys từ lượt điều tra gần nhất cùng các câu hỏi tiếp trong hội thoại; không chạy lệnh mới",
-          onclick: act(() => api("POST", `/api/incidents/${id}/rewrite-cause`), "Đã viết lại nguyên nhân") }, "Viết lại nguyên nhân")),
+        c && !busyNow && d.stage !== "verifying" && jobAct(jobs["rewrite-cause"], "Viết lại nguyên nhân", "Đang viết lại nguyên nhân…",
+          () => api("POST", `/api/incidents/${id}/rewrite-cause`), "Đã viết lại nguyên nhân",
+          { title: "Viết lại nguyên nhân và chuỗi 5 Whys từ lượt điều tra gần nhất cùng các câu hỏi tiếp trong hội thoại; không chạy lệnh mới" })),
       busyNow ? busy(d.queued === "slot" ? "Đang chờ tới lượt điều tra…" : "Agent đang điều tra bằng các lệnh chỉ đọc…") : null,
       c ? [c.parts ? causeBody(c.parts) : h("p", {}, "Chưa rõ nguyên nhân."),
         rootCauseBody(d.rootcause, id, act, (r) => h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("incidents", undefined, r.id); } }, r.title)),
@@ -736,11 +782,14 @@ const TOPO_TYPES = { "k8s.cluster": "cluster", "k8s.node": "node k8s", "k8s.pv":
   "os.project": "project", "os.hypervisor": "hypervisor", "os.backend": "backend lưu trữ" };
 
 // Trạng thái quét topology (topology.py): nguồn, tầng bị bỏ qua và vì sao, số thực thể; màn đồ thị là giai đoạn B.
-async function topologyCard() {
+// Đang quét thì hỏi lại trạng thái mỗi 3 giây, cho tới khi xong hoặc thẻ bị gỡ khỏi trang.
+async function topologyCard(box = h("div")) {
   const st = await api("GET", "/api/topology/status");
   const last = st.last_scan;
-  const scanNow = guard(async () => { const r = await api("POST", "/api/topology/scan"); toast(r.started ? "Đã bắt đầu quét" : "Đang quét"); });
-  return h("div", { class: "card" }, h("h3", {}, "Topology"),
+  const scanNow = async () => { const r = await api("POST", "/api/topology/scan"); toast(r.started ? "Đã bắt đầu quét" : "Đang quét"); await topologyCard(box); };
+  clearTimeout(box.poll);
+  if (st.running) box.poll = setTimeout(() => { if (document.contains(box)) topologyCard(box).catch(() => {}); }, 3000);
+  setKids(box, h("div", { class: "card" }, h("h3", {}, "Topology"),
     h("p", { class: "small" }, `aiops quét k8s và OpenStack của các kết nối dùng chung ${st.full_hours} giờ một lần, và quét lại khi có sự cố mới mà lần quét gần nhất đã cách hơn ${st.incident_minutes} phút. Topology đã lưu chỉ là gợi ý cho điều tra: cạnh cũ hoặc suy từ IP phải được đọc lại trực tiếp trước khi dùng làm bằng chứng.`),
     !st.sources.length ? h("p", { class: "small muted" }, "Chưa có kết nối k8s hoặc OpenStack dùng chung.")
       : h("div", {}, h("p", { class: "small" }, last ? `Quét gần nhất ${hmd(last.started_at)} (${last.reason})${st.running ? " · đang quét" : ""}` : "Chưa quét lần nào."),
@@ -749,7 +798,8 @@ async function topologyCard() {
             : Object.entries(r.layers || {}).map(([layer, text]) => h("span", { class: "pill " + (text === "ok" ? "ok" : "warn"), title: text }, `${layer}: ${text === "ok" ? "ok" : text.split(":")[0]}`)),
           r.status !== "error" && Object.entries(r.layers || {}).filter(([, text]) => text !== "ok").map(([layer, text]) => h("div", { class: "small muted" }, `${layer}: ${text}`))))),
         Object.keys(st.entities).length > 0 && h("p", { class: "small" }, Object.entries(st.entities).map(([k, n]) => `${n} ${TOPO_TYPES[k] || k}`).join(" · ")),
-        st.can_manage && h("button", { type: "button", class: "ghost small-btn", onclick: scanNow }, "Quét ngay")));
+        st.can_manage && jobBtn(st.running && { status: "running" }, { label: "Quét ngay", busyLabel: "Đang quét…", run: scanNow }))));
+  return box;
 }
 
 const TP_W = 150, TP_H = 42, TP_GAP = 22, TP_ROW = 92;
@@ -895,30 +945,30 @@ function kuSources(list) {
 }
 
 // Kết quả kiểm tra định kỳ (lint.py): chỉ việc loại ứng viên quá hạn đã tự làm, còn lại là gợi ý để admin bấm.
-function lintCard(report, reload) {
+function lintCard(report, reload, jobs) {
   const box = h("div", { class: "card" });
-  const run = guard(async () => { render(await api("POST", "/api/knowledge/lint")); toast("Đã kiểm tra kho tri thức"); await reload(); });
-  const mergeEntity = (m, li) => guard(async () => {
+  const runBtn = () => jobBtn(jobs.lint, { label: "Kiểm tra ngay", busyLabel: "Đang kiểm tra…", cls: "ghost", onDone: renderShell,
+    run: async () => { const r = await api("POST", "/api/knowledge/lint"); jobs = {}; render(r); toast("Đã kiểm tra kho tri thức"); await reload(); } });
+  const mergeEntity = (m, li) => async () => {
     const r = await api("POST", "/api/knowledge/entities/merge", { sources: m.sources, target: m.target });
     setKids(li, h("span", { class: "small" }, `Đã gộp ${r.merged.join(", ")} → ${r.target} (${r.kus} KU)`));
-  });
+  };
   const list = (items, line) => h("ul", { class: "small" }, items.map(line));
   function render(r) {
     if (!r) {
-      setKids(box, h("div", { class: "row spread" }, h("b", {}, "Kiểm tra kho tri thức"), h("button", { type: "button", class: "ghost", onclick: run }, "Kiểm tra ngay")),
+      setKids(box, h("div", { class: "row spread" }, h("b", {}, "Kiểm tra kho tri thức"), runBtn()),
         h("div", { class: "small muted" }, "Chưa chạy lần nào. Vòng nền tự chạy mỗi ngày một lần."));
       return;
     }
     const b = r.backlog;
     setKids(box, 
-      h("div", { class: "row spread" }, h("b", {}, "Kiểm tra kho tri thức"), h("span", { class: "small muted" }, `lần gần nhất ${fmtTime(r.at)}`),
-        h("button", { type: "button", class: "ghost", onclick: run }, "Kiểm tra ngay")),
+      h("div", { class: "row spread" }, h("b", {}, "Kiểm tra kho tri thức"), h("span", { class: "small muted" }, `lần gần nhất ${fmtTime(r.at)}`), runBtn()),
       h("div", { class: "small" }, `${b.candidates} ứng viên chờ duyệt${b.oldest ? `, cũ nhất từ ${fmtTime(b.oldest)}` : ""}; khoảng ${b.new_per_day} KU mới mỗi ngày.` +
         (r.linked ? ` Đã nối thêm ${r.linked} cặp KU cùng chủ đề.` : "")),
       r.expired.length > 0 && h("details", {}, h("summary", { class: "small" }, `Đã loại ${r.expired.length} ứng viên quá ${r.stale_days} ngày chưa được duyệt hay xác nhận (hoàn tác được trong Lịch sử của từng KU)`),
         list(r.expired, (x) => h("li", {}, x.title))),
       r.entity_merges.length > 0 && h("details", { open: true }, h("summary", { class: "small" }, `${r.entity_merges.length} nhóm tên thực thể chỉ khác dấu nối hoặc số nhiều`),
-        list(r.entity_merges, (m) => { const li = h("li", {}, `${m.sources.join(", ")} → `, h("b", {}, m.target), ` (${m.kus} KU) `); addKids(li, h("button", { type: "button", class: "ghost small-btn", onclick: mergeEntity(m, li) }, "Gộp")); return li; })),
+        list(r.entity_merges, (m) => { const li = h("li", {}, `${m.sources.join(", ")} → `, h("b", {}, m.target), ` (${m.kus} KU) `); addKids(li, jobBtn(jobs[`entity-merge:${m.target}`], { label: "Gộp", busyLabel: "Đang gộp…", run: mergeEntity(m, li), onDone: renderShell })); return li; })),
       r.contradictions.length > 0 && h("details", { open: true }, h("summary", { class: "small" }, `${r.contradictions.length} ứng viên mâu thuẫn với KU đang dùng (cần người chọn bên đúng)`),
         list(r.contradictions, (x) => h("li", {}, `"${x.new_title}" ↔ "${x.old_title}"`))),
       r.unused.length > 0 && h("details", {}, h("summary", { class: "small" }, `${r.unused.length} KU đang dùng nhưng ${r.unused_days} ngày chưa được nạp vào lượt nào`),
@@ -933,36 +983,39 @@ function lintCard(report, reload) {
 }
 
 // Đề xuất gộp của dedup.py: gộp KU đang dùng đổi điều agent sẽ thấy nên cần admin; bản gốc hết hiệu lực, vẫn hoàn tác được.
-function mergeProposalsCard(reload) {
+function mergeProposalsCard(reload, jobs) {
   const box = h("div");
   const TRUST = { user: "người dùng nói", verified_tool: "kết quả công cụ", internal_doc: "tài liệu", external_untrusted: "nội dung ngoài" };
-  const findDups = guard(async () => {
+  const findDups = async () => {
     const r = await api("POST", "/api/knowledge/dedup");
     toast(r.started ? "Đang tìm KU trùng theo từng trang thực thể (gọi LLM, có thể mất vài phút)" : "Đang tìm rồi, chờ lượt hiện tại xong");
     poll();
-  });
+  };
   const card = (p) => {
     const t = h("input", { class: "wide", value: p.title, "aria-label": "Tiêu đề bản gộp" });
     const c = h("textarea", { rows: 3, value: p.content, "aria-label": "Nội dung bản gộp" });
     const a = h("input", { class: "wide", value: p.applies_when || "", placeholder: "Áp dụng khi", "aria-label": "Điều kiện áp dụng" });
     const el = h("div", { class: "card" });
-    const decide = (approve) => guard(async () => {
+    const decide = (approve) => async () => {
       await api("POST", `/api/knowledge/merge-proposals/${p.id}/decide`, approve ? { approve, title: t.value, content: c.value, applies_when: a.value } : { approve });
       setKids(el, h("div", { class: "small" }, approve ? `Đã gộp ${p.members.length} KU thành "${t.value}".` : "Đã bỏ qua; nhóm này sẽ không được đề xuất lại."));
       await reload();
-    });
+    };
+    const job = jobs[`merge-decide:${p.id}`];
     addKids(el, h("div", { class: "row spread" }, h("b", {}, `Gộp ${p.members.length} KU về ${p.entity || "cùng chủ đề"}`),
       h("span", {}, h("span", { class: "small muted" }, fmtTime(p.created_at) + " "), h("span", { class: "badge info" }, p.kind))),
       h("ul", { class: "small" }, p.members.map((m) => h("li", {}, badge(m.status), " ", h("b", {}, m.title), `: ${m.content} `,
         h("span", { class: "muted" }, `(${TRUST[m.source_trust] || m.source_trust} · ✓${m.helpful_cnt} ✗${m.harmful_cnt})`)))),
       p.reason && h("div", { class: "small muted" }, p.reason), h("div", { class: "small" }, "Bản gộp (sửa được):"), t, c, a,
-      h("div", { class: "row" }, h("button", { type: "button", onclick: decide(true) }, "Gộp"), h("button", { type: "button", class: "ghost", onclick: decide(false) }, "Bỏ qua")));
+      h("div", { class: "row" }, jobBtn(job, { label: "Gộp", busyLabel: "Đang gộp…", cls: "", run: decide(true), onDone: renderShell }),
+        h("button", { type: "button", class: "ghost", disabled: job && job.status === "running", onclick: guard(decide(false)) }, "Bỏ qua")));
     return el;
   };
   async function poll() {
     const r = await api("GET", "/api/knowledge/merge-proposals");
     setKids(box, h("div", { class: "row spread" }, h("h3", {}, `Đề xuất gộp KU (${r.proposals.length})`),
-        r.running ? busy("đang tìm KU trùng…") : h("button", { type: "button", class: "ghost", onclick: findDups, title: "Xét từng trang thực thể; cụm không đổi từ lần trước được bỏ qua" }, "Tìm KU trùng ngay")),
+        jobBtn(r.running && { status: "running" }, { label: "Tìm KU trùng ngay", busyLabel: "Đang tìm KU trùng…", cls: "ghost", run: findDups,
+          title: "Xét từng trang thực thể; cụm không đổi từ lần trước được bỏ qua" })),
       ...(r.proposals.length ? r.proposals.map(card) : [h("div", { class: "card muted small" }, "Không có đề xuất gộp. Vòng nền tìm mỗi ngày; ứng viên nói đúng điều một KU đã có được tự gộp, không cần duyệt.")]));
     if (r.running) setTimeout(() => { if (document.contains(box)) poll().then(reload).catch(() => {}); }, 4000);
   }
@@ -1119,7 +1172,8 @@ async function knowledgeUnitsView(main) {
       h("div", { class: "row" }, k.status === "candidate" && isAdmin() && h("button", { onclick: review(k.id, true) }, "Chấp nhận"), k.status === "candidate" && isAdmin() && h("button", { class: "danger", onclick: review(k.id, false) }, "Loại"), h("button", { class: "ghost", onclick: showKu(k.id) }, "Lịch sử")))) : [h("div", { class: "card muted" }, "Không có KU ở trạng thái này.")]));
     syncBulk();
   }
-  const learn = guard(async () => { const r = await api("POST", "/api/learning/run"); toast(`Đã học ${r.processed} episode, thăng hạng ${r.promoted}, chờ duyệt ${r.needs_review}`); await load(); });
+  const learn = async () => { const r = await api("POST", "/api/learning/run"); toast(`Đã học ${r.processed} episode, thăng hạng ${r.promoted}, chờ duyệt ${r.needs_review}`); await load(); };
+  const jobs = isAdmin() ? await jobsOf("knowledge") : {};
   const kind = h("select", { "aria-label": "Loại" }, ["rule", "fact", "procedure", "lesson", "insight"].map((x) => h("option", {}, x)));
   const title = persist(h("input", { placeholder: "Tiêu đề", "aria-label": "Tiêu đề" }), "ku:new-title");
   const content = persist(h("input", { placeholder: "Nội dung một ý", "aria-label": "Nội dung" }), "ku:new-content");
@@ -1129,9 +1183,9 @@ async function knowledgeUnitsView(main) {
     title.value = content.value = ""; store.set("ku:new-title", null); store.set("ku:new-content", null);
     toast("Đã thêm ứng viên"); statusSel.value = "candidate"; store.set("ku:status", "candidate"); await load();
   });
-  addKids(main, h("h2", {}, "Tri thức (L1)"), h("div", { class: "row" }, statusSel, kindSel, isAdmin() && h("button", { onclick: learn }, "Chạy học ngay")),
+  addKids(main, h("h2", {}, "Tri thức (L1)"), h("div", { class: "row" }, statusSel, kindSel, isAdmin() && jobBtn(jobs.learning, { label: "Chạy học ngay", busyLabel: "Đang học…", cls: "", run: learn, onDone: renderShell })),
     h("div", { class: "card row" }, kind, title, content, h("button", { class: "ghost", onclick: add }, "Thêm KU")),
-    isAdmin() && lintCard(await api("GET", "/api/knowledge/lint"), load), isAdmin() && mergeProposalsCard(load), detail, bulkBar, consolidated, box);
+    isAdmin() && lintCard(await api("GET", "/api/knowledge/lint"), load, jobs), isAdmin() && mergeProposalsCard(load, jobs), detail, bulkBar, consolidated, box);
   await load();
   resume().catch((e) => toast(e.message, true));
 };
@@ -1155,25 +1209,29 @@ VIEWS.approvals = async (main) => {
 
 // Đề xuất chờ duyệt: chỉ quy ước core và Skill; hiện danh sách quy ước thêm/bỏ bằng lời thay cho git diff.
 // Quy ước đã tự publish gần đây: để người duyệt xem lại và gỡ nếu chưa ổn.
-function autoPublishedSection(runs) {
+function autoPublishedSection(runs, jobs) {
   const since = Date.now() - 14 * 86400000;
   const items = runs.filter((r) => r.status === "published" && r.summary && r.summary.rules_auto && new Date(r.created_at).getTime() >= since)
     .flatMap((r) => r.summary.rules_auto.map((x) => ({ ...x, at: r.created_at })));
   if (!items.length) return null;
-  const retire = (ku) => guard(async () => { await api("POST", "/api/compile/retire-rule", { ku_id: ku }); toast("Đã gỡ quy ước khỏi core"); renderShell(); });
+  const retire = (ku) => jobBtn(jobs[`retire-rule:${ku}`], { label: "Gỡ khỏi core", busyLabel: "Đang gỡ…", onDone: renderShell,
+    run: async () => { await api("POST", "/api/compile/retire-rule", { ku_id: ku }); toast("Đã gỡ quy ước khỏi core"); renderShell(); } });
   return h("div", {}, h("h2", {}, `Đã tự publish 14 ngày qua (${items.length})`), h("div", { class: "card" }, h("ol", {}, items.map((x) => h("li", { class: "rule-item" }, h("div", {}, x.content),
-    h("div", { class: "small muted" }, `tự publish lúc ${fmtTime(x.at)}`, isAdmin() && h("button", { type: "button", class: "ghost small-btn", onclick: retire(x.ku) }, "Gỡ khỏi core")))))));
+    h("div", { class: "small muted" }, `tự publish lúc ${fmtTime(x.at)}`, isAdmin() && retire(x.ku)))))));
 }
 
-function pendingSection(r) {
+function pendingSection(r, jobs) {
   if (!r) return h("div", {}, h("h2", {}, "Chờ duyệt"), h("div", { class: "card muted" }, "Không có thay đổi nào chờ duyệt. Playbook và hồ sơ thực thể được publish tự động."));
   const sm = r.summary || { rules_added: [], rules_removed: [], rules_kept: 0, skills: [] };
-  const decide = (approve) => guard(async () => { await api("POST", `/api/compile/${r.id}/decide`, { approve }); toast(approve ? "Đã publish" : "Đã từ chối đề xuất"); renderShell(); });
-  const retire = (ku) => guard(async () => { await api("POST", "/api/compile/retire-rule", { ku_id: ku }); toast("Đã bỏ quy ước, đề xuất được cập nhật"); renderShell(); });
+  const decide = (approve) => async () => { await api("POST", `/api/compile/${r.id}/decide`, { approve }); toast(approve ? "Đã publish" : "Đã từ chối đề xuất"); renderShell(); };
+  const deciding = jobs[`decide:${r.id}`];
+  const retire = (ku) => jobBtn(jobs[`retire-rule:${ku}`], { label: "Bỏ quy ước này", busyLabel: "Đang bỏ…", onDone: renderShell,
+    title: "Quy ước này hết hiệu lực và không được nạp vào agent",
+    run: async () => { await api("POST", "/api/compile/retire-rule", { ku_id: ku }); toast("Đã bỏ quy ước, đề xuất được cập nhật"); renderShell(); } });
   const trust = { user: "người dùng nói", verified_tool: "từ kết quả công cụ", internal_doc: "tài liệu nội bộ", external_untrusted: "nội dung ngoài" };
   const ruleItem = (x, removable) => h("li", { class: "rule-item" }, h("div", {}, x.content),
     h("div", { class: "small muted" }, [trust[x.source_trust] || x.source_trust, x.episodes ? `${x.episodes} lượt chat` : null, x.why_review ? `chờ duyệt vì: ${x.why_review}` : null].filter(Boolean).join(" · "),
-      removable && isAdmin() && h("button", { type: "button", class: "ghost small-btn", onclick: retire(x.ku), title: "Quy ước này hết hiệu lực và không được nạp vào agent" }, "Bỏ quy ước này")));
+      removable && isAdmin() && retire(x.ku)));
   return h("div", {}, h("h2", {}, "Chờ duyệt"), h("div", { class: "card" },
     h("p", { class: "small" }, `Quy ước trong khối core được nạp vào mọi lượt chat của tenant nên cần người duyệt. Đề xuất tạo lúc ${fmtTime(r.created_at)}; chỉ giữ đề xuất mới nhất.`),
     sm.rules_added.length > 0 && h("div", {}, h("b", {}, `Thêm ${sm.rules_added.length} quy ước`), h("ol", {}, sm.rules_added.map((x) => ruleItem(x, true)))),
@@ -1182,22 +1240,25 @@ function pendingSection(r) {
     sm.rules_kept > 0 && h("div", { class: "small muted" }, `Giữ nguyên ${sm.rules_kept} quy ước đang dùng.`),
     sm.skills.length > 0 && h("div", {}, h("b", {}, "Skill thay đổi: "), sm.skills.join(", ")),
     h("details", {}, h("summary", { class: "small" }, "Xem diff gốc"), h("pre", {}, r.diff || "")),
-    isAdmin() && h("div", { class: "row" }, h("button", { onclick: decide(true) }, "Publish"), h("button", { class: "danger", onclick: decide(false) }, "Từ chối cả đề xuất"))));
+    isAdmin() && h("div", { class: "row" }, jobBtn(deciding, { label: "Publish", busyLabel: "Đang xử lý đề xuất…", cls: "", run: decide(true), onDone: renderShell }),
+      h("button", { class: "danger", disabled: deciding && deciding.status === "running", onclick: guard(decide(false)) }, "Từ chối cả đề xuất"))));
 }
 
 async function compiledView(main) {
-  const [runs, files, golden] = await Promise.all([api("GET", "/api/compile/runs"), api("GET", "/api/knowledge/files"), api("GET", "/api/golden")]);
+  const [runs, files, golden, jobs] = await Promise.all([api("GET", "/api/compile/runs"), api("GET", "/api/knowledge/files"), api("GET", "/api/golden"),
+    isAdmin() ? jobsOf("compile") : {}]);
   const viewer = h("pre", {}, "Chọn một file.");
   const show = (path) => guard(async () => { const f = await api("GET", "/api/knowledge/file?path=" + encodeURIComponent(path)); viewer.textContent = f.content; });
-  const compile = guard(async () => { const r = await api("POST", "/api/compile"); toast("Biên dịch: " + (LABEL[r.status] || r.status)); renderShell(); });
-  const rollback = guard(async () => { await api("POST", "/api/compile/rollback"); toast("Đã hoàn tác lần publish gần nhất"); renderShell(); });
+  const compile = async () => { const r = await api("POST", "/api/compile"); toast("Biên dịch: " + (LABEL[r.status] || r.status)); renderShell(); };
+  const rollback = async () => { await api("POST", "/api/compile/rollback"); toast("Đã hoàn tác lần publish gần nhất"); renderShell(); };
   const query = h("input", { placeholder: "Câu hỏi golden", "aria-label": "Câu hỏi golden" });
   const domain = h("select", { "aria-label": "Loại nhiệm vụ" }, ["k8s_ops", "observability", "docs", "research", "general"].map((x) => h("option", {}, x)));
   const terms = h("input", { placeholder: "Từ khóa kỳ vọng, cách nhau dấu phẩy", "aria-label": "Từ khóa kỳ vọng" });
   const addGolden = guard(async () => { await api("POST", "/api/golden", { query: query.value, expect_domain: domain.value, expect_terms: terms.value.split(",").map((s) => s.trim()).filter(Boolean) }); renderShell(); });
-  addKids(main, h("h2", {}, "Runbook (L2)"), isAdmin() && h("div", { class: "row" }, h("button", { onclick: compile }, "Biên dịch ngay"), h("button", { class: "danger", onclick: rollback }, "Hoàn tác publish gần nhất")),
+  addKids(main, h("h2", {}, "Runbook (L2)"), isAdmin() && h("div", { class: "row" }, jobBtn(jobs.compile, { label: "Biên dịch ngay", busyLabel: "Đang biên dịch…", cls: "", run: compile, onDone: renderShell }),
+    jobBtn(jobs.rollback, { label: "Hoàn tác publish gần nhất", busyLabel: "Đang hoàn tác…", cls: "danger", run: rollback, onDone: renderShell })),
     h("div", { class: "split", style: null }, h("div", { class: "card filelist" }, h("h3", {}, "File"), files.length ? files.map((f) => h("button", { onclick: show(f) }, f)) : "Chưa có file."), h("div", { class: "card" }, h("h3", {}, "Nội dung"), viewer)),
-    pendingSection(runs.find((r) => r.status === "pending_review")), autoPublishedSection(runs),
+    pendingSection(runs.find((r) => r.status === "pending_review"), jobs), autoPublishedSection(runs, jobs),
     h("h2", {}, "Lịch sử publish"), runs.filter((r) => r.status !== "pending_review").length ? h("div", { class: "card scroll" }, h("table", {}, h("tbody", {},
       runs.filter((r) => r.status !== "pending_review").map((r) => h("tr", {}, h("td", {}, fmtTime(r.created_at)), h("td", {}, badge(r.status)),
         h("td", {}, r.decided_by === "auto" ? "tự publish" : r.decided_by || r.actor),
@@ -1620,7 +1681,7 @@ function stopBar(p) {
 }
 
 async function trashCard() {
-  const items = await api("GET", "/api/trash");
+  const [items, jobs] = await Promise.all([api("GET", "/api/trash"), jobsOf("changes")]);
   const card = h("div", { class: "card scroll" });
   if (!items.length) { addKids(card, h("div", { class: "small muted" }, "Thùng rác trống.")); return card; }
   const due = (it) => it.purge_at && new Date(it.purge_at) <= new Date();
@@ -1628,7 +1689,8 @@ async function trashCard() {
     h("tbody", {}, items.map((it) => h("tr", {},
       h("td", {}, it.targets.join(", ")), h("td", { class: "small" }, it.summary || ""), h("td", {}, fmtTime(it.created_at)), h("td", {}, it.env),
       h("td", { class: due(it) ? "warn-text" : "" }, due(it) ? "đến hạn" : `từ ${fmtTime(it.purge_at)}`),
-      h("td", {}, it.can_revert && h("button", { class: "ghost small-btn", onclick: guard(async () => { await api("POST", `/api/changes/${it.id}/undo`, {}); toast("Đã khôi phục"); renderShell(); }) }, "Khôi phục"),
+      h("td", {}, it.can_revert && jobBtn(jobs[`undo:${it.id}`], { label: "Khôi phục", busyLabel: "Đang khôi phục…", onDone: renderShell,
+        run: async () => { await api("POST", `/api/changes/${it.id}/undo`, {}); toast("Đã khôi phục"); renderShell(); } }),
         it.can_purge && h("button", { class: "danger small-btn", onclick: guard(async () => {
           if (!window.confirm(`Xoá thật ${it.targets.join(", ")}? Không khôi phục được nữa.`)) return;
           await api("POST", `/api/changes/${it.id}/purge`); toast("Đã xoá thật"); renderShell();
@@ -1887,10 +1949,15 @@ async function knowledgeGraphView(main) {
     const similar = similarEntities(name, names);
     const other = h("input", { list: "kg-entity-names", placeholder: "tên khác cần gộp vào", "aria-label": "Tên thực thể cần gộp" });
     const merge = (sources) => guard(async () => {
-      const r = await api("POST", "/api/knowledge/entities/merge", { sources, target: name });
-      toast(`Đã gộp ${r.merged.join(", ")} vào ${r.target} (${r.kus} tri thức)`);
-      setEntity(r.target);
+      setKids(note, h("span", { class: "small muted" }, "đang gộp…"));
+      try {
+        const r = await api("POST", "/api/knowledge/entities/merge", { sources, target: name });
+        toast(`Đã gộp ${r.merged.join(", ")} vào ${r.target} (${r.kus} tri thức)`);
+        setEntity(r.target);
+      } finally { setKids(note); }
     });
+    const note = h("div");
+    if (isAdmin()) jobsOf("knowledge").then((jobs) => setKids(note, jobNote(jobs[`entity-merge:${name}`], () => showEntity(name), note)));
     setKids(detail, h("div", { class: "row" }, h("span", { class: "badge" }, name.startsWith("tool:") ? "công cụ" : "thực thể"), h("span", { class: "small muted" }, `${n} tri thức`)),
       h("h3", {}, name),
       isAdmin() && !name.startsWith("tool:") && h("div", {},
@@ -1898,7 +1965,7 @@ async function knowledgeGraphView(main) {
         similar.length > 0 && h("div", { class: "tool-perms" }, similar.map((s) => h("button", { type: "button", class: "chip", title: `Gộp ${s} vào ${name}`, onclick: merge([s]) }, `+ ${s}`))),
         h("form", { class: "row", onsubmit: (ev) => { ev.preventDefault(); if (other.value.trim()) merge([other.value.trim()])(ev); } }, other, h("button", { type: "submit", class: "ghost" }, "Gộp vào đây")),
         h("datalist", { id: "kg-entity-names" }, names.filter((e) => e !== name && !e.startsWith("tool:")).map((e) => h("option", { value: e }))),
-        h("div", { class: "small muted" }, "Gộp xong, tri thức học sau này dùng tên cũ cũng tự đổi sang tên này.")));
+        note, h("div", { class: "small muted" }, "Gộp xong, tri thức học sau này dùng tên cũ cũng tự đổi sang tên này.")));
   }
 
   function draw(data) {
