@@ -36,12 +36,28 @@ input, select, textarea { font: inherit; color: var(--text); background: var(--b
 textarea { width: 100%; min-height: 90px; resize: vertical; }
 textarea.code { font-family: ui-monospace, Consolas, monospace; font-size: 13px; min-height: 220px; }
 
-.layout { display: flex; height: 100%; }
-.sidebar { width: 272px; flex: none; display: flex; flex-direction: column; gap: 8px; padding: 12px; background: var(--side); border-right: 1px solid var(--line); min-height: 0; z-index: 30; }
-.brand { display: flex; flex-direction: column; gap: 6px; padding: 2px 4px; }
-.brand select { width: 100%; font-size: 13px; padding: 4px 6px; background: var(--side); }
-.new-chat { display: flex; align-items: center; gap: 8px; background: var(--panel); color: var(--text); border-color: var(--line); padding: 9px 12px; font-weight: 500; }
-.new-chat:hover { background: var(--hover); }
+.layout { display: flex; height: 100%; position: relative; }
+/* Thanh bên là dải biểu tượng; .wide (chỉ có chat) hoặc .side-open (mở đè lên khung) thì hiện đủ nhãn và danh sách hội thoại. */
+.sidebar { width: 56px; flex: none; display: flex; flex-direction: column; gap: 4px; padding: 10px 8px; background: var(--side); border-right: 1px solid var(--line); min-height: 0; z-index: 30; overflow: hidden; }
+.layout.wide .sidebar { width: 272px; padding: 12px; }
+.layout.side-open .sidebar { position: absolute; inset: 0 auto 0 0; width: min(290px, 86vw); padding: 12px; box-shadow: var(--shadow); }
+.layout:not(.wide):not(.side-open) :is(.nav-label, .wide-only) { display: none; }
+.layout:is(.wide, .side-open) .rail-only { display: none; }
+.layout:not(.wide):not(.side-open) .nav-group.admin { margin-top: auto; }
+@media (min-width: 761px) { .layout.side-open:not(.wide) { padding-left: 56px; } }  /* giữ chỗ của dải biểu tượng để khung không xô lệch */
+.scrim { display: none; }
+.layout.side-open .scrim { display: block; position: absolute; inset: 0; background: rgba(0, 0, 0, .3); z-index: 20; }
+.brand { display: flex; align-items: center; gap: 6px; padding: 0 1px 4px; }
+.brand strong { font-size: 16px; }
+.tenant select { width: 100%; font-size: 13px; padding: 4px 6px; background: var(--side); }
+.nav-item { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: none; color: var(--text); border: 0; padding: 7px 10px; font-size: 14px; border-radius: 8px; white-space: nowrap; }
+.nav-item .icon { color: var(--muted); }
+.nav-item:hover, .nav-item.active { background: var(--hover); }
+.nav-item.active .icon { color: var(--accent); }
+.nav-item.new-chat { background: var(--panel); border: 1px solid var(--line); font-weight: 500; margin-bottom: 4px; }
+.nav-item.new-chat:hover { background: var(--hover); }
+.nav-group { display: flex; flex-direction: column; gap: 2px; }
+.side-convs { flex: 1; min-height: 0; display: flex; flex-direction: column; border-top: 1px solid var(--line); margin-top: 4px; }
 .conv-list { flex: 1; overflow-y: auto; min-height: 0; margin: 0 -4px; padding: 0 4px; }
 .group { font-size: 12px; color: var(--muted); padding: 12px 8px 4px; font-weight: 600; }
 .conv { display: flex; align-items: center; border-radius: 8px; }
@@ -51,20 +67,36 @@ textarea.code { font-family: ui-monospace, Consolas, monospace; font-size: 13px;
 .conv .icon-btn .icon { width: 15px; height: 15px; }
 .conv:hover .icon-btn, .conv:focus-within .icon-btn { display: inline-flex; }
 input.rename { width: 100%; padding: 5px 8px; }
-.admin { border-top: 1px solid var(--line); padding-top: 6px; }
-.admin summary, .activity summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; color: var(--muted); font-size: 13px; padding: 4px 6px; border-radius: 6px; }
+.admin { border-top: 1px solid var(--line); padding-top: 4px; }
+.admin .group { padding-top: 6px; }
+.activity summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; color: var(--muted); font-size: 13px; padding: 4px 6px; border-radius: 6px; }
 summary::-webkit-details-marker { display: none; }
-.admin summary .icon, .activity summary .icon { width: 14px; height: 14px; transition: transform .15s; }
+.activity summary .icon { width: 14px; height: 14px; transition: transform .15s; }
 details[open] > summary .icon { transform: rotate(90deg); }
-.nav-item { display: block; width: 100%; text-align: left; background: none; color: var(--text); border: 0; padding: 5px 8px 5px 26px; font-size: 14px; }
-.nav-item:hover, .nav-item.active { background: var(--hover); }
-.user { display: flex; align-items: center; justify-content: space-between; font-size: 13px; padding: 4px; border-top: 1px solid var(--line); padding-top: 8px; }
-.scrim { display: none; }
+.user { display: flex; align-items: center; justify-content: space-between; font-size: 13px; padding: 8px 4px 0; border-top: 1px solid var(--line); }
 
-.content { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
-header.top { display: flex; align-items: center; gap: 8px; padding: 8px 16px; min-height: 46px; }
-.top-title { font-weight: 600; }
-.menu-btn { display: none; }
+/* Chat luôn có mặt. Mở một màn thì chat thu thành cột trái, màn đó chiếm phần còn lại; chat-hidden giấu hẳn chat. */
+.chatpane, .workpane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.chatpane { flex: 1; }
+.workpane { display: none; flex: 1; background: var(--page); }
+.layout.has-page .workpane { display: flex; }
+.layout.has-page .chatpane { flex: 0 0 400px; border-right: 1px solid var(--line); }
+.layout.has-page.chat-hidden .chatpane { display: none; }
+.layout.has-page :is(.thread, .composer-wrap) { padding-left: 14px; padding-right: 14px; }
+.layout.has-page .bubble { max-width: 90%; }
+.pane-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 16px; min-height: 46px; flex: none; }
+.workpane .pane-head { border-bottom: 1px solid var(--line); background: var(--bg); }
+.pane-title { font-weight: 600; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.crumb { font-weight: 500; }
+.crumb-sep { color: var(--muted); }
+.menu-btn, .chat-collapse, .chat-toggle { display: none; }
+.layout.has-page .chat-collapse, .layout.has-page.chat-hidden .chat-toggle { display: inline-flex; }
+@media (max-width: 1000px) {
+  .layout.has-page .chatpane { display: none; }
+  .layout.has-page .chat-toggle { display: inline-flex; }
+  .layout.has-page.chat-front .chatpane { display: flex; flex: 1; border-right: 0; }
+  .layout.has-page.chat-front .workpane { display: none; }
+}
 
 .chat { flex: 1; display: flex; flex-direction: column; min-height: 0; position: relative; }
 .scroller { flex: 1; overflow-y: auto; min-height: 0; }
@@ -121,7 +153,7 @@ header.top { display: flex; align-items: center; gap: 8px; padding: 8px 16px; mi
 .typing i:nth-child(2) { animation-delay: .15s; }
 .typing i:nth-child(3) { animation-delay: .3s; }
 @keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .typing i { animation: none; } .admin summary .icon, .activity summary .icon, .actions { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .typing i { animation: none; } .activity summary .icon, .actions { transition: none; } }
 
 .empty { padding: 14vh 0 24px; text-align: center; }
 .empty h2 { font-size: 28px; font-weight: 600; margin: 0 0 4px; }
@@ -195,9 +227,8 @@ input.wide { flex: 1; min-width: 220px; }
 .card > details { margin-top: 6px; }
 
 @media (max-width: 760px) {
-  .sidebar { position: fixed; inset: 0 auto 0 0; transform: translateX(-100%); transition: transform .18s; width: min(290px, 86vw); }
-  .sidebar.open { transform: none; }
-  .scrim.open { display: block; position: fixed; inset: 0; background: rgba(0, 0, 0, .4); z-index: 20; }
+  .layout .sidebar { position: absolute; inset: 0 auto 0 0; transform: translateX(-100%); transition: transform .18s; width: min(290px, 86vw); padding: 12px; }
+  .layout.side-open .sidebar { transform: none; }
   .menu-btn { display: inline-flex; }
   .conv .icon-btn { display: inline-flex; }
   .actions { opacity: 1; }
@@ -445,6 +476,8 @@ input.narrow { width: 70px; }
 .ix details > summary { cursor: pointer; color: var(--accent); font-size: 13px; }
 .ix .incident-table { font-size: 13px; }
 @media (max-width: 900px) { .ix-grid { grid-template-columns: minmax(0, 1fr); } }
+.ix-tabbar { margin: 0; }
+.ix-waitbar { justify-self: start; border-radius: 999px; padding: 4px 14px; font-size: 13px; }
 @media (max-width: 640px) {
   .ix-item { grid-template-columns: auto minmax(0, 1fr); } .ix-acts { grid-column: 2; justify-content: flex-start; }
   .ix-pop { left: 0; right: auto; }

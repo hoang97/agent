@@ -121,14 +121,14 @@ def _questions(args) -> list[dict] | None:
 
 def run_task(conn, tenant_id: str, user_id: str, task: str, env: str = "dev", project: str | None = None, agent_id: str = "ops-agent",
              conversation_id: str | None = None, episode_id: str | None = None, on_event=None, cancelled=None,
-             continuation_of: str | None = None, read_only: bool = False, inbox=None) -> dict:
+             continuation_of: str | None = None, read_only: bool = False, inbox=None, viewing: str | None = None) -> dict:
     """Chạy một lượt và ghi số token của từng lần gọi LLM vào llm_call để đo chi phí. read_only: agent chỉ thấy công cụ đọc.
-    inbox: hàm trả các tin người dùng gửi thêm trong lúc lượt đang chạy."""
+    inbox: hàm trả các tin người dùng gửi thêm trong lúc lượt đang chạy. viewing: một dòng mô tả màn người dùng đang mở cạnh chat."""
     episode_id = episode_id or db.new_id()
     with llm.collect_usage(tenant_id) as usage:
         try:
             return _run_task(conn, tenant_id, user_id, task, env, project, agent_id, conversation_id, episode_id, on_event, cancelled, continuation_of,
-                             read_only, inbox)
+                             read_only, inbox, viewing)
         finally:
             if usage:
                 llm.save_usage(conn, tenant_id, episode_id, usage)
@@ -136,7 +136,7 @@ def run_task(conn, tenant_id: str, user_id: str, task: str, env: str = "dev", pr
 
 def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: str | None, agent_id: str,
               conversation_id: str | None, episode_id: str, on_event, cancelled, continuation_of: str | None, read_only: bool = False,
-              inbox=None) -> dict:
+              inbox=None, viewing: str | None = None) -> dict:
     """on_event nhận các sự kiện tiến trình để stream; cancelled là threading.Event do nút dừng đặt."""
     tenant = conn.execute("SELECT token_quota_daily FROM tenant WHERE id=?", (tenant_id,)).fetchone()
     if tokens_today(conn, tenant_id) >= tenant["token_quota_daily"]:
@@ -532,7 +532,9 @@ def _run_task(conn, tenant_id: str, user_id: str, task: str, env: str, project: 
         ku_used = turn.ku_used
         trace.append({"type": "context", "ku_used": ku_used, **turn.stats})
         emit({"type": "context", "task_type": task_type, "ku_used": len(ku_used)})
-        result = provider.run_agent(task, turn.stable, tool_list, call_tool, history=turn.history, turn_context=turn.turn_context,
+        # Nằm trong <context> của lượt, không vào system: đổi màn không làm mất prompt cache.
+        turn_context = "\n\n".join(p for p in (viewing, turn.turn_context) if p)
+        result = provider.run_agent(task, turn.stable, tool_list, call_tool, history=turn.history, turn_context=turn_context,
                                     on_text=on_text if on_event else None, cancelled=cancelled)
         tokens += result.get("tokens", 0) + batches["sub_tokens"]
         if result.get("messages"):

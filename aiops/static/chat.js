@@ -17,6 +17,17 @@ const ICONS = {
   down_arrow: "M12 5v14M5 12l7 7 7-7",
   save: "M6 4h12v16l-6-4-6 4z",
   book: "M5 4h11a3 3 0 013 3v13H8a3 3 0 01-3-3zM5 17a3 3 0 013-3h11",
+  alert: "M12 3l9 16H3zM12 10v4M12 17v.01",
+  shield: "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6zM9 12l2 2 4-4",
+  tool: "M15 4a5 5 0 00-4.6 6.9L4 17.3 6.7 20l6.4-6.4A5 5 0 0020 9l-3 3-3-1-1-3z",
+  list: "M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01",
+  chart: "M4 4v16h16M8 16v-5M12 16V8M16 16v-3",
+  eye: "M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12zM12 9a3 3 0 100 6 3 3 0 000-6z",
+  gear: "M4 7h9M17 7h3M4 17h3M11 17h9M15 5v4M9 15v4",
+  user: "M12 12a4 4 0 100-8 4 4 0 000 8zM4 21a8 8 0 0116 0",
+  chat: "M4 5h16v11H9l-5 4z",
+  x: "M6 6l12 12M18 6L6 18",
+  panel: "M4 4h16v16H4zM10 4v16M7 10l-2 2 2 2",
 };
 
 function icon(name) {
@@ -780,8 +791,7 @@ function chatView(main) {
       if (ev.type === "start") {
         activeRun.id = ev.run_id;
         const isNew = state.conversationId !== ev.conversation_id;
-        state.conversationId = ev.conversation_id;
-        syncUrl(true);
+        adoptConversation(ev.conversation_id);
         if (isNew) refreshConversations();
       } else if (ev.type === "delta") {
         if (!cur) { cur = { text: "", el: h("div", { class: "prose" }) }; addKids(flow, cur.el); }
@@ -857,8 +867,7 @@ function chatView(main) {
     activeRun = { id: null, turn };
     syncSend();
     try {
-      const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json", "X-Tenant-Id": state.tenant.id }, credentials: "same-origin", body: JSON.stringify(continueEpisode ? { continue_episode: continueEpisode, conversation_id: state.conversationId, env: env.value }
-        : { message: text, conversation_id: state.conversationId, env: env.value }) });
+      const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json", "X-Tenant-Id": state.tenant.id }, credentials: "same-origin", body: JSON.stringify({ ...(continueEpisode ? { continue_episode: continueEpisode } : { message: text }), conversation_id: state.conversationId, env: env.value, page: pageContext() }) });
       if (!res.ok) {
         const data = await res.json().catch(() => null);
         fail(typeof (data && data.detail) === "string" ? data.detail : `Lỗi ${res.status}`);
@@ -1003,8 +1012,7 @@ function chatView(main) {
         else if (data.queued) waitQueued(data.queued);
         requestAnimationFrame(scroll);
       } catch (e) {
-        state.conversationId = null;
-        syncUrl(true);
+        adoptConversation(null);
         toast(e.message, true);
       }
     }

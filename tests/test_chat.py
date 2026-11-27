@@ -70,6 +70,30 @@ def test_history_passed_to_provider_on_next_turn(users):
     assert seen[1] == [{"role": "user", "content": "câu một"}, {"role": "assistant", "content": "trả lời câu một"}]
 
 
+def test_page_open_beside_chat_goes_into_turn_context(users):
+    seen = []
+
+    class Recorder(llm.HeuristicProvider):
+        def run_agent(self, task, context, tools, call_tool, history=None, on_text=None, cancelled=None, turn_context="", **kw):
+            seen.append(turn_context)
+            return {"answer": "ok", "tokens": 0}
+
+    llm.set_provider(Recorder())
+    alice = users["alice"]
+    now = db.iso()
+    with db.session() as conn:
+        conn.execute("INSERT INTO incident(id,tenant_id,env,title,status,stage,created_at,updated_at,last_alert_at) VALUES ('inc1',?,'prod','Pod crash api','open','new',?,?,?)",
+                     (alice.tenant, now, now, now))
+    page = {"view": "incidents", "id": "inc1/cause", "label": "nhãn client gửi"}
+    events(alice.post("/api/chat", json={"message": "cái này do đâu", "page": page}))
+    events(alice.post("/api/chat", json={"message": "giải thích", "page": {"view": "knowledge", "id": "units"}}))
+    events(alice.post("/api/chat", json={"message": "chào"}))
+    assert "sự cố «Pod crash api» (id inc1, open, env prod)" in seen[0] and "nhãn client gửi" not in seen[0]
+    assert "màn Tri thức › units" in seen[1]
+    assert "đang mở" not in seen[2]
+    assert alice.post("/api/chat", json={"message": "x", "page": {"view": "v" * 40}}).status_code == 422
+
+
 def test_history_limited_by_budget(users):
     from aiops.config import settings
     settings.budget_history = 50

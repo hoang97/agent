@@ -1,6 +1,6 @@
 "use strict";
 // Giao diện một trang. Mọi nội dung động đi qua textContent để tránh XSS.
-const state = { me: null, tenant: null, tab: "chat", conversationId: null, env: "dev" };
+const state = { me: null, tenant: null, tab: null, sub: null, sub2: null, conversationId: null, env: "dev" };
 const root = document.getElementById("app");
 
 function h(tag, attrs, ...kids) {
@@ -130,43 +130,149 @@ function renderLogin() {
     await api("POST", "/api/auth/login", { username: user.value, password: pass.value });
     await boot();
   });
-  setKids(root, h("form", { class: "card login", onsubmit: submit }, h("h2", {}, "Knowledge Agent"), h("p", { class: "muted" }, "Agent tự tích lũy tri thức"), user, pass, h("button", { type: "submit" }, "Đăng nhập")));
+  setKids(root, h("form", { class: "card login", onsubmit: submit }, h("h2", {}, "aiops"), h("p", { class: "muted" }, "Agent vận hành tự tích lũy tri thức"), user, pass, h("button", { type: "submit" }, "Đăng nhập")));
   user.focus();
 }
 
-const TABS = [["incidents", "Sự cố"], ["knowledge", "Tri thức"], ["tools", "Công cụ"], ["approvals", "Duyệt lệnh"], ["episodes", "Nhật ký"], ["metrics", "Đo lường"], ["audit", "Audit"], ["settings", "Cài đặt"], ["account", "Tài khoản"]];
+// Mục chính lên đầu, quản trị gom phía dưới: [id, nhãn, biểu tượng].
+const NAV_MAIN = [["incidents", "Sự cố", "alert"], ["approvals", "Duyệt lệnh", "shield"], ["knowledge", "Tri thức", "book"], ["tools", "Công cụ", "tool"]];
+const NAV_ADMIN = [["episodes", "Nhật ký", "list"], ["metrics", "Đo lường", "chart"], ["audit", "Audit", "eye"], ["settings", "Cài đặt", "gear"], ["account", "Tài khoản", "user"]];
+const TABS = [...NAV_MAIN, ...NAV_ADMIN];
 // Link và localStorage cũ còn trỏ tới các mục đã gộp.
 const OLD_TABS = { connections: ["tools", "connections"], compile: ["knowledge", "compiled"], policy: ["settings", "policy"] };
 const VIEWS = {};
 let conversationList = null;
 
-function closeSidebar() { document.querySelector(".sidebar")?.classList.remove("open"); document.querySelector(".scrim")?.classList.remove("open"); }
-// Vị trí hiện tại nằm trên URL (#/t/<tenant>/<màn>[/<hội thoại>]) để refresh, Back/Forward và link mở đúng chỗ.
+// Chat luôn có mặt; mỗi màn mở ở khung làm việc bên phải. Đổi màn chỉ dựng lại khung đó, đổi hội thoại chỉ dựng lại chat,
+// nên lượt đang stream, thẻ duyệt và chữ đang gõ không mất khi người dùng xem màn khác.
+const shell = { layout: null, sidebar: null, chatMain: null, pageMain: null, pageTitle: null, tenant: null, conv: undefined, page: undefined };
+const NARROW = "(max-width: 1000px)";  // dưới mức này chat và khung làm việc thay nhau chiếm chỗ
+const pageKey = () => (state.tab ? [state.tab, state.sub, state.sub2].join("/") : null);
+
+// URL: #/t/<tenant>/chat[/<hội thoại>] khi chỉ có chat, #/t/<tenant>/<màn>[/<sub>[/<sub2>]][?c=<hội thoại>] khi mở một màn.
 function routeHash() {
-  const extra = state.tab === "chat" ? state.conversationId : state.sub;
-  return `#/t/${state.tenant.id}/${state.tab}${extra ? "/" + extra : ""}`;
+  const base = `#/t/${state.tenant.id}/`;
+  if (!state.tab) return base + "chat" + (state.conversationId ? "/" + state.conversationId : "");
+  return base + [state.tab, state.sub, state.sub && state.sub2].filter(Boolean).join("/") + (state.conversationId ? "?c=" + state.conversationId : "");
 }
 function syncUrl(replace) {
   if (!state.tenant || location.hash === routeHash()) return;
   history[replace ? "replaceState" : "pushState"](null, "", routeHash());
 }
 function applyHash() {
-  let [, t, tenantId, tab, extra] = location.hash.split("/");
+  const [path, query] = location.hash.split("?");
+  let [, t, tenantId, tab, extra, extra2] = path.split("/");
   if (t !== "t") return;
   const tenant = state.me.tenants.find((x) => x.id === tenantId);
   if (tenant) state.tenant = tenant;
   if (OLD_TABS[tab]) [tab, extra] = OLD_TABS[tab];
-  state.tab = tab === "chat" || TABS.some(([id]) => id === tab) ? tab : "chat";
-  state.conversationId = state.tab === "chat" && extra ? extra : null;
-  state.sub = state.tab !== "chat" && extra ? extra : null;
+  const page = TABS.some(([id]) => id === tab) ? tab : null;
+  state.tab = page;
+  state.conversationId = (page ? new URLSearchParams(query || "").get("c") : extra) || null;
+  state.sub = page && extra ? extra : null;
+  state.sub2 = page && extra2 ? extra2 : null;
 }
-window.addEventListener("popstate", () => { if (state.me) { applyHash(); renderShell(); } });
-function go(tab, conversationId, sub) {
-  state.tab = tab;
-  state.sub = sub || null;
-  if (conversationId !== undefined) state.conversationId = conversationId;
+window.addEventListener("popstate", () => { if (state.me) { applyHash(); render(); } });
+window.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSidebar(); });
+
+// go("chat", id) mở hội thoại ở khung chat và giữ màn đang mở; go(<màn>, …) mở màn ở khung làm việc và giữ hội thoại.
+function go(tab, conversationId, sub, sub2) {
+  if (tab === "chat") {
+    state.conversationId = conversationId || null;
+    if (state.tab) revealChat();
+  } else {
+    state.tab = tab;
+    state.sub = sub || null;
+    state.sub2 = sub2 || null;
+    if (conversationId !== undefined) state.conversationId = conversationId;
+    shell.layout?.classList.remove("chat-front");
+  }
   syncUrl();
-  renderShell();
+  render();
+}
+function closePage() { state.tab = state.sub = state.sub2 = null; syncUrl(); render(); }
+// Chat tự đổi hội thoại (lượt đầu tạo hội thoại mới, hội thoại không còn): ghi nhận mà không dựng lại chat.
+function adoptConversation(id) { state.conversationId = id || null; shell.conv = state.conversationId; syncUrl(true); }
+// Tab trong một màn mà màn tự vẽ lại (vd tab của sự cố): lên URL nhưng không dựng lại khung.
+function setSub2(k) { state.sub2 = k || null; shell.page = pageKey(); syncUrl(true); }
+// Tên đối tượng đang xem (vd tiêu đề sự cố): hiện ở đầu khung và gửi kèm lượt chat.
+function setPageLabel(text) {
+  state.pageLabel = text || null;
+  const label = (TABS.find(([id]) => id === state.tab) || [])[1] || "";
+  setKids(shell.pageTitle, label, text && [h("span", { class: "crumb-sep", "aria-hidden": "true" }, " › "), h("span", { class: "crumb" }, text)]);
+}
+function pageContext() {
+  if (!state.tab) return null;
+  return { view: state.tab, id: [state.sub, state.sub2].filter(Boolean).join("/") || null, label: state.pageLabel ? state.pageLabel.slice(0, 200) : null };
+}
+
+function closeSidebar() { shell.layout?.classList.remove("side-open"); }
+// Có màn đang mở hoặc màn hình hẹp: thanh bên mở đè lên, không đẩy khung. Chỉ có chat: thu gọn hay mở rộng tại chỗ, nhớ lựa chọn.
+function toggleSidebar() {
+  const l = shell.layout;
+  if (state.tab || matchMedia("(max-width: 760px)").matches) { l.classList.toggle("side-open"); return; }
+  const wide = !l.classList.contains("wide");
+  store.set("sidebarNarrow", wide ? null : true);
+  l.classList.toggle("wide", wide);
+}
+function toggleChat() {
+  const l = shell.layout;
+  if (matchMedia(NARROW).matches) { l.classList.toggle("chat-front"); return; }
+  const hidden = !l.classList.contains("chat-hidden");
+  store.set("chatHidden", hidden || null);
+  l.classList.toggle("chat-hidden", hidden);
+}
+function revealChat() {
+  if (!shell.layout) return;
+  if (matchMedia(NARROW).matches) shell.layout.classList.add("chat-front");
+  else store.set("chatHidden", null);
+}
+
+function syncLayout() {
+  const l = shell.layout;
+  l.classList.toggle("has-page", !!state.tab);
+  l.classList.toggle("wide", !state.tab && !store.get("sidebarNarrow", false));
+  l.classList.toggle("chat-hidden", !!state.tab && !!store.get("chatHidden", false));
+  if (!state.tab) l.classList.remove("chat-front");
+  l.classList.remove("side-open");
+  for (const b of shell.sidebar.querySelectorAll(".nav-item[data-tab]")) {
+    const on = b.dataset.tab === state.tab;
+    b.classList.toggle("active", on);
+    if (on) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
+  }
+  for (const c of conversationList.querySelectorAll(".conv")) c.classList.toggle("active", c.dataset.id === state.conversationId);
+}
+
+function render() {
+  if (!shell.layout || !document.contains(shell.layout) || shell.tenant !== state.tenant.id) return buildShell();
+  if (shell.conv !== state.conversationId) mountChat();
+  if (shell.page !== pageKey()) mountPage();
+  syncLayout();
+}
+// Các màn gọi renderShell() để tải lại chính nó sau một thao tác: chỉ dựng lại khung làm việc, chat giữ nguyên.
+function renderShell() {
+  if (!shell.layout || !document.contains(shell.layout)) return buildShell();
+  mountPage();
+  syncLayout();
+}
+
+function mountChat() {
+  shell.conv = state.conversationId;
+  const main = h("main", { class: "chat" });
+  main.append = (...kids) => appendKids(main, kids);
+  shell.chatMain.replaceWith(main);
+  shell.chatMain = main;
+  refreshConversations().catch((e) => toast(e.message, true));
+  VIEWS.chat(main).catch((e) => toast(e.message, true));
+}
+function mountPage() {
+  shell.page = pageKey();
+  const main = h("main", { class: "page" });
+  main.append = (...kids) => appendKids(main, kids);
+  shell.pageMain.replaceWith(main);
+  shell.pageMain = main;
+  setPageLabel(null);
+  if (state.tab) VIEWS[state.tab](main).catch((e) => toast(e.message, true));
 }
 
 // Thanh tab con trong một mục (vd Tri thức: Đồ thị / Tri thức / Runbook). Tab con nằm trên URL nên refresh giữ nguyên.
@@ -222,8 +328,8 @@ function conversationItem(c) {
     toast("Đã xóa hội thoại khỏi danh sách");
     if (state.conversationId === c.id) go("chat", null); else refreshConversations();
   });
-  const item = h("div", { class: "conv" + (state.tab === "chat" && state.conversationId === c.id ? " active" : "") },
-    h("button", { type: "button", class: "conv-open", title: c.pending ? `${c.title} · ${c.pending} lệnh chờ duyệt` : c.title, onclick: () => { closeSidebar(); go("chat", c.id); } },
+  const item = h("div", { class: "conv" + (state.conversationId === c.id ? " active" : ""), "data-id": c.id },
+    h("button", { type: "button", class: "conv-open", title: c.pending ? `${c.title} · ${c.pending} lệnh chờ duyệt` : c.title, onclick: () => go("chat", c.id) },
       c.pending ? h("span", { class: "dot-wait", "aria-label": `${c.pending} lệnh chờ duyệt` }) : null, c.title),
     iconButton("edit", "Đổi tên", rename), iconButton("trash", "Xóa", remove));
   return item;
@@ -233,35 +339,54 @@ async function refreshConversations() {
   if (!conversationList) return;
   const list = await api("GET", "/api/conversations");
   const waiting = list.reduce((n, c) => n + (c.pending || 0), 0);
-  document.title = (waiting ? `(${waiting}) ` : "") + "Knowledge Agent";
+  document.title = (waiting ? `(${waiting}) ` : "") + "aiops";
   const groups = new Map();
   for (const c of list) { const g = dateGroup(c.updated_at); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(c); }
   setKids(conversationList, ...(list.length ? [...groups].flatMap(([g, items]) => [h("div", { class: "group" }, g), ...items.map(conversationItem)]) : [h("div", { class: "small pad" }, "Chưa có hội thoại nào.")]));
 }
 
-function renderShell() {
-  const tenants = h("select", { "aria-label": "Tenant", onchange: (e) => { state.tenant = state.me.tenants.find((t) => t.id === e.target.value); state.env = store.get("env", state.env); go("chat", null); } },
-    state.me.tenants.map((t) => h("option", { value: t.id, selected: t.id === state.tenant.id }, t.name)));
-  const logout = guard(async () => { await api("POST", "/api/auth/logout"); state.me = null; state.conversationId = null; state.tab = "chat"; history.replaceState(null, "", location.pathname); renderLogin(); });
+function buildShell() {
+  shell.tenant = state.tenant.id;
+  const tenants = h("select", { "aria-label": "Tenant", onchange: (e) => {
+    state.tenant = state.me.tenants.find((t) => t.id === e.target.value); state.env = store.get("env", state.env);
+    state.tab = state.sub = state.sub2 = state.conversationId = null; syncUrl(); buildShell();
+  } }, state.me.tenants.map((t) => h("option", { value: t.id, selected: t.id === state.tenant.id }, t.name)));
+  const logout = guard(async () => { await api("POST", "/api/auth/logout"); state.me = null; state.conversationId = state.tab = null; history.replaceState(null, "", location.pathname); renderLogin(); });
   conversationList = h("div", { class: "conv-list" });
-  const pages = TABS;
-  const adminOpen = pages.some(([id]) => id === state.tab);
-  const sidebar = h("aside", { class: "sidebar" },
-    h("div", { class: "brand" }, h("strong", {}, "Knowledge Agent"), tenants),
-    h("button", { type: "button", class: "new-chat", onclick: () => { closeSidebar(); go("chat", null); } }, icon("plus"), "Hội thoại mới"),
-    conversationList,
-    h("details", { class: "admin", open: adminOpen ? "" : null }, h("summary", {}, icon("chevron"), "Quản trị"),
-      pages.map(([id, label]) => h("button", { type: "button", class: "nav-item" + (state.tab === id ? " active" : ""), onclick: () => { closeSidebar(); go(id); } }, label))),
-    h("div", { class: "user" }, h("span", {}, state.me.username), h("button", { type: "button", class: "ghost small-btn", onclick: logout }, "Đăng xuất")));
-  const scrim = h("div", { class: "scrim", onclick: closeSidebar });
+  // Ở dạng dải biểu tượng nhãn bị ẩn, nên tên nút nằm ở aria-label và title.
+  const navBtn = ([id, label, ic]) => h("button", { type: "button", class: "nav-item", "data-tab": id, title: label, "aria-label": label, onclick: () => go(id) },
+    icon(ic), h("span", { class: "nav-label" }, label));
+  const sidebar = h("aside", { class: "sidebar", "aria-label": "Điều hướng" },
+    h("div", { class: "brand" }, iconButton("menu", "Thu gọn hoặc mở rộng thanh bên", toggleSidebar, "side-toggle"), h("strong", { class: "nav-label" }, "aiops")),
+    h("div", { class: "tenant wide-only" }, tenants),
+    h("button", { type: "button", class: "nav-item new-chat", title: "Hội thoại mới", "aria-label": "Hội thoại mới", onclick: () => go("chat", null) },
+      icon("plus"), h("span", { class: "nav-label" }, "Hội thoại mới")),
+    h("button", { type: "button", class: "nav-item rail-only", title: "Danh sách hội thoại", "aria-label": "Danh sách hội thoại",
+      onclick: () => shell.layout.classList.add("side-open") }, icon("chat")),
+    h("nav", { class: "nav-group", "aria-label": "Mục chính" }, NAV_MAIN.map(navBtn)),
+    h("div", { class: "side-convs wide-only" }, h("div", { class: "group" }, "Hội thoại"), conversationList),
+    h("nav", { class: "nav-group admin", "aria-label": "Quản trị" }, h("div", { class: "group wide-only" }, "Quản trị"), NAV_ADMIN.map(navBtn)),
+    h("div", { class: "user wide-only" }, h("span", {}, state.me.username), h("button", { type: "button", class: "ghost small-btn", onclick: logout }, "Đăng xuất")));
   const model = { anthropic: "Claude", openai: "OpenAI" }[state.me.llm_provider] || "Heuristic";
-  const title = state.tab === "chat" ? "" : (TABS.find(([id]) => id === state.tab) || [])[1];
-  const top = h("header", { class: "top" }, iconButton("menu", "Mở danh sách", () => { sidebar.classList.add("open"); scrim.classList.add("open"); }, "menu-btn"), h("span", { class: "top-title" }, title), h("span", { class: "spacer" }), h("span", { class: "badge info" }, "Model: " + model));
-  const main = h("main", { class: state.tab === "chat" ? "chat" : "page" });
-  main.append = (...kids) => appendKids(main, kids);
-  setKids(root, h("div", { class: "layout" }, scrim, sidebar, h("div", { class: "content" }, top, main)));
-  refreshConversations().catch((e) => toast(e.message, true));
-  VIEWS[state.tab](main).catch((e) => toast(e.message, true));
+  shell.chatMain = h("main", { class: "chat" });
+  const chatPane = h("section", { class: "chatpane", "aria-label": "Chat" },
+    h("header", { class: "pane-head" }, iconButton("menu", "Mở thanh bên", toggleSidebar, "menu-btn"), h("span", { class: "pane-title" }, "Chat"),
+      h("span", { class: "spacer" }), h("span", { class: "badge info" }, "Model: " + model),
+      iconButton("panel", "Thu gọn chat, nhường chỗ cho màn đang mở", toggleChat, "chat-collapse")),
+    shell.chatMain);
+  shell.pageTitle = h("span", { class: "pane-title" });
+  shell.pageMain = h("main", { class: "page" });
+  const workPane = h("section", { class: "workpane", "aria-label": "Khung làm việc" },
+    h("header", { class: "pane-head" }, iconButton("menu", "Mở thanh bên", toggleSidebar, "menu-btn"), iconButton("chat", "Hiện chat", toggleChat, "chat-toggle"),
+      shell.pageTitle, h("span", { class: "spacer" }), iconButton("x", "Đóng, chỉ giữ chat", closePage)),
+    shell.pageMain);
+  shell.sidebar = sidebar;
+  shell.layout = h("div", { class: "layout" }, h("div", { class: "scrim", onclick: closeSidebar }), sidebar, chatPane, workPane);
+  setKids(root, shell.layout);
+  shell.conv = shell.page = undefined;
+  mountChat();
+  mountPage();
+  syncLayout();
 }
 
 function traceView(trace) {
@@ -543,6 +668,7 @@ async function incidentDetail(main, id) {
   let filter = "all";
   let menuOpen = false;
   let exportOpen = false;
+  let itab = state.sub2;  // Diễn biến / Nguyên nhân / Xử lý; nằm trên URL
   let topo = null;  // tính nặng hơn trang sự cố và ít đổi: tải một lần, nút Làm mới tải lại
   async function load() {
     const [d, open, draft, jobs] = await Promise.all([api("GET", `/api/incidents/${id}`), api("GET", "/api/incidents?status=open"),
@@ -656,19 +782,20 @@ async function incidentDetail(main, id) {
       d.waiting.map(waitItem), doneTasks);
 
     // Dòng sự kiện: nhóm theo ngày, lọc theo loại.
-    const tl = h("ol", { class: "ix-tl" });
-    const paint = () => {
+    const tlItems = (cat, empty) => {
       const kids = [];
       let day = null;
       for (const e of d.timeline) {
-        if (filter !== "all" && e.cat !== filter) continue;
+        if (cat !== "all" && e.cat !== cat) continue;
         if (dm(e.at) !== day) { day = dm(e.at); kids.push(h("li", { class: "ix-day" }, "Ngày " + day)); }
         kids.push(h("li", { class: "ix-ev" }, h("time", { datetime: e.at, title: fmtTime(e.at) }, hm(e.at)),
           h("div", { class: "ix-mark " + (EV_MARK[e.kind] || "") }, h("span", {})),
           h("div", { class: "ix-body" }, h("span", { class: "ix-who" }, e.who), e.title ? evBody(e) : h("span", { class: "ix-res" }, e.text))));
       }
-      setKids(tl, ...(kids.length ? kids : [h("li", { class: "small muted" }, "Chưa có sự kiện.")]));
+      return kids.length ? kids : [h("li", { class: "small muted" }, empty)];
     };
+    const tl = h("ol", { class: "ix-tl" });
+    const paint = () => setKids(tl, ...tlItems(filter, "Chưa có sự kiện."));
     paint();
     const filters = h("div", { class: "ix-filters", role: "group", "aria-label": "Lọc dòng sự kiện" });
     const paintFilters = () => setKids(filters, ...EV_FILTERS.map(([k, label]) => h("button", { type: "button", class: "chip" + (filter === k ? " on" : ""),
@@ -726,8 +853,31 @@ async function incidentDetail(main, id) {
       rel.history.length > 0 && h("ul", { class: "small" }, rel.history.map((r) => h("li", {}, incLink(r), r.count > 1 ? ` · ${r.count} lần, ${dm(r.first)}–${dm(r.created_at)}` : ` · ${dm(r.created_at)}`))),
       !rel.open.length && !rel.history_count && h("p", { class: "small muted" }, `Không có sự cố cùng nhóm trong ${rel.days} ngày.`));
     const recap = d.summary && summaryCard(d.summary, id);
-    setKids(box);
-    appendKids(box, [head, exported, wait, h("div", { class: "ix-grid" }, h("div", { class: "ix-col" }, recap, topologyGraph(topo, async () => { topo = null; await load(); }), events), h("aside", { class: "ix-col", "aria-label": "Thông tin sự cố" }, times, impactCard, alerts, cause, related))]);
+    const ran = h("section", { class: "card", "aria-labelledby": "ix-ran-h" }, h("div", { class: "ix-sec" }, h("h3", { id: "ix-ran-h" }, "Lệnh đã chạy")),
+      h("ol", { class: "ix-tl" }, tlItems("action", "Chưa có lệnh nào chạy.")));
+    const graph = topologyGraph(topo, async () => { topo = null; await load(); });
+
+    // Như trang điều tra của AWS DevOps Agent: đầu trang và việc đang chờ cố định, phần còn lại chia 3 tab.
+    setPageLabel(d.title);
+    const waitN = d.waiting.length;
+    const tabs = [["timeline", "Diễn biến"], ["cause", "Nguyên nhân"], ["act", waitN ? `Xử lý (${waitN} đang chờ)` : "Xử lý"]];
+    if (!tabs.some(([k]) => k === itab)) itab = waitN ? "act" : c ? "cause" : "timeline";
+    const grid = (mainCol, side) => h("div", { class: "ix-grid" }, h("div", { class: "ix-col" }, mainCol), h("aside", { class: "ix-col", "aria-label": "Thông tin sự cố" }, side));
+    const bodies = {
+      timeline: () => grid([recap, graph, events], [times, alerts]),
+      cause: () => grid([cause], [impactCard, related]),
+      act: () => h("div", { class: "ix-col" }, wait || h("div", { class: "card muted" }, "Không có việc nào đang chờ."), ran),
+    };
+    const assemble = () => {
+      const bar = h("div", { class: "subtabs ix-tabbar", role: "tablist", "aria-label": "Phần của sự cố" }, tabs.map(([k, label]) =>
+        h("button", { type: "button", role: "tab", class: "subtab" + (k === itab ? " active" : ""), "aria-selected": String(k === itab),
+          onclick: () => { if (k !== itab) { itab = k; setSub2(k); assemble(); } } }, label)));
+      const pointer = waitN > 0 && itab !== "act" && h("button", { type: "button", class: "ix-waitbar",
+        onclick: () => { itab = "act"; setSub2("act"); assemble(); } }, `${waitN} việc đang chờ người xử lý · Xem`);
+      setKids(box);
+      appendKids(box, [head, exported, pointer, bar, bodies[itab]()]);
+    };
+    assemble();
     if (!menuOpen && d.status === "open" && (busyNow || ["new", "awaiting_approval", "verifying"].includes(d.stage))) refreshLater(8000, token, load);
   }
   await load();
@@ -2218,7 +2368,7 @@ async function refreshMe() {
   const id = state.tenant.id;
   state.me = await api("GET", "/api/me");
   state.tenant = state.me.tenants.find((t) => t.id === id) || state.me.tenants[0];
-  renderShell();
+  buildShell();
 }
 
 function quotaMeter(used, limit) {
@@ -2412,6 +2562,6 @@ async function boot() {
   applyHash();
   state.env = store.get("env", (state.me.profile && state.me.profile.default_env) || "dev");
   syncUrl(true);
-  renderShell();
+  buildShell();
 }
 boot();

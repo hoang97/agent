@@ -553,3 +553,17 @@ Theo `TOPOLOGY-PLAN.md` (đã chốt: topology là dữ kiện có thời hạn,
   mỗi bên chỉ thấy một nửa nên không bên nào qua ngưỡng. Vì vậy tầng dưới chỉ một thực thể của sự cố này đi tới cũng được xét.
 - **Cạnh gợi ý:** nghi theo tầng dưới chung mà đường nối có cạnh gợi ý thì lý do ghi "có cạnh gợi ý, cần kiểm chứng" và `suspect.trusted`
   là false; gom cảnh báo tự động vẫn chỉ khi mọi cạnh tin cậy.
+
+## Đợt 52 — 2026-11-27: chat luôn có mặt, các màn mở bên cạnh
+
+Tham khảo web app của AWS DevOps Agent. Nguyên tắc: người dùng không phải rời khung chat.
+
+- **Khung trang:** thanh bên thu thành dải biểu tượng, nhớ lựa chọn. Mục chính (Sự cố, Duyệt lệnh, Tri thức, Công cụ) lên đầu,
+  quản trị gom phía dưới. Mở một màn thì chat thu thành cột trái, màn đó mở ở khung bên phải với nút ✕. Thanh bên khi đó mở đè lên, không xô khung.
+- **Liền mạch:** đổi màn không dựng lại chat, nên lượt đang chạy, thẻ duyệt và chữ đang gõ vẫn còn. "Mở hội thoại điều tra" đổi hội thoại ở cột chat
+  và giữ nguyên trang sự cố. Mở một màn không tự đổi hội thoại.
+- **Chat biết màn đang mở:** mỗi lượt gửi kèm màn đang xem, server thêm một dòng vào `<context>` của lượt.
+  System prompt không đổi nên prompt cache giữ nguyên.
+- **Trang sự cố:** chia 3 tab Diễn biến / Nguyên nhân / Xử lý. Tab Nguyên nhân không còn nằm ở cột phụ hẹp. Mặc định mở tab Xử lý
+  khi có việc đang chờ, tab Nguyên nhân khi đã có nguyên nhân. Ở tab khác vẫn có nút "N việc đang chờ".
+- Đổi tên hiển thị "Knowledge Agent" → "aiops" trên giao diện.

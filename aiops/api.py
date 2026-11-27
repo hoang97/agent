@@ -512,12 +512,35 @@ _runs: dict[str, tuple[str, str, threading.Event, str]] = {}  # run_id → (tena
 _runs_lock = threading.Lock()
 
 
+class PageRef(BaseModel):
+    view: str = Field(max_length=32)
+    id: str | None = Field(default=None, max_length=128)
+    label: str | None = Field(default=None, max_length=200)
+
+
 class ChatBody(BaseModel):
     message: str = Field(default="", max_length=8000)
     conversation_id: str | None = None
     continue_episode: str | None = None  # chạy tiếp lượt này sau khi các lệnh chờ duyệt của nó đã được quyết định
     env: str = "dev"
     project: str | None = Field(default=None, max_length=64)
+    page: PageRef | None = None  # màn đang mở cạnh khung chat
+
+
+_VIEW_NAMES = {"incidents": "Sự cố", "approvals": "Duyệt lệnh", "knowledge": "Tri thức", "tools": "Công cụ", "episodes": "Nhật ký",
+               "metrics": "Đo lường", "audit": "Audit", "settings": "Cài đặt", "account": "Tài khoản"}
+
+
+def _viewing(conn, t: Tenant, page: PageRef | None) -> str | None:
+    """Một dòng cho <context> của lượt, để "sự cố này", "cái này" trỏ đúng thứ người dùng đang xem. Sự cố đọc từ DB, không tin nhãn của client."""
+    if not page or page.view not in _VIEW_NAMES:
+        return None
+    if page.view == "incidents" and page.id:
+        r = conn.execute("SELECT id, title, status, env FROM incident WHERE tenant_id=? AND id=?", (t.tenant_id, page.id.split("/")[0])).fetchone()
+        if r:
+            return f"Người dùng đang mở sự cố «{r['title']}» (id {r['id']}, {r['status']}, env {r['env']}) cạnh khung chat."
+    where = " › ".join(x for x in (_VIEW_NAMES[page.view], page.id, page.label) if x)
+    return f"Người dùng đang mở màn {where} cạnh khung chat."
 
 
 def _continued(conn, tenant_id: str, episode_id: str) -> bool:
@@ -600,7 +623,8 @@ def chat(body: ChatBody, t: Tenant = Depends(current_tenant), conn=Depends(get_c
         try:
             with db.session() as worker_conn:
                 episode = agent_mod.run_task(worker_conn, t.tenant_id, t.user_id, message, body.env, body.project, conversation_id=conversation_id,
-                                             episode_id=run_id, on_event=emit, cancelled=cancelled, continuation_of=continuation_of, inbox=run.take)
+                                             episode_id=run_id, on_event=emit, cancelled=cancelled, continuation_of=continuation_of, inbox=run.take,
+                                             viewing=_viewing(worker_conn, t, body.page))
                 leftover = run.close()
                 if leftover:  # gửi sau lần cuối agent đọc hộp tin: giao diện gửi thành lượt kế tiếp
                     emit({"type": "leftover", "texts": leftover})

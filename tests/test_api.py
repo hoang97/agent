@@ -71,7 +71,7 @@ def test_security_headers(client):
 
 
 def test_ui_assets_served(client):
-    assert "Knowledge Agent" in client.get("/").text
+    assert "<title>aiops</title>" in client.get("/").text
     assert client.get("/static/app.js").status_code == 200
     assert client.get("/static/style.css").status_code == 200
 

@@ -75,6 +75,7 @@ flowchart LR
    - system prompt cố định theo tenant (giữ prompt cache);
    - lịch sử phát lại nguyên văn, chỉ nối thêm, ngân sách `budget_history` 24k;
    - khối `<context>` của lượt: core, playbook, KU tìm được, sự cố liên quan; phần đã có trong lịch sử được bỏ.
+     Kèm một dòng màn người dùng đang mở cạnh chat (`ChatBody.page`, `api._viewing`). Với sự cố, tiêu đề đọc từ DB, không lấy nhãn của client.
 4. **Vòng lặp model ↔ công cụ:** mỗi lệnh gọi qua `gateway.invoke`. Đọc chạy song song (tối đa `max_parallel_tools` = 8, overlay chỉ hạ; 4 lệnh cùng lúc mỗi kết nối), ghi chạy tuần tự.
    Agent có thêm `search_knowledge`, `read_knowledge_page`, `read_skill`, giao việc cho agent con chỉ đọc (`delegate`) và chạy nền.
    Kết quả lớn lưu ở server (`results.py`), context chỉ nhận `result_id` và bản xem trước, lọc bằng `data.*`.
@@ -272,6 +273,13 @@ Schema ở `aiops/db.py`; migration chạy lúc khởi động, phải chạy l�
 ## 11. Giao diện
 
 `aiops/static`: `index.html`, `app.js` (khung trang, các màn), `chat.js` (chat, thẻ duyệt), `style.css`. JS thuần, không bước build.
+
+Bố cục gồm dải điều hướng bên trái (mở rộng được), chat luôn có mặt, và khung làm việc bên phải cho màn đang mở (sự cố, tri thức, công cụ…).
+Khi chỉ có chat, chat chiếm cả màn hình. Mở một màn thì chat thu thành cột 400px, thu gọn được. Dưới 1000px chat và khung làm việc thay nhau hiện.
+`render()` chỉ dựng lại phần thay đổi: đổi màn dựng lại khung làm việc, đổi hội thoại dựng lại chat. Nhờ vậy lượt đang stream không mất khi xem màn khác.
+`renderShell()` của các màn chỉ tải lại khung làm việc, `buildShell()` dựng lại cả trang.
+URL: `#/t/<tenant>/chat[/<hội thoại>]`, hoặc `#/t/<tenant>/<màn>[/<sub>[/<sub2>]][?c=<hội thoại>]`.
+Trang sự cố có 3 tab: Diễn biến / Nguyên nhân / Xử lý (`sub2`).
 Nút gọi việc chạy lâu dùng `jobBtn`/`jobNote` trong `app.js` (theo dõi bảng `job`). Quy ước DOM ở `CLAUDE.md`, mục UI.
 
 ## 12. Triển khai
