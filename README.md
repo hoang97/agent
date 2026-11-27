@@ -1,7 +1,8 @@
 # Knowledge Agent
 
 Agent tự tích lũy tri thức, có gateway phân quyền công cụ và giao diện web. Thiết kế gốc nằm ở
-`Kiến trúc tích lũy tri thức tự động cho AI Agent.md`; phạm vi MVP và các điểm khác thiết kế ở `docs/PLAN.md`;
+`Kiến trúc tích lũy tri thức tự động cho AI Agent.md`; thiết kế hệ thống hiện tại ở `docs/ARCHITECTURE.md`;
+phạm vi MVP và các điểm khác thiết kế ở `docs/PLAN.md`;
 lịch sử cải tiến ở `docs/IMPROVEMENTS.md`.
 
 Agent dùng công cụ thật (Kubernetes, OpenStack, Grafana, Prometheus, Alertmanager, Elasticsearch/Kibana, Web, HTTP API, PostgreSQL, MySQL). Admin hoặc user tạo **kết nối** từ template

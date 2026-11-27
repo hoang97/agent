@@ -60,6 +60,21 @@ docker run --rm -v "$PWD":/src -v "$DRY":/dry -w /src -e HOME=/tmp -e PYTHONPATH
 
 Thêm connector mới thì tạo fake trong `tests/fakes.py`, kèm `tests/test_<name>.py`, rồi thêm một dòng vào bảng trên.
 
+## Cập nhật tài liệu
+
+Mỗi commit đổi hành vi hay thiết kế phải sửa tài liệu liên quan **trong cùng commit**, viết theo mã sau khi sửa. Trước khi commit, đối chiếu diff với bảng dưới.
+
+| Commit đổi | Sửa |
+|---|---|
+| Module mới hoặc bỏ, bảng hay cột trong `db.py`, luồng nền, luồng chat/sự cố/học, provider LLM, cách triển khai | `docs/ARCHITECTURE.md` |
+| Một dòng ở mục "Bất biến" của `ARCHITECTURE.md` | Phải được chủ dự án đồng ý; ghi thêm vào bảng quyết định của `docs/PLAN.md` |
+| Connector, template, mức rủi ro, luật gateway, auto mode, hoàn tác | `docs/TOOLS.md` |
+| Biến môi trường, cách chạy, cài đặt | `README.md` |
+| Việc thuộc một kế hoạch (`*-PLAN.md`, `INCIDENTS-REFACTOR.md`) | Bảng tiến độ của kế hoạch đó |
+| Sửa lỗi hoặc tính năng người dùng thấy được | Một mục trong đợt hiện tại của `docs/IMPROVEMENTS.md` |
+
+Chỉ test, refactor không đổi cấu trúc, hay sửa lỗi không đổi thiết kế thì không cần sửa tài liệu, nhưng thân commit ghi một dòng `Tài liệu: không đổi (<lý do>)`.
+
 ## UI (`aiops/static`)
 
 - Không gọi `replaceChildren`/`append` gốc với con kiểu `cond && el`: trình duyệt in chữ `false`. Dùng `h()` hoặc `setKids`/`addKids` trong `app.js`, chúng lọc bỏ `false`.
