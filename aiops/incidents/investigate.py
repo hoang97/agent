@@ -163,6 +163,56 @@ def _investigate_run(conn, tenant_id: str, incident_id: str, inc, user: str, tas
     return act(conn, tenant_id, incident_id, report, user, ep["id"], alerts, steps)
 
 
+REWRITE_TURN_CHARS = 6000
+
+
+def rewrite_cause(conn, tenant_id: str, incident_id: str, user: str) -> dict:
+    """Viết lại báo cáo và chuỗi 5 Whys từ lượt điều tra gần nhất cùng các lượt hỏi tiếp sau đó trong hội thoại, không chạy lệnh mới.
+    Dùng được cả khi sự cố đã hết cảnh báo; không đề xuất hành động, vì lệnh khắc phục chỉ đi ra từ lượt điều tra."""
+    from .. import llm
+    inc = conn.execute("SELECT * FROM incident WHERE id=? AND tenant_id=?", (incident_id, tenant_id)).fetchone()
+    if inc is None:
+        raise IncidentError("không tìm thấy sự cố", 404)
+    if incident_id in _running or inc["stage"] in ("investigating", "verifying"):
+        raise IncidentError("sự cố đang được điều tra hoặc xác minh", 409)
+    base = conn.execute("SELECT started_at FROM episode WHERE id=?", (inc["episode_id"],)).fetchone() if inc["episode_id"] else None
+    if base is None or not inc["conversation_id"]:
+        raise IncidentError("sự cố chưa có lượt điều tra để viết lại")
+    eps = [db.row(r, "input", "trace") for r in conn.execute(
+        "SELECT id, input, trace, output FROM episode WHERE conversation_id=? AND started_at>=? AND output IS NOT NULL ORDER BY started_at",
+        (inc["conversation_id"], base["started_at"]))]
+    turns, steps = [], []
+    for n, ep in enumerate(eps):
+        if n:
+            turns.append(f"Người hỏi tiếp: {(ep['input'] or {}).get('task', '')}")
+        turns.append(f"{'Agent trả lời' if n else 'Lượt điều tra'}: {(ep['output'] or '')[:REWRITE_TURN_CHARS]}")
+        steps += [s for s in ep["trace"] or [] if s.get("type") == "tool_call"]
+    shown = steps[-REPORT_STEPS:]  # lượt hỏi tiếp thường là phần đính chính nên giữ bước mới nhất
+    alerts = [_brief(r) for r in conn.execute("SELECT * FROM alert_event WHERE incident_id=? ORDER BY starts_at LIMIT 20", (incident_id,)).fetchall()]
+    data = {"alerts": alerts, "investigation": "\n\n".join(turns), "tools": [],
+            "steps": [{"code": f"S{i}", "tool": s["tool"], "args": s["args"], "status": s["status"], "result": llm._tool_payload(s)[:REPORT_STEP_CHARS]}
+                      for i, s in enumerate(shown, 1)]}
+    try:
+        report = llm.get_provider().incident_report(data, set())
+    except llm.LLMError as exc:
+        raise IncidentError(f"không viết lại được nguyên nhân: {exc}", 502)
+    now = db.iso()
+    with db.tx(conn):
+        if incident_id in _running:  # có lượt điều tra bắt đầu trong lúc chờ model: kết quả của nó mới hơn
+            raise IncidentError("sự cố vừa bắt đầu được điều tra lại", 409)
+        conn.execute("UPDATE incident SET title=COALESCE(NULLIF(?,''), title), root_cause=?, cause=?, cause_at=?, cause_episode=?, confidence=?, evidence=?, "
+                     "updated_at=? WHERE id=?",
+                     (report["symptom"], report["root_cause"], report["root_cause"], now, eps[-1]["id"], report["confidence"],
+                      json.dumps(report["evidence"], ensure_ascii=False), now, incident_id))
+        rootcause.save_report(conn, tenant_id, incident_id, report, shown)
+        _event(conn, tenant_id, incident_id, "rewritten",
+               f"viết lại từ {len(eps)} lượt, {len(steps)} lệnh → {headline(report['root_cause']) or 'chưa rõ nguyên nhân'} (độ tin {report['confidence']:.2f})",
+               {"episodes": [e["id"] for e in eps], "steps": len(steps)}, actor=user)
+    if report.get("whys"):
+        rootcause.check_recurrence(conn, tenant_id, incident_id, llm.get_provider())
+    return {"ok": True}
+
+
 def _wait_quota(conn, tenant_id: str, incident_id: str, text: str, source: str) -> None:
     """Dừng tới khi người bấm Tiếp tục (có quota lại hoặc đã đổi provider); không tự hẹn giờ chạy lại."""
     with db.tx(conn):

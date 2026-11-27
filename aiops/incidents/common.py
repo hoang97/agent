@@ -121,6 +121,8 @@ def who(e: dict, name) -> str:
         return "cảnh báo"
     if kind == "investigated":
         return f"aiops · điều tra lần {data['round']}" if data.get("round") else "aiops · điều tra"
+    if kind == "rewritten":
+        return f"{name(actor)} · viết lại nguyên nhân"
     if kind in ("ran", "failed"):
         if data.get("auto"):
             return "tự động" if data.get("origin") == "investigation" else f"{name(actor)} chạy"

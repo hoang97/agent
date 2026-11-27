@@ -1849,6 +1849,12 @@ def incident_investigate(incident_id: str, t: Tenant = Depends(current_tenant), 
     return {"ok": True}
 
 
+@app.post("/api/incidents/{incident_id}/rewrite-cause")
+def incident_rewrite_cause(incident_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
+    t.require_writer()
+    return _incident_call(lambda: incidents.rewrite_cause(conn, t.tenant_id, incident_id, t.user_id))
+
+
 @app.get("/api/incidents/{incident_id}/summary")
 def incident_summary_get(incident_id: str, t: Tenant = Depends(current_tenant), conn=Depends(get_conn)):
     inc = conn.execute("SELECT * FROM incident WHERE id=? AND tenant_id=?", (incident_id, t.tenant_id)).fetchone()

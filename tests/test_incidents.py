@@ -1317,3 +1317,41 @@ def test_notify_pending_approval_and_needs_human(flow, users, infra, monkeypatch
         assert _notify(conn, users) == 1 and _notify(conn, users) == 0
     assert flow.get("/api/notify-settings").json()["recent"][0] == {**flow.get("/api/notify-settings").json()["recent"][0],
                                                                      "status": "failed", "error": "webhook trả mã 502"}
+
+
+def test_rewrite_cause_uses_follow_up_turns_without_new_commands(flow, users, infra):
+    from test_chat import chat
+    iid = _web_incident(users)
+    llm.set_provider(FiveWhys([TECH]))
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+    cid = flow.get(f"/api/incidents/{iid}").json()["conversation_id"]
+    llm.set_provider(llm.HeuristicProvider())
+    chat(users["alice"], "xem pod trong namespace default", cid)
+    with db.session() as conn, db.tx(conn):
+        conn.execute("UPDATE incident SET status='resolved' WHERE id=?", (iid,))  # hết cảnh báo: Điều tra lại không còn dùng được
+        before = conn.execute("SELECT investigations, episode_id FROM incident WHERE id=?", (iid,)).fetchone()
+        chat_ep = conn.execute("SELECT id FROM episode WHERE conversation_id=? ORDER BY started_at DESC LIMIT 1", (cid,)).fetchone()["id"]
+    provider = FiveWhys([{**WEAK, "refs": ["S2"]}], stop="weakness")
+    llm.set_provider(provider)
+    r = users["alice"].post(f"/api/incidents/{iid}/rewrite-cause")
+    assert r.status_code == 200, r.text
+    assert "Người hỏi tiếp: xem pod trong namespace default" in provider.data["investigation"] and provider.tools == set()
+    assert [s["code"] for s in provider.data["steps"]] == ["S1", "S2"]
+    d = flow.get(f"/api/incidents/{iid}").json()
+    assert [w["answer"] for w in d["rootcause"]["whys"]] == [WEAK["answer"]] and d["rootcause"]["whys"][0]["grounded"]
+    assert d["investigations"] == before["investigations"] and d["episode_id"] == before["episode_id"] and d["cause_episode"] == chat_ep
+    assert any(e["kind"] == "rewritten" and "viết lại nguyên nhân" in e["who"] for e in d["timeline"])
+    assert not any(w["kind"] == "approval" for w in d["waiting"])
+
+
+def test_rewrite_cause_needs_an_investigation_and_no_running_one(flow, users):
+    iid = _web_incident(users)
+    assert users["admin"].post(f"/api/incidents/{iid}/rewrite-cause").status_code == 400
+    with db.session() as conn:
+        incidents.investigate(conn, tenant(users), iid)
+    incidents.common._running.add(iid)
+    try:
+        assert users["admin"].post(f"/api/incidents/{iid}/rewrite-cause").status_code == 409
+    finally:
+        incidents.common._running.discard(iid)

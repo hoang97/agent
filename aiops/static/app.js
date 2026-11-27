@@ -333,7 +333,7 @@ function span(ms) {
   return `${Math.floor(hh / 24)} ngày ${hh % 24} giờ`;
 }
 const STATE_TONE = { needs_human: "bad", awaiting_approval: "warn", waiting_quota: "warn", investigating: "info", queued: "info", verifying: "info", handled: "ok", cleared: "ok", closed: "" };
-const EV_MARK = { alert: "alert", alert_resolved: "clear", resolved: "clear", reopened: "alert", investigated: "agent",
+const EV_MARK = { alert: "alert", alert_resolved: "clear", resolved: "clear", reopened: "alert", investigated: "agent", rewritten: "agent",
   ran: "human", verified: "clear", closed: "human", task_added: "human", task_done: "clear", task_reopened: "human", failed: "fail",
   change_checked: "clear", change_check_failed: "fail", reverted: "human", revert_failed: "fail" };
 const EV_FILTERS = [["all", "Tất cả"], ["action", "Hành động"], ["agent", "Điều tra"], ["alert", "Cảnh báo"]];
@@ -655,7 +655,10 @@ async function incidentDetail(main, id) {
     const c = d.cause;
     const cause = h("section", { class: "card ix-cause", "aria-labelledby": "ix-c-h" },
       h("div", { class: "ix-sec" }, h("h3", { id: "ix-c-h" }, "Nguyên nhân"),
-        c && h("span", { class: "small" }, [c.round ? `lượt điều tra ${c.round}` : null, c.at ? hmd(c.at) : null, `độ tin ${(c.confidence || 0).toFixed(2)}`].filter(Boolean).join(" · "))),
+        c && h("span", { class: "small" }, [c.round ? `lượt điều tra ${c.round}` : null, c.at ? hmd(c.at) : null, `độ tin ${(c.confidence || 0).toFixed(2)}`].filter(Boolean).join(" · ")),
+        c && !busyNow && d.stage !== "verifying" && h("button", { type: "button", class: "ghost small-btn",
+          title: "Viết lại nguyên nhân và chuỗi 5 Whys từ lượt điều tra gần nhất cùng các câu hỏi tiếp trong hội thoại; không chạy lệnh mới",
+          onclick: act(() => api("POST", `/api/incidents/${id}/rewrite-cause`), "Đã viết lại nguyên nhân") }, "Viết lại nguyên nhân")),
       busyNow ? busy(d.queued === "slot" ? "Đang chờ tới lượt điều tra…" : "Agent đang điều tra bằng các lệnh chỉ đọc…") : null,
       c ? [c.parts ? causeBody(c.parts) : h("p", {}, "Chưa rõ nguyên nhân."),
         rootCauseBody(d.rootcause, id, act, (r) => h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("incidents", undefined, r.id); } }, r.title)),
