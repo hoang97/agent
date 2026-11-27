@@ -279,7 +279,7 @@ Khi chỉ có chat, chat chiếm cả màn hình. Mở một màn thì chat thu 
 `render()` chỉ dựng lại phần thay đổi: đổi màn dựng lại khung làm việc, đổi hội thoại dựng lại chat. Nhờ vậy lượt đang stream không mất khi xem màn khác.
 `renderShell()` của các màn chỉ tải lại khung làm việc, `buildShell()` dựng lại cả trang.
 URL: `#/t/<tenant>/chat[/<hội thoại>]`, hoặc `#/t/<tenant>/<màn>[/<sub>[/<sub2>]][?c=<hội thoại>]`.
-Trang sự cố có 3 tab: Diễn biến / Nguyên nhân / Xử lý (`sub2`).
+Trang sự cố có 3 tab: Diễn biến / Nguyên nhân / Xử lý (`sub2`). Đầu trang, tóm tắt sự cố và nút "việc đang chờ" luôn hiện trên thanh tab.
 Nút gọi việc chạy lâu dùng `jobBtn`/`jobNote` trong `app.js` (theo dõi bảng `job`). Quy ước DOM ở `CLAUDE.md`, mục UI.
 
 ## 12. Triển khai

@@ -853,18 +853,26 @@ async function incidentDetail(main, id) {
       rel.history.length > 0 && h("ul", { class: "small" }, rel.history.map((r) => h("li", {}, incLink(r), r.count > 1 ? ` · ${r.count} lần, ${dm(r.first)}–${dm(r.created_at)}` : ` · ${dm(r.created_at)}`))),
       !rel.open.length && !rel.history_count && h("p", { class: "small muted" }, `Không có sự cố cùng nhóm trong ${rel.days} ngày.`));
     const recap = d.summary && summaryCard(d.summary, id);
+    if (recap) {
+      // Như Claude Code: người quay lại trang thấy ngay bản mới máy chủ đã viết trong lúc vắng.
+      const onVisible = () => {
+        if (!recap.isConnected) { document.removeEventListener("visibilitychange", onVisible); return; }
+        if (document.visibilityState === "visible") recap.refresh().catch(() => {});
+      };
+      document.addEventListener("visibilitychange", onVisible);
+    }
     const ran = h("section", { class: "card", "aria-labelledby": "ix-ran-h" }, h("div", { class: "ix-sec" }, h("h3", { id: "ix-ran-h" }, "Lệnh đã chạy")),
       h("ol", { class: "ix-tl" }, tlItems("action", "Chưa có lệnh nào chạy.")));
     const graph = topologyGraph(topo, async () => { topo = null; await load(); });
 
-    // Như trang điều tra của AWS DevOps Agent: đầu trang và việc đang chờ cố định, phần còn lại chia 3 tab.
+    // Như trang điều tra của AWS DevOps Agent: đầu trang, tóm tắt và việc đang chờ luôn hiện, phần còn lại chia 3 tab.
     setPageLabel(d.title);
     const waitN = d.waiting.length;
     const tabs = [["timeline", "Diễn biến"], ["cause", "Nguyên nhân"], ["act", waitN ? `Xử lý (${waitN} đang chờ)` : "Xử lý"]];
     if (!tabs.some(([k]) => k === itab)) itab = waitN ? "act" : c ? "cause" : "timeline";
     const grid = (mainCol, side) => h("div", { class: "ix-grid" }, h("div", { class: "ix-col" }, mainCol), h("aside", { class: "ix-col", "aria-label": "Thông tin sự cố" }, side));
     const bodies = {
-      timeline: () => grid([recap, graph, events], [times, alerts]),
+      timeline: () => grid([graph, events], [times, alerts]),
       cause: () => grid([cause], [impactCard, related]),
       act: () => h("div", { class: "ix-col" }, wait || h("div", { class: "card muted" }, "Không có việc nào đang chờ."), ran),
     };
@@ -875,7 +883,7 @@ async function incidentDetail(main, id) {
       const pointer = waitN > 0 && itab !== "act" && h("button", { type: "button", class: "ix-waitbar",
         onclick: () => { itab = "act"; setSub2("act"); assemble(); } }, `${waitN} việc đang chờ người xử lý · Xem`);
       setKids(box);
-      appendKids(box, [head, exported, pointer, bar, bodies[itab]()]);
+      appendKids(box, [head, exported, recap, pointer, bar, bodies[itab]()]);
     };
     assemble();
     if (!menuOpen && d.status === "open" && (busyNow || ["new", "awaiting_approval", "verifying"].includes(d.stage))) refreshLater(8000, token, load);

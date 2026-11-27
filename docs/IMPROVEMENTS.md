@@ -566,4 +566,6 @@ Tham khảo web app của AWS DevOps Agent. Nguyên tắc: người dùng không
   System prompt không đổi nên prompt cache giữ nguyên.
 - **Trang sự cố:** chia 3 tab Diễn biến / Nguyên nhân / Xử lý. Tab Nguyên nhân không còn nằm ở cột phụ hẹp. Mặc định mở tab Xử lý
   khi có việc đang chờ, tab Nguyên nhân khi đã có nguyên nhân. Ở tab khác vẫn có nút "N việc đang chờ".
+- **Tóm tắt sự cố chỉ ở trang sự cố:** thẻ tóm tắt nằm trên thanh tab nên tab nào cũng thấy. Hội thoại điều tra không còn thẻ tóm tắt ở cuối,
+  vì trang sự cố mở ngay cạnh chat.
 - Đổi tên hiển thị "Knowledge Agent" → "aiops" trên giao diện.

@@ -254,7 +254,6 @@ function summaryCard(s, incidentId) {
   let job = null;  // lượt "Tóm tắt ngay" đang chạy hoặc vừa lỗi (jobs.py)
   paint(cur);
   jobsOf(`incident:${incidentId}`).then((jobs) => { job = jobs.summary || null; if (job) paint(cur); });
-  card.markStale = () => { if (cur.text) paint({ ...cur, stale: true }); };
   card.refresh = async () => { paint(await api("GET", `/api/incidents/${incidentId}/summary`)); };
   return card;
 }
@@ -431,7 +430,6 @@ function questionCard(step, answerable, onAnswer) {
 
 function chatView(main) {
   const thread = h("div", { class: "thread" });
-  let recap = null;  // thẻ tóm tắt sự cố, luôn ở cuối hội thoại
   const scroller = h("div", { class: "scroller" }, thread);
   const toBottom = iconButton("down_arrow", "Xuống cuối", () => { scroller.scrollTop = scroller.scrollHeight; }, "to-bottom hidden");
   let stick = true;
@@ -754,7 +752,6 @@ function chatView(main) {
     const status = h("div", { class: "live-status small muted", role: "status" });
     const liveEl = h("div", { class: "msg assistant live" }, flow, status);
     addKids(thread, liveEl);
-    if (recap) { recap.markStale(); addKids(thread, recap); }
     stick = true;
     scroll();
 
@@ -996,17 +993,7 @@ function chatView(main) {
               h("span", { class: "small" }, "Hội thoại điều tra dùng chung của sự cố; hỏi thêm hoặc yêu cầu khắc phục ngay tại đây.")),
             h("button", { type: "button", class: "ghost small-btn", onclick: () => go("incidents", undefined, data.incident_id) }, "Xem sự cố")));
         }
-        data.messages.forEach(addMessage);
-        if (data.incident_id) {
-          recap = summaryCard(data.incident_summary, data.incident_id);
-          addKids(thread, recap);
-          // Như Claude Code: người quay lại trang thấy ngay bản mới máy chủ đã viết trong lúc vắng.
-          const onVisible = () => {
-            if (!recap.isConnected) { document.removeEventListener("visibilitychange", onVisible); return; }
-            if (document.visibilityState === "visible") recap.refresh().catch(() => {});
-          };
-          document.addEventListener("visibilitychange", onVisible);
-        }
+        data.messages.forEach(addMessage);  // tóm tắt sự cố nằm trên trang sự cố, mở cạnh chat, nên không lặp lại ở đây
         if (data.messages.some((m) => m.approvals.some((a) => a.status === "pending"))) pollApprovals();
         if (data.running) attachLive(data.messages.length).catch((e) => toast(e.message, true));
         else if (data.queued) waitQueued(data.queued);
