@@ -565,6 +565,8 @@ Tham khảo web app của AWS DevOps Agent. Nguyên tắc: người dùng không
 - **Hiệu ứng chuyển cảnh:** mở/đóng màn, thu chat, mở thanh bên đổi bố cục qua View Transitions. Các khung trượt và đổi cỡ tới chỗ mới,
   khung phải trượt vào từ bên phải. Nội dung màn mới, tab sự cố vừa bấm, tin vừa gửi và thông báo hiện dần. Mục `<details>` mở/đóng trượt theo chiều cao.
   Màu nền khi rê chuột chuyển dần. Tắt hết khi hệ điều hành bật giảm chuyển động. Trình duyệt không hỗ trợ thì đổi ngay như cũ.
+- **"Mở hội thoại điều tra" rõ hơn:** hội thoại cũ lùi sang trái, hội thoại điều tra trượt vào cột chat từ phía khung sự cố, rồi cột chat chớp viền
+  màu nhấn khoảng 1 giây. Áp dụng cho mọi lần đổi hội thoại khi đang mở một màn.
 - **Liền mạch:** đổi màn không dựng lại chat, nên lượt đang chạy, thẻ duyệt và chữ đang gõ vẫn còn. "Mở hội thoại điều tra" đổi hội thoại ở cột chat
   và giữ nguyên trang sự cố. Mở một màn không tự đổi hội thoại.
 - **Chat biết màn đang mở:** mỗi lượt gửi kèm màn đang xem, server thêm một dòng vào `<context>` của lượt.

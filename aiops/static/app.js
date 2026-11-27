@@ -177,14 +177,29 @@ window.addEventListener("keydown", (e) => { if (e.key === "Escape" && shell.layo
 
 // Đổi bố cục (mở/đóng màn, thu chat, thanh bên) qua View Transitions để các khung trượt tới chỗ mới thay vì nhảy.
 // Bỏ qua khi trình duyệt không hỗ trợ, người dùng tắt chuyển động, hay màn hình ≤760px (thanh bên đã có transition riêng).
-function morph(fn, animate = true) {
-  if (!animate || !document.startViewTransition || !shell.layout || matchMedia("(prefers-reduced-motion: reduce), (max-width: 760px)").matches) return fn();
-  document.startViewTransition(fn).ready.catch(() => {});  // bấm dồn thì chuyển cảnh trước bị bỏ (AbortError), fn của nó vẫn chạy
+// kind đặt html[data-vt] trong lúc chuyển để CSS chọn kiểu riêng (vd "conv": đổi hội thoại từ một màn). Trả về promise xong khi chuyển xong.
+function morph(fn, animate = true, kind) {
+  if (!animate || !document.startViewTransition || !shell.layout || matchMedia("(prefers-reduced-motion: reduce), (max-width: 760px)").matches) { fn(); return Promise.resolve(); }
+  const root = document.documentElement;
+  if (kind) root.dataset.vt = kind;
+  const t = document.startViewTransition(fn);
+  t.ready.catch(() => {});  // bấm dồn thì chuyển cảnh trước bị bỏ (AbortError), fn của nó vẫn chạy
+  return t.finished.catch(() => {}).finally(() => { if (root.dataset.vt === kind) delete root.dataset.vt; });
+}
+// Chớp viền một phần tử để mắt tìm tới chỗ vừa đổi.
+function flash(el) {
+  if (!el) return;
+  el.classList.remove("flash");
+  void el.offsetWidth;  // gỡ rồi gắn lại trong cùng khung hình thì animation không chạy lại
+  el.classList.add("flash");
+  el.addEventListener("animationend", () => el.classList.remove("flash"), { once: true });
 }
 
 // go("chat", id) mở hội thoại ở khung chat và giữ màn đang mở; go(<màn>, …) mở màn ở khung làm việc và giữ hội thoại.
 function go(tab, conversationId, sub, sub2) {
   const l = shell.layout, had = !!state.tab;
+  // Đổi hội thoại trong lúc đang mở một màn (vd "Mở hội thoại điều tra"): hội thoại mới trượt vào cột chat rồi cột chớp viền.
+  const switching = tab === "chat" && had && (conversationId || null) !== state.conversationId;
   const moves = !!l?.classList.contains("side-open") || (tab === "chat" && had && (l?.classList.contains("chat-hidden") || matchMedia(NARROW).matches));
   if (tab === "chat") {
     state.conversationId = conversationId || null;
@@ -197,6 +212,10 @@ function go(tab, conversationId, sub, sub2) {
     l?.classList.remove("chat-front");
   }
   syncUrl();
+  if (switching) {
+    morph(render, true, "conv").then(() => flash(l?.querySelector(".chatpane")));
+    return;
+  }
   morph(render, moves || had !== !!state.tab);
 }
 function closePage() { state.tab = state.sub = state.sub2 = null; syncUrl(); morph(render); }
