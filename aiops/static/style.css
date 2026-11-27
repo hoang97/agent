@@ -575,3 +575,43 @@ input.narrow { width: 70px; }
 .ix-blast { border-top: 1px solid var(--line); padding-top: 6px; margin-top: 4px; }
 .job-btn { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .job-btn button .spinner { display: inline-block; vertical-align: -2px; }
+
+/* Chuyển động. Bố cục (mở/đóng màn, thu chat, thanh bên) đổi qua View Transitions do morph() trong app.js gọi:
+   mỗi khung có tên riêng nên trượt và đổi cỡ tới chỗ mới; ảnh chụp không co giãn (object-fit: none) mà bị cắt theo khung, chữ không méo. */
+:root { --ease: cubic-bezier(.2, .8, .2, 1); }
+.sidebar { view-transition-name: side; }
+.chatpane { view-transition-name: chat; }
+.workpane { view-transition-name: work; }
+.splitter { view-transition-name: splitter; }
+.scrim { view-transition-name: scrim; }
+::view-transition-group(*) { animation-duration: .26s; animation-timing-function: var(--ease); }
+::view-transition-group(side), ::view-transition-group(chat), ::view-transition-group(work) { overflow: clip; }
+:is(::view-transition-old(side), ::view-transition-new(side), ::view-transition-old(chat), ::view-transition-new(chat), ::view-transition-old(work), ::view-transition-new(work)) {
+  height: 100%; width: 100%; object-fit: none; object-position: left top; animation-duration: .2s; }
+::view-transition-new(work):only-child { animation: vt-slide-in .26s var(--ease) both; }
+::view-transition-old(work):only-child { animation: vt-slide-out .2s ease-in both; }
+::view-transition-new(chat):only-child { animation: vt-fade-in .22s ease-out both; }
+@keyframes vt-slide-in { from { opacity: 0; transform: translateX(32px); } }
+@keyframes vt-slide-out { to { opacity: 0; transform: translateX(32px); } }
+@keyframes vt-fade-in { from { opacity: 0; } }
+
+button, .nav-item, .conv, .icon-btn, .subtab, .chip, .idea, tr.click, .composer, input, select, textarea {
+  transition: background-color .15s, color .15s, border-color .15s, box-shadow .15s; }
+.layout.side-open .scrim { animation: vt-fade-in .2s ease-out; }
+/* Màn mới mở: phần tử chèn vào trong 600ms đầu hiện dần; tab sự cố vừa bấm cũng vậy. */
+.page.enter > *, .page.enter > * > *, .tab-in { animation: rise-in .24s var(--ease) both; }
+.msg.fresh, .msg.live { animation: rise-in .22s var(--ease) both; }
+@keyframes rise-in { from { opacity: 0; transform: translateY(6px); } }
+.toast { animation: toast-in .22s var(--ease) both; }
+.toast.out { animation: toast-out .2s ease-in both; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(10px); } }
+@keyframes toast-out { to { opacity: 0; transform: translateY(10px); } }
+/* Mở/đóng <details> trượt theo chiều cao; trình duyệt chưa hỗ trợ ::details-content thì bỏ qua cả luật. */
+details { interpolate-size: allow-keywords; }
+details::details-content { block-size: 0; overflow-y: clip; transition: block-size .22s var(--ease), content-visibility .22s allow-discrete; }
+details[open]::details-content { block-size: auto; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
+}

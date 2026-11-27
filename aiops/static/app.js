@@ -101,7 +101,7 @@ const jobsOf = (target) => api("GET", `/api/jobs?target=${encodeURIComponent(tar
 function toast(msg, isErr) {
   const el = h("div", { class: "toast" + (isErr ? " err" : ""), role: "status" }, msg);
   addKids(document.body, el);
-  setTimeout(() => el.remove(), isErr ? 7000 : 3000);
+  setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 200); }, isErr ? 7000 : 3000);
 }
 
 const guard = (fn) => async (ev) => {
@@ -172,11 +172,20 @@ function applyHash() {
   state.sub = page && extra ? extra : null;
   state.sub2 = page && extra2 ? extra2 : null;
 }
-window.addEventListener("popstate", () => { if (state.me) { applyHash(); render(); } });
-window.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSidebar(); });
+window.addEventListener("popstate", () => { if (!state.me) return; const had = !!state.tab; applyHash(); morph(render, had !== !!state.tab); });
+window.addEventListener("keydown", (e) => { if (e.key === "Escape" && shell.layout?.classList.contains("side-open")) morph(closeSidebar); });
+
+// Đổi bố cục (mở/đóng màn, thu chat, thanh bên) qua View Transitions để các khung trượt tới chỗ mới thay vì nhảy.
+// Bỏ qua khi trình duyệt không hỗ trợ, người dùng tắt chuyển động, hay màn hình ≤760px (thanh bên đã có transition riêng).
+function morph(fn, animate = true) {
+  if (!animate || !document.startViewTransition || !shell.layout || matchMedia("(prefers-reduced-motion: reduce), (max-width: 760px)").matches) return fn();
+  document.startViewTransition(fn).ready.catch(() => {});  // bấm dồn thì chuyển cảnh trước bị bỏ (AbortError), fn của nó vẫn chạy
+}
 
 // go("chat", id) mở hội thoại ở khung chat và giữ màn đang mở; go(<màn>, …) mở màn ở khung làm việc và giữ hội thoại.
 function go(tab, conversationId, sub, sub2) {
+  const l = shell.layout, had = !!state.tab;
+  const moves = !!l?.classList.contains("side-open") || (tab === "chat" && had && (l?.classList.contains("chat-hidden") || matchMedia(NARROW).matches));
   if (tab === "chat") {
     state.conversationId = conversationId || null;
     if (state.tab) revealChat();
@@ -185,12 +194,12 @@ function go(tab, conversationId, sub, sub2) {
     state.sub = sub || null;
     state.sub2 = sub2 || null;
     if (conversationId !== undefined) state.conversationId = conversationId;
-    shell.layout?.classList.remove("chat-front");
+    l?.classList.remove("chat-front");
   }
   syncUrl();
-  render();
+  morph(render, moves || had !== !!state.tab);
 }
-function closePage() { state.tab = state.sub = state.sub2 = null; syncUrl(); render(); }
+function closePage() { state.tab = state.sub = state.sub2 = null; syncUrl(); morph(render); }
 // Chat tự đổi hội thoại (lượt đầu tạo hội thoại mới, hội thoại không còn): ghi nhận mà không dựng lại chat.
 function adoptConversation(id) { state.conversationId = id || null; shell.conv = state.conversationId; syncUrl(true); }
 // Tab trong một màn mà màn tự vẽ lại (vd tab của sự cố): lên URL nhưng không dựng lại khung.
@@ -241,20 +250,22 @@ function splitter() {
     else return;
     e.preventDefault();
   });
-  el.addEventListener("dblclick", () => set(CHAT_W.def, true));
+  el.addEventListener("dblclick", () => morph(() => set(CHAT_W.def, true)));
   return el;
 }
 
 function closeSidebar() { shell.layout?.classList.remove("side-open"); }
 // Có màn đang mở hoặc màn hình hẹp: thanh bên mở đè lên, không đẩy khung. Chỉ có chat: thu gọn hay mở rộng tại chỗ, nhớ lựa chọn.
-function toggleSidebar() {
+function toggleSidebar() { morph(toggleSidebarNow); }
+function toggleSidebarNow() {
   const l = shell.layout;
   if (state.tab || matchMedia("(max-width: 760px)").matches) { l.classList.toggle("side-open"); return; }
   const wide = !l.classList.contains("wide");
   store.set("sidebarNarrow", wide ? null : true);
   l.classList.toggle("wide", wide);
 }
-function toggleChat() {
+function toggleChat() { morph(toggleChatNow); }
+function toggleChatNow() {
   const l = shell.layout;
   if (matchMedia(NARROW).matches) { l.classList.toggle("chat-front"); return; }
   const hidden = !l.classList.contains("chat-hidden");
@@ -305,8 +316,11 @@ function mountChat() {
   VIEWS.chat(main).catch((e) => toast(e.message, true));
 }
 function mountPage() {
+  const fresh = shell.page !== pageKey();
   shell.page = pageKey();
-  const main = h("main", { class: "page" });
+  // Màn mới: nội dung chèn vào trong 600ms đầu (kể cả phần tải xong sau) hiện dần; tải lại sau thao tác thì không nháy.
+  const main = h("main", { class: "page" + (fresh ? " enter" : "") });
+  if (fresh) setTimeout(() => main.classList.remove("enter"), 600);
   main.append = (...kids) => appendKids(main, kids);
   shell.pageMain.replaceWith(main);
   shell.pageMain = main;
@@ -401,7 +415,7 @@ function buildShell() {
     h("button", { type: "button", class: "nav-item new-chat", title: "Hội thoại mới", "aria-label": "Hội thoại mới", onclick: () => go("chat", null) },
       icon("plus"), h("span", { class: "nav-label" }, "Hội thoại mới")),
     h("button", { type: "button", class: "nav-item rail-only", title: "Danh sách hội thoại", "aria-label": "Danh sách hội thoại",
-      onclick: () => shell.layout.classList.add("side-open") }, icon("chat")),
+      onclick: () => morph(() => shell.layout.classList.add("side-open")) }, icon("chat")),
     h("nav", { class: "nav-group", "aria-label": "Mục chính" }, NAV_MAIN.map(navBtn)),
     h("div", { class: "side-convs wide-only" }, h("div", { class: "group" }, "Hội thoại"), conversationList),
     h("nav", { class: "nav-group admin", "aria-label": "Quản trị" }, h("div", { class: "group wide-only" }, "Quản trị"), NAV_ADMIN.map(navBtn)),
@@ -420,7 +434,7 @@ function buildShell() {
       shell.pageTitle, h("span", { class: "spacer" }), iconButton("x", "Đóng, chỉ giữ chat", closePage)),
     shell.pageMain);
   shell.sidebar = sidebar;
-  shell.layout = h("div", { class: "layout" }, h("div", { class: "scrim", onclick: closeSidebar }), sidebar, chatPane, splitter(), workPane);
+  shell.layout = h("div", { class: "layout" }, h("div", { class: "scrim", onclick: () => morph(closeSidebar) }), sidebar, chatPane, splitter(), workPane);
   const savedW = store.get("chatWidth", null);
   if (savedW) shell.layout.style.setProperty("--chat-w", savedW + "px");
   setKids(root, shell.layout);
@@ -917,14 +931,16 @@ async function incidentDetail(main, id) {
       cause: () => grid([cause], [impactCard, related]),
       act: () => h("div", { class: "ix-col" }, wait || h("div", { class: "card muted" }, "Không có việc nào đang chờ."), ran),
     };
-    const assemble = () => {
+    const assemble = (switched) => {
       const bar = h("div", { class: "subtabs ix-tabbar", role: "tablist", "aria-label": "Phần của sự cố" }, tabs.map(([k, label]) =>
         h("button", { type: "button", role: "tab", class: "subtab" + (k === itab ? " active" : ""), "aria-selected": String(k === itab),
-          onclick: () => { if (k !== itab) { itab = k; setSub2(k); assemble(); } } }, label)));
+          onclick: () => { if (k !== itab) { itab = k; setSub2(k); assemble(true); } } }, label)));
       const pointer = waitN > 0 && itab !== "act" && h("button", { type: "button", class: "ix-waitbar",
-        onclick: () => { itab = "act"; setSub2("act"); assemble(); } }, `${waitN} việc đang chờ người xử lý · Xem`);
+        onclick: () => { itab = "act"; setSub2("act"); assemble(true); } }, `${waitN} việc đang chờ người xử lý · Xem`);
       setKids(box);
-      appendKids(box, [head, exported, recap, pointer, bar, bodies[itab]()]);
+      const body = bodies[itab]();
+      if (switched) body.classList.add("tab-in");
+      appendKids(box, [head, exported, recap, pointer, bar, body]);
     };
     assemble();
     if (!menuOpen && d.status === "open" && (busyNow || ["new", "awaiting_approval", "verifying"].includes(d.stage))) refreshLater(8000, token, load);

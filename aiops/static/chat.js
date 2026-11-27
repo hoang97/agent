@@ -501,8 +501,8 @@ function chatView(main) {
   });
   sendBtn.addEventListener("click", () => { if (activeRun && !input.value.trim()) stop(); else submit(); });
 
-  function userBubble(text) {
-    return h("div", { class: "msg user" }, h("div", { class: "bubble" }, text));
+  function userBubble(text, fresh) {
+    return h("div", { class: "msg user" + (fresh ? " fresh" : "") }, h("div", { class: "bubble" }, text));
   }
 
   function continuationNote() {
@@ -746,7 +746,7 @@ function chatView(main) {
       if (continueEpisode) blocks.get(continueEpisode)?.querySelector(".resume")?.remove();
       addKids(thread, continuationNote());
     }
-    else { lastTask = text; addKids(thread, userBubble(text)); }
+    else { lastTask = text; addKids(thread, userBubble(text, true)); }
     // Lượt đang chạy dựng dần theo sự kiện: chữ mới nối vào đoạn cuối, mỗi lệnh thành một dòng ở đúng chỗ; dòng trạng thái ở cuối đếm thời gian.
     const flow = h("div", { class: "flow" });
     const status = h("div", { class: "live-status small muted", role: "status" });
@@ -758,7 +758,7 @@ function chatView(main) {
     let cur = null;  // đoạn chữ đang được viết
     const waiting = [];  // bong bóng tin gửi thêm chưa được agent đọc
     const queuedBubble = (text, read) => {
-      const el = h("div", { class: "msg user queued" }, h("div", { class: "bubble" }, text), !read && h("div", { class: "small muted queued-note" }, "chờ agent đọc…"));
+      const el = h("div", { class: "msg user queued fresh" }, h("div", { class: "bubble" }, text), !read && h("div", { class: "small muted queued-note" }, "chờ agent đọc…"));
       if (!read) waiting.push({ text, el });
       addKids(flow, el);
       cur = null;

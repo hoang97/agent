@@ -275,7 +275,7 @@ Schema ở `aiops/db.py`; migration chạy lúc khởi động, phải chạy l�
 `aiops/static`: `index.html`, `app.js` (khung trang, các màn), `chat.js` (chat, thẻ duyệt), `style.css`. JS thuần, không bước build.
 
 Bố cục gồm dải điều hướng bên trái (mở rộng được), chat luôn có mặt, và khung làm việc bên phải cho màn đang mở (sự cố, tri thức, công cụ…).
-Khi chỉ có chat, chat chiếm cả màn hình. Mở một màn thì chat thu thành cột trái (mặc định 400px). Cột này thu gọn được, kéo thanh ngăn để đổi độ rộng (`--chat-w`). Dưới 1000px chat và khung làm việc thay nhau hiện.
+Khi chỉ có chat, chat chiếm cả màn hình. Mở một màn thì chat thu thành cột trái (mặc định 400px). Cột này thu gọn được, kéo thanh ngăn để đổi độ rộng (`--chat-w`). Dưới 1000px chat và khung làm việc thay nhau hiện. Đổi bố cục đi qua `morph()` (View Transitions, bỏ qua khi giảm chuyển động hoặc ≤760px). Cập nhật DOM nằm trong callback nên chạy sau một khung hình, còn `state` đổi ngay.
 `render()` chỉ dựng lại phần thay đổi: đổi màn dựng lại khung làm việc, đổi hội thoại dựng lại chat. Nhờ vậy lượt đang stream không mất khi xem màn khác.
 `renderShell()` của các màn chỉ tải lại khung làm việc, `buildShell()` dựng lại cả trang.
 URL: `#/t/<tenant>/chat[/<hội thoại>]`, hoặc `#/t/<tenant>/<màn>[/<sub>[/<sub2>]][?c=<hội thoại>]`.
