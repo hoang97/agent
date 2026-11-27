@@ -206,6 +206,45 @@ function pageContext() {
   return { view: state.tab, id: [state.sub, state.sub2].filter(Boolean).join("/") || null, label: state.pageLabel ? state.pageLabel.slice(0, 200) : null };
 }
 
+// Thanh ngăn giữa chat và khung làm việc: kéo, phím mũi tên, nhấp đúp để về mặc định. CSS còn kẹp lại khi cửa sổ thu nhỏ.
+const CHAT_W = { def: 400, min: 300, workMin: 420 };
+function splitter() {
+  const el = h("div", { class: "splitter", role: "separator", "aria-orientation": "vertical", "aria-label": "Kéo để đổi độ rộng chat", tabindex: "0", title: "Kéo để đổi độ rộng chat, nhấp đúp để về mặc định" });
+  const max = () => shell.layout.getBoundingClientRect().width - shell.sidebar.getBoundingClientRect().width - CHAT_W.workMin;
+  const set = (w, save) => {
+    w = Math.round(Math.max(CHAT_W.min, Math.min(w, max())));
+    shell.layout.style.setProperty("--chat-w", w + "px");
+    el.setAttribute("aria-valuenow", String(w));
+    if (save) store.set("chatWidth", w === CHAT_W.def ? null : w);
+  };
+  const width = () => shell.layout.querySelector(".chatpane").getBoundingClientRect().width;
+  el.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    el.setPointerCapture(e.pointerId);
+    const left = shell.layout.querySelector(".chatpane").getBoundingClientRect().left;
+    shell.layout.classList.add("resizing");
+    const move = (ev) => set(ev.clientX - left);
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      shell.layout.classList.remove("resizing");
+      set(width(), true);
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up, { once: true });
+    el.addEventListener("pointercancel", up, { once: true });
+  });
+  el.addEventListener("keydown", (e) => {
+    const step = e.shiftKey ? 80 : 20;
+    if (e.key === "ArrowLeft") set(width() - step, true);
+    else if (e.key === "ArrowRight") set(width() + step, true);
+    else return;
+    e.preventDefault();
+  });
+  el.addEventListener("dblclick", () => set(CHAT_W.def, true));
+  return el;
+}
+
 function closeSidebar() { shell.layout?.classList.remove("side-open"); }
 // Có màn đang mở hoặc màn hình hẹp: thanh bên mở đè lên, không đẩy khung. Chỉ có chat: thu gọn hay mở rộng tại chỗ, nhớ lựa chọn.
 function toggleSidebar() {
@@ -381,7 +420,9 @@ function buildShell() {
       shell.pageTitle, h("span", { class: "spacer" }), iconButton("x", "Đóng, chỉ giữ chat", closePage)),
     shell.pageMain);
   shell.sidebar = sidebar;
-  shell.layout = h("div", { class: "layout" }, h("div", { class: "scrim", onclick: closeSidebar }), sidebar, chatPane, workPane);
+  shell.layout = h("div", { class: "layout" }, h("div", { class: "scrim", onclick: closeSidebar }), sidebar, chatPane, splitter(), workPane);
+  const savedW = store.get("chatWidth", null);
+  if (savedW) shell.layout.style.setProperty("--chat-w", savedW + "px");
   setKids(root, shell.layout);
   shell.conv = shell.page = undefined;
   mountChat();

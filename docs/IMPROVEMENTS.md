@@ -560,6 +560,8 @@ Tham khảo web app của AWS DevOps Agent. Nguyên tắc: người dùng không
 
 - **Khung trang:** thanh bên thu thành dải biểu tượng, nhớ lựa chọn. Mục chính (Sự cố, Duyệt lệnh, Tri thức, Công cụ) lên đầu,
   quản trị gom phía dưới. Mở một màn thì chat thu thành cột trái, màn đó mở ở khung bên phải với nút ✕. Thanh bên khi đó mở đè lên, không xô khung.
+- **Kéo đổi độ rộng chat:** kéo thanh ngăn giữa chat và khung phải (300px tới khi khung phải còn 420px), hoặc dùng phím ←/→ khi thanh ngăn
+  đang được chọn (Shift để bước lớn). Nhấp đúp để về 400px. Độ rộng được nhớ theo người dùng và tenant.
 - **Liền mạch:** đổi màn không dựng lại chat, nên lượt đang chạy, thẻ duyệt và chữ đang gõ vẫn còn. "Mở hội thoại điều tra" đổi hội thoại ở cột chat
   và giữ nguyên trang sự cố. Mở một màn không tự đổi hội thoại.
 - **Chat biết màn đang mở:** mỗi lượt gửi kèm màn đang xem, server thêm một dòng vào `<context>` của lượt.
